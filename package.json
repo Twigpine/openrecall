@@ -1,6 +1,6 @@
 {
   "name": "@gitlawb/memlawb",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Open-source, self-hostable, zero-knowledge agent memory — server, client, CLI, and MCP in one package",
   "type": "module",
   "license": "MIT",

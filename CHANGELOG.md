@@ -5,6 +5,15 @@ automatically by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/) — edit commit
 messages, not this file.
 
+## [0.1.1](https://github.com/Gitlawb/memlawb/compare/v0.1.0...v0.1.1) (2026-06-27)
+
+
+### Bug Fixes
+
+* **namespace:** hash namespace into slug to stop cross-tenant collisions ([0c9f82d](https://github.com/Gitlawb/memlawb/commit/0c9f82d022dace631bd8582ca3508adfab6809a8))
+* **namespace:** hash namespace into slug to stop cross-tenant collisions ([07d2a96](https://github.com/Gitlawb/memlawb/commit/07d2a96f575f4993972710eaaca0409e324bd255))
+* **review:** correct injective→collision-resistant wording; pin slug algorithm and hex format in tests ([29f0376](https://github.com/Gitlawb/memlawb/commit/29f0376d544decde27971f84d250fffb1a5d4396))
+
 ## 0.1.0 (2026-06-25)
 
 Initial release — open-source, self-hostable, zero-knowledge agent memory.
