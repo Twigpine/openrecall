@@ -186,6 +186,152 @@ export function makeStubClient(entries: Record<string, string> = {}) {
   }
 }
 
+/**
+ * Recall's per-hit and aggregate bounds. These run against the stub for the same
+ * reason memory_get's cap case does: the payloads are far past the quota gates
+ * tests/setup.ts pins, so the real-server harness rejects them before the
+ * formatter under test runs.
+ */
+describe('recall region bounds against the in-memory client stub', () => {
+  // A body with no blank line, no heading and no fence: nothing to cut on, so
+  // the only thing standing between a crafted entry and the context window is
+  // the per-hit budget. 250KB is maxEntryBytes, i.e. the largest single entry
+  // the server accepts.
+  const STRUCTURELESS = 'The rollout deployment note. '.repeat(8621).slice(0, 250_000)
+
+  test('a structureless entry at the 250KB cap is truncated to the per-hit budget', async () => {
+    const stub = makeStubClient({ 'blob.md': STRUCTURELESS })
+    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const r = await t.recall('rollout deployment')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('blob.md')
+    // Length, not content: an assertion on words alone passes on the whole body.
+    expect(r.text.length).toBeLessThan(900)
+    expect(r.text.length).toBeLessThan(STRUCTURELESS.length / 100)
+  })
+
+  test('a long multi-section entry returns the matching section, not the whole body', async () => {
+    const body = [
+      '---',
+      'name: runbook',
+      'description: how the service is operated',
+      '---',
+      '# Runbook',
+      '',
+      '## Backups',
+      'Snapshots land in the cold bucket every night and expire after 30 days. '.repeat(8),
+      '',
+      '## Certificate renewal',
+      'The wildcard certificate is renewed by the acme sidecar eight days before expiry.',
+      '',
+      '## Paging',
+      'The on-call rota is generated monthly from the roster spreadsheet. '.repeat(8),
+    ].join('\n')
+    const stub = makeStubClient({ 'ops/runbook.md': body })
+    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const r = await t.recall('certificate renewal acme sidecar')
+
+    expect(r.text).toContain('ops/runbook.md')
+    expect(r.text).toContain('acme sidecar')
+    expect(r.text).toContain('memory_get')
+    // Bounded, and the unrelated sections are gone.
+    expect(r.text.length).toBeLessThan(900)
+    expect(r.text).not.toContain('cold bucket')
+    expect(r.text).not.toContain('roster spreadsheet')
+    // Frontmatter is never a region.
+    expect(r.text).not.toContain('description:')
+    expect(r.text).not.toContain('name: runbook')
+  })
+
+  test('an oversized paragraph falls back to its heading section, still under the per-hit cap', async () => {
+    const body = [
+      '# Incident log',
+      '',
+      '## Queue drain',
+      `The queue drain stalled on shard seven. ${'Then a great deal of narrative that keeps going. '.repeat(80)}`,
+      '',
+      '## Unrelated',
+      'Nothing here matches.',
+    ].join('\n')
+    const stub = makeStubClient({ 'ops/incident.md': body })
+    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const r = await t.recall('queue drain shard seven')
+
+    expect(r.text).toContain('## Queue drain')
+    expect(r.text).toContain('shard seven')
+    expect(r.text).toContain('…')
+    expect(r.text.length).toBeLessThan(900)
+    expect(r.text).not.toContain('## Unrelated')
+  })
+
+  test('a fenced block that fits comes back whole', async () => {
+    const body = [
+      '## Rotation command',
+      '',
+      'Run this to rotate the signing key.',
+      '',
+      '```sh',
+      'memlawb rotate --namespace user:me',
+      '',
+      'memlawb verify --namespace user:me',
+      '```',
+    ].join('\n')
+    const stub = makeStubClient({ 'ops/rotate.md': body })
+    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const r = await t.recall('memlawb rotate verify command')
+
+    expect(r.text).toContain('```sh')
+    expect(r.text).toContain('memlawb verify --namespace user:me')
+    // The blank line inside the fence did not split it: both markers are there.
+    expect(r.text.split('```').length - 1).toBe(2)
+  })
+
+  test('a fence too large for the budget is elided with a marker, never half-included', async () => {
+    const body = [
+      '## Migration transcript',
+      '',
+      'The shard rebalance transcript is kept verbatim.',
+      '',
+      '```text',
+      ...Array.from(
+        { length: 60 },
+        (_, i) => `rebalance shard ${i} moved 4096 keys in 12ms with no error`,
+      ),
+      '```',
+    ].join('\n')
+    const stub = makeStubClient({ 'ops/transcript.md': body })
+    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const r = await t.recall('rebalance shard moved keys')
+
+    expect(r.text).toContain('code block elided')
+    expect(r.text).toContain('memory_get')
+    // Neither the fence markers nor any line from inside it leaked.
+    expect(r.text).not.toContain('```')
+    expect(r.text).not.toContain('rebalance shard 0 moved')
+    expect(r.text.length).toBeLessThan(900)
+  })
+
+  test('a limit-20 query over many long entries stays under the aggregate budget', async () => {
+    const entries: Record<string, string> = {}
+    for (let i = 0; i < 20; i++) {
+      entries[`notes/rollout-${i}.md`] = [
+        `# Rollout note ${i}`,
+        '',
+        'The rollout deployment sequence drains the queue first. '.repeat(40),
+        '',
+        `## Detail ${i}`,
+        'Padding that shares no query term at all, repeated to make the entry long. '.repeat(40),
+      ].join('\n')
+    }
+    const stub = makeStubClient(entries)
+    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const r = await t.recall('rollout deployment sequence', undefined, 20)
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('notes/rollout-0.md')
+    expect(r.text.length).toBeLessThan(6000)
+  })
+})
+
 describe('memory_get against the in-memory client stub', () => {
   const BIG = 'x'.repeat(250_000)
 

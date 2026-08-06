@@ -346,6 +346,29 @@ describe('index exclusion at the recall surface', () => {
   })
 })
 
+describe('recall returns a region, not a body', () => {
+  // The must-pass shape for U6 against the real fixture corpus: a one-line fact
+  // comes back as the matching region, with the entry key intact and the
+  // frontmatter (which the ranker reads but the caller never asked for) gone.
+  test('a one-line fact comes back as its region, key kept and frontmatter dropped', async () => {
+    const tools = makeTools(stubClient(CORPUS), NS)
+    const r = await tools.recall('deployment process')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('### project/deploy.md')
+    expect(r.text).toContain('Ashfield cluster')
+    expect(r.text).not.toContain('description: how we deploy')
+    expect(r.text).not.toContain('name: deploy')
+  })
+
+  // Aggregate bound at the surface, over the fixture corpus rather than a
+  // synthetic one: 20 hits of real entries still fit the recall budget.
+  test('a broad limit-20 recall over the corpus stays bounded', async () => {
+    const tools = makeTools(stubClient(CORPUS), NS)
+    const r = await tools.recall('commit style tone planning review', undefined, 20)
+    expect(r.text.length).toBeLessThan(6000)
+  })
+})
+
 describe('search output (pinned baseline)', () => {
   // Exact output, not toContain. U6 changes what recall returns and must leave
   // search byte-identical; a loose assertion would let a shared formatting
