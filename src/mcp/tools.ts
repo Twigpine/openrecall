@@ -11,7 +11,7 @@
 
 import type { OpenRecallClient } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
-import { rankMemories, stemTerm } from './relevance.ts'
+import { rankMemoriesDetailed, stemTerm } from './relevance.ts'
 
 export type ToolResult = { text: string; isError?: boolean }
 
@@ -217,8 +217,28 @@ export function makeTools(client: OpenRecallClient, defaultNamespace: string) {
       try {
         const { entries } = await client.pull(ns)
         if (Object.keys(entries).length === 0) return ok(`(no memory stored in ${ns} yet)`)
-        const ranked = rankMemories(query, entries, limit)
-        if (ranked.length === 0) return ok(`(nothing in ${ns} looks relevant to "${query}")`)
+        const {
+          results: ranked,
+          searched,
+          belowFloor,
+        } = rankMemoriesDetailed(query, entries, limit)
+        if (ranked.length === 0) {
+          // A bare miss is read as "this fact was never recorded", and the agent
+          // then saves it again under a second key that phase 1 has no way to
+          // reconcile with the first. So the miss says what was searched and
+          // names the next move. Per KTD-B the below-floor entries stay
+          // withheld: the count is a number and nothing more, because an entry
+          // the ranker judged irrelevant is not made relevant by summarizing it
+          // here, and leaking its key or text would spend the caller's context
+          // on exactly what the floor exists to keep out.
+          return ok(
+            `(nothing in ${ns} looks relevant to "${query}". ` +
+              `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
+              `${belowFloor} below the relevance floor and withheld. ` +
+              'Call memory_list before concluding the fact is unrecorded; ' +
+              'it may be stored under wording this query did not match.)',
+          )
+        }
         // Regions, not bodies, and the aggregate budget is spent in rank order:
         // the strongest hit gets its full per-hit allowance and whatever is left
         // bounds the rest. Hits the budget cannot reach are reported by count

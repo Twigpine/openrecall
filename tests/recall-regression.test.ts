@@ -332,7 +332,13 @@ describe('index exclusion at the recall surface', () => {
     const tools = makeTools(stubClient({ 'MEMORY.md': CORPUS['MEMORY.md'] }), NS)
     const r = await tools.recall('roadmap onboarding escalation')
     expect(r.isError).toBeUndefined()
-    expect(r.text).toBe(`(nothing in ${NS} looks relevant to "roadmap onboarding escalation")`)
+    // The index is not a candidate, so nothing was searched: 0, not 1.
+    expect(r.text).toBe(
+      `(nothing in ${NS} looks relevant to "roadmap onboarding escalation". ` +
+        '0 entries searched, 0 below the relevance floor and withheld. ' +
+        'Call memory_list before concluding the fact is unrecorded; ' +
+        'it may be stored under wording this query did not match.)',
+    )
     // Distinct from the empty-namespace message, which this is not.
     expect(r.text).not.toContain('no memory stored')
   })

@@ -353,3 +353,80 @@ describe('memory_get against the in-memory client stub', () => {
     expect(r.text).toContain('upstream exploded')
   })
 })
+
+/**
+ * No-match recall has to do more than say "nothing matched". An agent that
+ * reads a bare miss concludes the fact was never recorded and saves it again
+ * under a second key, and phase 1 has no supersession to reconcile the pair.
+ * So the miss reports what was searched and points at memory_list.
+ *
+ * The counts come from the ranker (rankMemoriesDetailed), never from a recount
+ * here, and per KTD-B the below-floor entries themselves are withheld: absent,
+ * not summarized.
+ */
+describe('recall no-match recovery', () => {
+  // Distinctive keys and bodies, so a leak of either is unmistakable in the
+  // output. Nothing here shares a term with the misses queried below.
+  const BELOW_FLOOR = {
+    'zephyr/quokka-ledger.md': 'Marmalade sundial fixtures balance the quokka ledger.',
+    'zephyr/basalt-tureen.md': 'The basalt tureen holds gossamer widgets.',
+    'zephyr/lorikeet-pylon.md': 'Cinnabar lorikeet pylons need annual varnish.',
+  }
+  const toolsOver = (entries: Record<string, string>) =>
+    makeTools(makeStubClient(entries) as unknown as MemlawbClient, 'user:me')
+
+  test('a below-floor query reports the count searched and the memory_list recovery', async () => {
+    const r = await toolsOver(BELOW_FLOOR).recall('xylophone submarine treaty')
+    expect(r.isError).toBeUndefined()
+    expect(r.text.trim().length).toBeGreaterThan(0)
+    expect(r.text).toContain('user:me')
+    expect(r.text).toContain('xylophone submarine treaty')
+    expect(r.text).toContain('3 entries searched')
+    expect(r.text).toContain('3 below the relevance floor')
+    expect(r.text).toContain('memory_list')
+    expect(r.text).toMatch(/unrecorded/)
+  })
+
+  test('KTD-B: no below-floor key or content fragment appears in the miss', async () => {
+    const r = await toolsOver(BELOW_FLOOR).recall('xylophone submarine treaty')
+    for (const [key, body] of Object.entries(BELOW_FLOOR)) {
+      expect(r.text).not.toContain(key)
+      for (const word of ['Marmalade', 'quokka', 'basalt', 'gossamer', 'Cinnabar', 'lorikeet'])
+        expect(r.text.toLowerCase()).not.toContain(word.toLowerCase())
+      // The bare filename, not just the full key, must be absent too.
+      expect(r.text).not.toContain(key.split('/')[1])
+      expect(r.text).not.toContain(body.slice(0, 20))
+    }
+  })
+
+  test('the counts are the ranker s, not a recount of the entry map', async () => {
+    // MEMORY.md is not a ranking candidate (U4), so a recount over the entry
+    // map would say 4 searched. And a stoplist-only query never scores anyone,
+    // so belowFloor is 0 while searched is 3; a belowFloor recomputed as
+    // "everything that was not returned" would say 3.
+    const withIndex = { ...BELOW_FLOOR, 'MEMORY.md': '- zephyr/quokka-ledger.md: the ledger' }
+    const r = await toolsOver(withIndex).recall('the and of it')
+    expect(r.text).toContain('3 entries searched')
+    expect(r.text).toContain('0 below the relevance floor')
+    expect(r.text).not.toContain('MEMORY.md')
+  })
+
+  test('a query that clears the floor gets results with no recovery text', async () => {
+    const r = await toolsOver({
+      'deploy.md': '---\ndescription: where the project ships\n---\nDeploys to Fly region sin.',
+      ...BELOW_FLOOR,
+    }).recall('where do we deploy the project')
+    expect(r.text).toContain('deploy.md')
+    expect(r.text).not.toContain('below the relevance floor')
+    expect(r.text).not.toContain('unrecorded')
+    expect(r.text).not.toContain('memory_list')
+  })
+
+  test('an empty namespace keeps its own message, distinct from a miss', async () => {
+    const empty = await toolsOver({}).recall('xylophone submarine treaty')
+    expect(empty.text).toContain('no memory stored in user:me yet')
+    const miss = await toolsOver(BELOW_FLOOR).recall('xylophone submarine treaty')
+    expect(empty.text).not.toBe(miss.text)
+    expect(empty.text).not.toContain('entries searched')
+  })
+})

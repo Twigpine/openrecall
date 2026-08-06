@@ -28,11 +28,32 @@ told you — recall:
    ("how this user likes PRs", "the deploy setup for this project").
 2. Skim what comes back and let it inform your approach. Don't announce that you
    read memory; just act on it.
-3. If recall returns nothing relevant, proceed normally — and watch for facts
-   worth saving as you go.
+3. If recall returns nothing relevant, do not conclude the fact was never
+   saved. See "When recall finds nothing" below.
 
 `memory_search` is for literal lookups (an exact name, path, or term);
 `memory_recall` is for relevance-ranked "what do I know about X".
+
+### When recall finds nothing
+
+A miss says which namespace was searched, how many entries were considered, and
+how many scored below the relevance floor. Those below-floor entries are
+withheld on purpose: a weak match dressed up as an answer is worse than none.
+The count is there so you can tell "the namespace is empty" from "nothing
+matched your wording", which is a different problem with a different fix.
+
+An empty namespace says so directly (`no memory stored in ... yet`); there is
+nothing to look for, so proceed and save what you learn.
+
+When entries were searched and none cleared the floor:
+
+1. Call `memory_list` to see the keys that exist. The fact may be filed under
+   wording your query never used.
+2. If a key looks plausible, read it with `memory_get`; if you have an exact
+   term, path, or name, try `memory_search` for the literal string.
+3. Only after both come back empty treat the fact as unrecorded and save it.
+   Saving a second copy under a new key leaves two entries that disagree later,
+   and nothing reconciles them for you.
 
 ## Save what's durable
 
@@ -79,6 +100,13 @@ Keep a flat, predictable layout:
 - `MEMORY.md` — a short index: one line per memory with a link and a hook.
 - `user/*.md`, `feedback/*.md`, `project/*.md`, `reference/*.md` — one fact per
   file, named in kebab-case (`feedback/run-tests-before-done.md`).
+
+`memory_recall` never returns `MEMORY.md`. An index is a list of pointers, so it
+matches a bit of every query and answers none of them, and returning it would
+spend a recall slot that a real entry should have had. Keep it anyway: it is the
+table of contents you read deliberately with `memory_get('MEMORY.md')`, or
+alongside `memory_list`, when you are orienting in an unfamiliar namespace or
+following up a recall that found nothing.
 
 In each saved file, prefer a tiny shape:
 
