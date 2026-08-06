@@ -14,10 +14,15 @@
  * anything. See `src/mcp/relevance.ts` for the ranker and
  * `tests/recall-regression.test.ts` for the assertions.
  *
- * Every byte here is invented for this fixture. Nothing is sourced from a real
+ * Every byte here is invented for this fixture. The notes belong to Quillrun, a
+ * made-up print-job routing service, and to Mara Delgado, a made-up engineer on
+ * it; neither exists, and no line describes this project, its authors, or their
+ * actual conventions. Nothing is sourced from a real
  * memory directory, and nothing is loaded at run time: no filesystem access, no
  * environment-supplied corpus path, no network. `tests/recall-regression.test.ts`
- * enforces that mechanically by reading this file's own source.
+ * enforces that mechanically: it scans this file's own source for input hooks and
+ * requires the module to import nothing at all, so the read cannot be moved one
+ * hop away into a helper.
  *
  * Explicit non-guarantee: this is not a relevance benchmark and the numbers it
  * produces are not comparable to anything outside this repo. It measures one
@@ -58,13 +63,16 @@ export const CORPUS: Record<string, string> = {
     '- [escalation](agent/escalation.md)',
   ].join('\n'),
 
+  // The wrong-answer trap for "deployment process": this entry carries "deploy"
+  // but never the query's own token, while the datastore note below carries
+  // "in-process". Without stemming the datastore note wins a deployment question.
   'project/deploy.md': [
     '---',
     'name: deploy',
-    'description: how we deploy memlawb',
+    'description: how we deploy Quillrun',
     '---',
-    'We deploy memlawb to fly.io from the main branch.',
-    'CI must be green first; a red pipeline blocks the rollout.',
+    'We deploy Quillrun to the Ashfield cluster from the release branch.',
+    'The smoke run must be green before a rollout; a red run stops it.',
   ].join('\n'),
 
   'project/postgres-old.md': [
@@ -72,8 +80,8 @@ export const CORPUS: Record<string, string> = {
     'name: postgres-old',
     'description: superseded note about the datastore',
     '---',
-    'Dated 2026-01-04. We are planning to move the manifest into Postgres so two',
-    'instances can share it.',
+    'Dated 2026-01-04. We are planning to move the routing table into Postgres so',
+    'two dispatchers can share it.',
   ].join('\n'),
 
   'project/postgres-new.md': [
@@ -81,25 +89,25 @@ export const CORPUS: Record<string, string> = {
     'name: postgres-new',
     'description: current decision about the datastore',
     '---',
-    'The Postgres migration is parked. Single-instance with an in-process lock is',
-    'correct for now, and we revisit only when a second instance is real.',
+    'The Postgres migration is parked. A single dispatcher with an in-process lock',
+    'is correct for now, and we revisit it when a second dispatcher is real.',
   ].join('\n'),
 
   'user/prefs.md': [
     '---',
     'name: prefs',
-    'description: how the user likes answers formatted',
+    'description: how Mara likes answers formatted',
     '---',
-    'Terse, direct answers. No preamble, no restating the question.',
+    'Mara wants numbers first and narrative after, three sentences at most.',
   ].join('\n'),
 
   'feedback/outward-actions.md': [
     '---',
     'name: outward-actions',
-    'description: when the agent may take outward actions',
+    'description: when a change may leave the team fork',
     '---',
-    'Pushing, opening PRs, and commenting all need explicit approval every time.',
-    'A grant to do the local half is never a grant to publish it.',
+    'Pushing to the shared branch, opening PRs, and mailing shops each want a nod',
+    'from the release captain. A go-ahead to build it is not one to publish it.',
   ].join('\n'),
 
   'feedback/commit-style.md': [
@@ -107,8 +115,8 @@ export const CORPUS: Record<string, string> = {
     'name: commit-style',
     'description: shape of a good commit message',
     '---',
-    'Conventional prefix, imperative subject, sign-off trailer.',
-    'Why: the changelog is generated from the subject lines.',
+    'Ticket id in the subject, then a verb, then the shop area it touches.',
+    'Why: the weekly digest is assembled from subject lines.',
   ].join('\n'),
 
   'feedback/testing.md': [
@@ -116,8 +124,8 @@ export const CORPUS: Record<string, string> = {
     'name: testing',
     'description: how tests are expected to be written',
     '---',
-    'Failing assertion first, implementation second, never both in one step.',
-    'Why: a test authored beside its fix is vacuously green.',
+    'Every routing rule gets a table case with a sample order attached to it.',
+    'Why: a rule with no sample order is untestable once its author forgets it.',
   ].join('\n'),
 
   'feedback/review.md': [
@@ -125,8 +133,8 @@ export const CORPUS: Record<string, string> = {
     'name: review',
     'description: what a review pass is for',
     '---',
-    'A review exists to break the change, not to confirm it.',
-    'Why: a happy-path pass is not evidence of anything.',
+    'Two reviewers on anything that touches money, one on everything else.',
+    'Why: a pricing slip reaches shops faster than we can catch it.',
   ].join('\n'),
 
   'feedback/planning.md': [
@@ -134,8 +142,8 @@ export const CORPUS: Record<string, string> = {
     'name: planning',
     'description: when a written plan is required',
     '---',
-    'Anything larger than a one-line edit gets a plan before any code is typed.',
-    'Why: a plan is cheaper to throw away than a branch.',
+    'Work spanning more than one service gets a one-page brief in the team doc.',
+    'Why: cross-service scope is where our estimates fall apart.',
   ].join('\n'),
 
   'feedback/tone.md': [
@@ -143,8 +151,8 @@ export const CORPUS: Record<string, string> = {
     'name: tone',
     'description: register to use in written output',
     '---',
-    'Plain sentences, no filler adjectives, no dashes.',
-    'Why: machine-sounding prose costs the reader trust.',
+    'Copy that shops read stays plain: no jargon, no exclamation marks.',
+    'Why: a shop owner skims, and jargon reads as evasion.',
   ].join('\n'),
 
   'project/stack.md': [
@@ -152,17 +160,18 @@ export const CORPUS: Record<string, string> = {
     'name: stack',
     'description: runtime and language choices',
     '---',
-    'Bun and TypeScript, zero dependencies beyond the MCP SDK.',
-    'Why: a small surface is auditable by one reader in one sitting.',
+    'Go on the dispatcher side, NATS between sites, and no framework on top.',
+    'Why: a small surface is easy for one on-call engineer to carry.',
   ].join('\n'),
 
   'reference/namespaces.md': [
     '---',
     'name: namespaces',
-    'description: namespace validation and slug rules',
+    'description: namespace validation and naming rules',
     '---',
-    'A namespace is scope plus segments. Traversal, backslash and NUL are rejected.',
-    'Why: the slug becomes a path, so an unvalidated name is a traversal bug.',
+    'A namespace is a region code plus a shop id. Blank segments, spaces and',
+    'control bytes are refused.',
+    'Why: the namespace becomes a routing key, so a bad name misroutes an order.',
   ].join('\n'),
 
   'project/ci.md': [
@@ -170,17 +179,18 @@ export const CORPUS: Record<string, string> = {
     'name: ci',
     'description: what the pipeline runs on every commit',
     '---',
-    'Lint, then type-check, then the full suite. Three gates, all blocking.',
-    'Why: a green badge that skipped a gate is worse than no badge.',
+    'Vet, then unit tests, then a replay of yesterday orders. Three gates, all',
+    'blocking.',
+    'Why: a gate skipped once becomes a gate skipped always.',
   ].join('\n'),
 
   'project/release.md': [
     '---',
     'name: release',
-    'description: how a version reaches the registry',
+    'description: how a version reaches the shops',
     '---',
-    'A release bot cuts the tag from merged commits; nothing is tagged by hand.',
-    'Why: hand-cut tags drift from the changelog.',
+    'A tag is cut from the release branch by the bot; nothing ships by hand.',
+    'Why: hand-cut tags drift from the digest.',
   ].join('\n'),
 
   'project/roadmap.md': [
@@ -188,8 +198,8 @@ export const CORPUS: Record<string, string> = {
     'name: roadmap',
     'description: what is queued after the current milestone',
     '---',
-    'Sharing grants, then multi-writer support, then a hosted control panel.',
-    'Why: sharing unlocks the other two.',
+    'Split billing, then same-day routing, then a self-serve portal for shops.',
+    'Why: billing blocks the other two.',
   ].join('\n'),
 
   'project/onboarding.md': [
@@ -197,25 +207,27 @@ export const CORPUS: Record<string, string> = {
     'name: onboarding',
     'description: first hour for a new contributor',
     '---',
-    'Install, run the suite, read the trust-boundary section, then pick a task.',
-    'Why: the boundary is the only thing a newcomer can break silently.',
+    'Clone, seed the sample shop, watch an order route end to end, then pick up a',
+    'ticket.',
+    'Why: an engineer who has not watched an order route guesses at the domain.',
   ].join('\n'),
 
+  // The one-line fact entry.
   'user/editor.md': [
     '---',
     'name: editor',
-    'description: the tool the user writes in',
+    'description: the tool Mara drafts in',
     '---',
-    'The user edits everything in Helix.',
+    'Mara writes every ticket in Nova.',
   ].join('\n'),
 
   'reference/quotas.md': [
     '---',
     'name: quotas',
-    'description: caps applied per namespace and per owner',
+    'description: caps applied per shop and per region',
     '---',
-    'Entry count, namespace bytes, and owner bytes are all checked together.',
-    'Why: a partial cap check lets one tenant starve another.',
+    'Queued orders, stored artifact bytes, and monthly volume are counted at once.',
+    'Why: a partial check lets one shop starve another.',
   ].join('\n'),
 
   'reference/ratelimit.md': [
@@ -223,17 +235,17 @@ export const CORPUS: Record<string, string> = {
     'name: ratelimit',
     'description: throttling of noisy callers',
     '---',
-    'A token bucket per caller, refilled on a fixed interval.',
-    'Why: a burst from one caller should not degrade the rest.',
+    'A token bucket per storefront, refilled on a fixed interval.',
+    'Why: one storefront in a retry loop should not slow the rest.',
   ].join('\n'),
 
   'reference/storage.md': [
     '---',
     'name: storage',
-    'description: adapters behind the blob interface',
+    'description: adapters behind the artifact interface',
     '---',
-    'A filesystem adapter and an object-store adapter, both opaque-bytes only.',
-    'Why: an adapter that understood the payload would be a boundary leak.',
+    'A local disk adapter and an object-store adapter, both opaque-bytes only.',
+    'Why: an adapter that parsed the payload would tie us to one print pipeline.',
   ].join('\n'),
 
   'reference/errors.md': [
@@ -241,64 +253,65 @@ export const CORPUS: Record<string, string> = {
     'name: errors',
     'description: status codes the API returns',
     '---',
-    'Denials are 403, missing entries 404, malformed bodies 400.',
-    'Why: a denial rendered as an empty success is the worst failure mode.',
+    'Refusals are 403, missing orders 404, malformed bodies 400.',
+    'Why: a shop that sees 200 on a rejected order prints nothing and blames us.',
   ].join('\n'),
 
   'agent/tools.md': [
     '---',
     'name: tools',
-    'description: which tools the agent exposes',
+    'description: which actions the dispatch bot exposes',
     '---',
-    'Save, recall, search, list, delete. Everything else is out of scope.',
-    'Why: a narrow tool list is easier to reason about than a wide one.',
+    'Route, pause, reprint, cancel, and status. Nothing else is in scope.',
+    'Why: a short action list is easier to audit than a wide one.',
   ].join('\n'),
 
   'agent/handoff.md': [
     '---',
     'name: handoff',
-    'description: what a cold agent must be given',
+    'description: what the night shift must be given',
     '---',
-    'Full paths, exact commands, expected output, and where the work starts.',
-    'Why: a cold agent has none of the shared context we do.',
+    'Live incidents, the queue depth, and which sites are paused.',
+    'Why: the remote night shift has none of the context the day shift built up.',
   ].join('\n'),
 
   'agent/escalation.md': [
     '---',
     'name: escalation',
-    'description: when to stop and ask a person',
+    'description: when to stop and page a person',
     '---',
-    'Ambiguity that could invalidate the whole task, and anything irreversible.',
-    'Why: a wrong assumption compounds silently.',
+    'Anything that misroutes a paid order, and anything that cannot be undone.',
+    'Why: a wrong assumption compounds quietly.',
   ].join('\n'),
 
   // Long, multi-section entry. U6 needs an entry whose useful answer is one
   // region rather than the whole body, so this one is deliberately several
-  // hundred characters across several headings.
+  // hundred characters across several headings. It also carries the stray
+  // "open" that wins the pull-request query with a wrong answer.
   'reference/crypto.md': [
     '---',
     'name: crypto',
     'description: envelope format and key derivation',
     '---',
     '## Key derivation',
-    'A key is derived from the passphrase and a salt fixed by the namespace, using',
-    'a memory-hard function. The passphrase itself is held only by the caller and',
-    'is never transmitted anywhere.',
+    'A bundle key is derived from the shop secret and a salt fixed by the region,',
+    'using a memory-hard function. The shop secret stays on the storefront and',
+    'never reaches a production site.',
     '',
     '## Envelope',
     'Each envelope carries a leading version byte, then the nonce, then the sealed',
-    'payload. The version byte exists so a future cipher suite can be introduced',
-    'without orphaning anything already sealed under the current one.',
+    'artifact. The version byte is there so a later cipher suite can be introduced',
+    'without orphaning artifacts already sealed under the current one.',
     '',
     '## Binding',
-    'The entry key is bound into the sealed payload as associated data, so an',
-    'envelope moved to a different key fails to open rather than opening as some',
-    'other entry.',
+    'The order id is bound into the sealed artifact as associated data, so an',
+    'envelope filed under a different order fails to open rather than opening as',
+    'some other job.',
     '',
     '## Determinism',
-    'The nonce is derived from the key, the entry key and the payload, so equal',
-    'payloads seal to equal bytes. That equality is what makes a delta upload',
-    'possible at all; the accepted leak is whether two entries are byte-identical.',
+    'The nonce is derived from the key, the order id and the artifact, so equal',
+    'artifacts seal to equal bytes. That equality is what lets a reprint skip an',
+    'upload; the accepted leak is whether two orders are byte-identical.',
   ].join('\n'),
 }
 
@@ -341,7 +354,7 @@ export const TUNING: TuningPair[] = [
     query: 'am I allowed to open a pull request',
     expect: 'feedback/outward-actions.md',
     closedBy: ['U2'],
-    note: 'returns nothing today: the note says "opening PRs", so no query term matches unstemmed',
+    note: 'wrong answer today: the note says "opening PRs", which matches nothing unstemmed, so a stray "open" in the crypto note wins instead',
   },
   {
     query: 'what do I need to do before I push my work to the remote',
