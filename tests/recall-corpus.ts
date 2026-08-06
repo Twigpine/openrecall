@@ -286,8 +286,9 @@ export const CORPUS: Record<string, string> = {
 
   // Long, multi-section entry. U6 needs an entry whose useful answer is one
   // region rather than the whole body, so this one is deliberately several
-  // hundred characters across several headings. It also carries the stray
-  // "open" that wins the pull-request query with a wrong answer.
+  // hundred characters across several headings. Its only word from the
+  // pull-request query is "opening", which the query's "open" reaches solely
+  // through stemming, so before U2 this entry does not match that query at all.
   'reference/crypto.md': [
     '---',
     'name: crypto',
@@ -305,8 +306,8 @@ export const CORPUS: Record<string, string> = {
     '',
     '## Binding',
     'The order id is bound into the sealed artifact as associated data, so an',
-    'envelope filed under a different order fails to open rather than opening as',
-    'some other job.',
+    'envelope filed under a different order fails to unseal rather than opening',
+    'as some other job.',
     '',
     '## Determinism',
     'The nonce is derived from the key, the order id and the artifact, so equal',
@@ -354,7 +355,7 @@ export const TUNING: TuningPair[] = [
     query: 'am I allowed to open a pull request',
     expect: 'feedback/outward-actions.md',
     closedBy: ['U2'],
-    note: 'wrong answer today: the note says "opening PRs", which matches nothing unstemmed, so a stray "open" in the crypto note wins instead',
+    note: 'returns nothing today: no entry carries the unstemmed query token "open" (the rule says "opening PRs"), so every entry is dropped before scoring',
   },
   {
     query: 'what do I need to do before I push my work to the remote',
@@ -428,49 +429,32 @@ export const STOPWORDS = new Set(
 )
 
 /**
- * Deliberately aggressive suffix stripper, used ONLY to compute the held-out
- * overlap floor, never by the ranker. Over-stemming is the safe direction here:
- * it merges more words, so it can only make the floor stricter.
+ * How a word is normalized when the overlap floor is computed. This module used
+ * to carry its own suffix stripper, which drifted from the ranker's the moment
+ * the ranker grew one: the floor is supposed to measure the terms the ranker
+ * actually sees, so a second implementation makes it measure something else
+ * while still reading as if it did the job. The stemmer is now injected instead,
+ * and the caller passes `stemTerm` from `src/mcp/relevance.ts`. It has to be a
+ * parameter rather than an import because this module must import nothing at
+ * all (see the corpus provenance check); it has no default, so nobody can
+ * quietly reintroduce a local one.
  */
-export function stemTerm(term: string): string {
-  let t = term
-  for (const suffix of ['ements', 'ement', 'ments', 'ment', 'ations', 'ation', 'ings', 'ing']) {
-    if (t.length > suffix.length + 2 && t.endsWith(suffix)) {
-      t = t.slice(0, -suffix.length)
-      break
-    }
-  }
-  if (t.length > 4 && t.endsWith('ies')) t = `${t.slice(0, -3)}y`
-  else
-    for (const suffix of ['ers', 'er', 'ed', 'es', 's']) {
-      if (t.length > suffix.length + 2 && t.endsWith(suffix)) {
-        t = t.slice(0, -suffix.length)
-        break
-      }
-    }
-  // Collapse a doubled final consonant ("formatted" -> "formatt" -> "format")
-  // and a silent final "e" ("move" and "moving" both -> "mov").
-  if (t.length > 3 && t[t.length - 1] === t[t.length - 2] && !'aeiou'.includes(t[t.length - 1])) {
-    t = t.slice(0, -1)
-  }
-  if (t.length > 3 && t.endsWith('e')) t = t.slice(0, -1)
-  return t
-}
+export type StemFn = (term: string) => string
 
 /** Content terms of a string: lowercased, stopword-free, stemmed, de-duplicated. */
-export function contentTerms(s: string): Set<string> {
+export function contentTerms(s: string, stem: StemFn): Set<string> {
   const out = new Set<string>()
   for (const raw of s.toLowerCase().match(/[a-z0-9]+/g) ?? []) {
     if (raw.length < 2 || STOPWORDS.has(raw)) continue
-    out.add(stemTerm(raw))
+    out.add(stem(raw))
   }
   return out
 }
 
 /** Content terms shared between a query and an entry's key plus body. */
-export function sharedTerms(query: string, entryKey: string, body: string): string[] {
-  const entryTerms = contentTerms(`${entryKey} ${body}`)
-  return [...contentTerms(query)].filter(t => entryTerms.has(t))
+export function sharedTerms(query: string, entryKey: string, body: string, stem: StemFn): string[] {
+  const entryTerms = contentTerms(`${entryKey} ${body}`, stem)
+  return [...contentTerms(query, stem)].filter(t => entryTerms.has(t))
 }
 
 const FILLER_TOPICS = [
@@ -506,6 +490,207 @@ export function nearCapCorpus(n: number): Record<string, string> {
   }
   return out
 }
+
+/**
+ * The four words an unguarded suffix stripper was measured mangling: `thing`
+ * became `th`, `king` became `k`, `bring` became `br`, `sing` became `s`. Short
+ * stems are what manufacture false matches, so these are named individually as
+ * well as covered by the whole-vocabulary property below.
+ */
+export const DAMAGE_WORDS = ['thing', 'king', 'bring', 'sing']
+
+/** Roots the damage vocabulary is generated from. Ordinary English, no corpus content. */
+const VOCAB_ROOTS = [
+  'act',
+  'add',
+  'age',
+  'aim',
+  'app',
+  'arm',
+  'ask',
+  'bag',
+  'ban',
+  'bar',
+  'bind',
+  'board',
+  'boss',
+  'box',
+  'bring',
+  'build',
+  'call',
+  'care',
+  'cache',
+  'chain',
+  'change',
+  'class',
+  'clock',
+  'close',
+  'code',
+  'copy',
+  'count',
+  'cover',
+  'craft',
+  'cross',
+  'deploy',
+  'design',
+  'draw',
+  'drive',
+  'drop',
+  'edit',
+  'entry',
+  'fail',
+  'field',
+  'file',
+  'fill',
+  'find',
+  'fix',
+  'flag',
+  'form',
+  'frame',
+  'glass',
+  'grant',
+  'group',
+  'guard',
+  'hand',
+  'hash',
+  'help',
+  'hold',
+  'index',
+  'join',
+  'key',
+  'kind',
+  'king',
+  'lack',
+  'land',
+  'lead',
+  'learn',
+  'level',
+  'limit',
+  'line',
+  'link',
+  'list',
+  'load',
+  'lock',
+  'log',
+  'look',
+  'mail',
+  'make',
+  'map',
+  'mark',
+  'mask',
+  'match',
+  'merge',
+  'mind',
+  'miss',
+  'mount',
+  'move',
+  'name',
+  'note',
+  'open',
+  'order',
+  'pack',
+  'pair',
+  'part',
+  'pass',
+  'patch',
+  'path',
+  'pause',
+  'pick',
+  'place',
+  'plan',
+  'play',
+  'point',
+  'press',
+  'print',
+  'process',
+  'proof',
+  'pull',
+  'push',
+  'query',
+  'queue',
+  'quote',
+  'read',
+  'rest',
+  'ring',
+  'route',
+  'rule',
+  'run',
+  'save',
+  'scan',
+  'seal',
+  'send',
+  'set',
+  'ship',
+  'shop',
+  'show',
+  'sign',
+  'sing',
+  'sort',
+  'split',
+  'stack',
+  'stage',
+  'stamp',
+  'start',
+  'state',
+  'step',
+  'stop',
+  'store',
+  'stress',
+  'swap',
+  'sync',
+  'tag',
+  'talk',
+  'task',
+  'test',
+  'thing',
+  'think',
+  'throw',
+  'time',
+  'trace',
+  'track',
+  'trim',
+  'trust',
+  'turn',
+  'type',
+  'use',
+  'view',
+  'wait',
+  'walk',
+  'watch',
+  'work',
+  'wrap',
+  'write',
+  'yield',
+]
+
+/** Endings the generator glues on. Some products are non-words; that is the point. */
+const VOCAB_SUFFIXES = [
+  '',
+  's',
+  'es',
+  'ed',
+  'er',
+  'ers',
+  'ing',
+  'ings',
+  'ment',
+  'ments',
+  'ation',
+  'ations',
+  'ies',
+  'ly',
+]
+
+/**
+ * Generated vocabulary for the stemmer damage test: every root crossed with
+ * every ending, deduplicated and sorted so the set is deterministic and the
+ * assertions run over roughly two thousand words rather than a handful somebody
+ * remembered to list. Synthetic by construction per the corpus rules: nothing
+ * here is read from a memory directory or derived from CORPUS.
+ */
+export const DAMAGE_VOCAB: string[] = [
+  ...new Set(VOCAB_ROOTS.flatMap(root => VOCAB_SUFFIXES.map(suffix => `${root}${suffix}`))),
+].sort()
 
 /**
  * Baseline latency of the CURRENT ranker over `nearCapCorpus(2000)`, in

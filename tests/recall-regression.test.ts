@@ -28,11 +28,12 @@ import { afterAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { dirname, join, relative, resolve } from 'node:path'
 import { MemlawbClient } from '../client/index.ts'
-import { rankMemories } from '../src/mcp/relevance.ts'
+import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import {
   BASELINE_RANK_MS,
   CORPUS,
+  contentTerms,
   HELD_OUT,
   nearCapCorpus,
   STOPWORDS,
@@ -82,7 +83,7 @@ describe('recall tuning set (current ranker)', () => {
   test('every query literal a test looks up still exists in the tuning set', () => {
     const src = readFileSync(join(REPO_ROOT, 'tests/recall-regression.test.ts'), 'utf8')
     const literals = [...src.matchAll(/keyPairFor\(\s*'([^']*)'/g)].map(m => m[1])
-    // Non-vacuous: the control pair plus the three test.failing markers.
+    // Non-vacuous: the three hard-asserted pairs plus the test.failing marker.
     expect(literals.length).toBeGreaterThanOrEqual(4)
     for (const q of literals) {
       expect(`${q} :: ${TUNING.some(p => p.query === q)}`).toBe(`${q} :: true`)
@@ -100,15 +101,15 @@ describe('recall tuning set (current ranker)', () => {
   // Today "deployment" matches no entry (no stemming) while "process" matches
   // the in-process lock note, so the ranker answers a deployment question with
   // a datastore note. A wrong answer delivered confidently is worse than none.
-  test.failing('closed by {U2}: "deployment process" ranks the deploy note first', () => {
+  test('closed by {U2}: "deployment process" ranks the deploy note first', () => {
     const p = keyPairFor('deployment process')
     expect(rankMemories(p.query, CORPUS)[0]?.key).toBe(p.expect)
   })
 
-  // The note says "opening PRs"; the query says "open a pull request". No shared
-  // token survives the tokenizer, so the entry that answers the question is
-  // dropped entirely before scoring.
-  test.failing('closed by {U2}: "am I allowed to open a pull request" finds the rule', () => {
+  // The rule says "opening PRs"; the query says "open a pull request". Unstemmed
+  // those are different tokens and no entry in the corpus carries "open", so the
+  // query returned nothing at all and the rule that answers it was never seen.
+  test('closed by {U2}: "am I allowed to open a pull request" finds the rule', () => {
     const p = keyPairFor('am I allowed to open a pull request')
     expect(rankMemories(p.query, CORPUS)[0]?.key).toBe(p.expect)
   })
@@ -168,7 +169,7 @@ describe('held-out set (paraphrase probes)', () => {
     for (const p of HELD_OUT) {
       const body = CORPUS[p.expect]
       expect(body).toBeDefined()
-      const shared = sharedTerms(p.query, p.expect, body)
+      const shared = sharedTerms(p.query, p.expect, body, stemTerm)
       expect(`${p.query} :: ${shared.join(',')}`).toBe(
         `${p.query} :: ${shared.slice(0, 1).join(',')}`,
       )
@@ -391,6 +392,34 @@ describe('corpus provenance', () => {
     const ranker = (m as RegExpExecArray)[1].split(' ').filter(Boolean)
     expect(ranker.length).toBeGreaterThan(20)
     expect([...new Set(ranker)].sort()).toEqual([...STOPWORDS].sort())
+  })
+
+  // Same failure mode as the stoplist, one layer worse. The corpus module used
+  // to carry its own suffix stripper for the held-out overlap floor, and once
+  // the ranker grew one they were free to disagree: the corpus stemmer mangled
+  // `boss` to `bos` and `this` to `thi`, exactly the shapes D10's guards exist
+  // to prevent. The floor is only meaningful if it measures the terms the ranker
+  // actually sees, so the duplication is gone rather than checked for equality,
+  // and the ranker's stemmer is injected by the caller. Two guards, because
+  // "we deleted it" is not a property:
+  test('the overlap floor takes the ranker stemmer as a required argument', () => {
+    // A default value would drop the arity to 3 and let a local stemmer back in
+    // silently, which is how the first copy survived unnoticed.
+    expect(`sharedTerms arity:${sharedTerms.length}`).toBe('sharedTerms arity:4')
+    // And it must be the argument that does the work: a body ignoring its stem
+    // parameter would still have arity 4.
+    const shout = (t: string) => `${t}-STEMMED`
+    expect([...contentTerms('routing keys', shout)]).toEqual(['routing-STEMMED', 'keys-STEMMED'])
+  })
+
+  test('the corpus module declares no stemmer of its own', () => {
+    const source = stripComments(readFileSync(join(REPO_ROOT, 'tests/recall-corpus.ts'), 'utf8'))
+    // Matches a declaration, not a mention: `stem` as a parameter or a type
+    // annotation is the supported shape and stays legal here.
+    const declared = [...source.matchAll(/\b(?:function|const|let|var)\s+(\w*[sS]tem\w*)/g)].map(
+      m => m[1],
+    )
+    expect(declared).toEqual([])
   })
 })
 

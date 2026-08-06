@@ -19,8 +19,64 @@ const STOP = new Set(
   ),
 )
 
+/**
+ * Shortest stem this normalizer will ever produce. Four is not a tuning knob:
+ * an unguarded stripper turns `thing` into `th` and `sing` into `s`, and a
+ * two-character stem matches a large share of any corpus, so the ranker starts
+ * answering confidently with notes that share no meaning with the query. When a
+ * rule would cut below this, the rule does not apply.
+ */
+const MIN_STEM = 4
+
+/**
+ * Suffix rules, longest first, as (suffix, replacement). The first rule whose
+ * result is at least MIN_STEM characters wins; if none qualifies, the word is
+ * left alone. `sses` -> `ss` and `ies` -> `y` come first so `processes` keeps
+ * its double s and `queries` meets `query`.
+ */
+const SUFFIX_RULES: [string, string][] = [
+  ['sses', 'ss'],
+  ['ies', 'y'],
+  ['ements', ''],
+  ['ement', ''],
+  ['ments', ''],
+  ['ment', ''],
+  ['ations', ''],
+  ['ation', ''],
+  ['ings', ''],
+  ['ing', ''],
+  ['ers', ''],
+  ['er', ''],
+  ['ed', ''],
+  ['s', ''],
+]
+
+/**
+ * Collapse a word to a crude stem so query and note match across word forms
+ * ("deployment" finds a note that says "deploy"). Hand-written rather than a
+ * Porter implementation because the package carries no runtime dependencies and
+ * because the guards, not the coverage, are what matter here: a stemmer that
+ * over-merges invents matches, and a wrong recall answer delivered confidently
+ * is worse than none. Exported so tests can measure it directly, and so the
+ * held-out overlap floor is computed over the same terms the ranker sees.
+ */
+export function stemTerm(term: string): string {
+  if (term.length <= MIN_STEM) return term
+  for (const [suffix, replacement] of SUFFIX_RULES) {
+    if (!term.endsWith(suffix)) continue
+    // Never strip a trailing s that is preceded by one: `process`, `class` and
+    // `address` are not plurals, and shortening them merges unrelated words.
+    if (suffix === 's' && term.endsWith('ss')) continue
+    const stem = term.slice(0, -suffix.length) + replacement
+    if (stem.length >= MIN_STEM) return stem
+  }
+  return term
+}
+
 function tokenize(s: string): string[] {
-  return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(t => t.length > 1 && !STOP.has(t))
+  return (s.toLowerCase().match(/[a-z0-9]+/g) ?? [])
+    .filter(t => t.length > 1 && !STOP.has(t))
+    .map(stemTerm)
 }
 
 /** Pull the `description:` value out of YAML-ish frontmatter, if present. */
