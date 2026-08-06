@@ -10,7 +10,9 @@ import {
   CORPUS,
   DAMAGE_VOCAB,
   DAMAGE_WORDS,
+  HELD_OUT,
   nearCapCorpus,
+  TUNING,
 } from './recall-corpus.ts'
 
 const entries = {
@@ -139,7 +141,11 @@ describe('the relevance floor', () => {
 describe('rankMemoriesDetailed', () => {
   // The counts exist for the no-match message U7 builds, and an unread count is
   // an unchecked one, so they are pinned here rather than at their consumer.
-  const all = Object.keys(CORPUS).length
+  //
+  // One fewer than the corpus: the namespace-root `MEMORY.md` never enters
+  // ranking input, so it is not among the entries searched either. Reporting it
+  // as searched would be the same defect as ranking it, one layer along.
+  const all = Object.keys(CORPUS).length - 1
 
   test('reports what was searched and what the floor withheld', () => {
     const d = rankMemoriesDetailed('namespace validation rules', CORPUS, 5)
@@ -161,6 +167,133 @@ describe('rankMemoriesDetailed', () => {
   test('rankMemories returns exactly the detailed results', () => {
     for (const q of ['namespace validation rules', 'deployment process', 'nothing at all here']) {
       expect(rankMemories(q, CORPUS, 3)).toEqual(rankMemoriesDetailed(q, CORPUS, 3).results)
+    }
+  })
+})
+
+/**
+ * The namespace-root index is not a memory. Guidance tells agents to keep a
+ * `MEMORY.md` table of contents, so it names every other entry and repeats the
+ * whole namespace's vocabulary; ranked alongside real notes it wins broad
+ * queries outright and returns a list of links where the answer was wanted. It
+ * is skipped as ranking INPUT rather than filtered out of the results, because
+ * a post-filter leaves it in the corpus statistics: it would still push the
+ * searched count up by one and, worse, still add itself to the document
+ * frequency of every term it lists, making the term look one entry more common
+ * than it is and quietly downweighting the note that actually answers.
+ */
+describe('the namespace-root index is excluded from ranking', () => {
+  // Every content term of this query appears in MEMORY.md's link list. Before
+  // the exclusion the index took rank 1 at 21.09 with the note that actually
+  // answers at 9.24 behind it.
+  const INDEX_QUERY = 'commit style tone planning review'
+
+  test('a query whose terms all appear in the index does not return it', () => {
+    const ranked = rankMemories(INDEX_QUERY, CORPUS, Object.keys(CORPUS).length)
+    // Assert on the whole key list, at every rank: R5 is absolute, so "not
+    // first" is not the property. A failure names where it leaked in.
+    expect(ranked.map(r => r.key)).not.toContain('MEMORY.md')
+    expect(ranked[0]?.key).toBe('feedback/commit-style.md')
+  })
+
+  test('the index appears at no rank for any tuning or held-out query', () => {
+    const queries = [...TUNING.map(t => t.query), ...HELD_OUT.map(h => h.query)]
+    expect(queries.length).toBeGreaterThanOrEqual(19)
+    const leaks = queries.filter(q =>
+      rankMemories(q, CORPUS, Object.keys(CORPUS).length).some(r => r.key === 'MEMORY.md'),
+    )
+    expect(leaks).toEqual([])
+  })
+
+  // The must-not inverse. Only the namespace-root index is the guidance-named
+  // table of contents; `project/MEMORY.md` is a note somebody wrote, and a
+  // suffix or basename match would silently swallow it.
+  const NESTED = {
+    'MEMORY.md': '# index\n- [project](project/MEMORY.md)',
+    'project/MEMORY.md': [
+      '---',
+      'name: project index',
+      'description: lantern maintenance schedule',
+      '---',
+      'The lantern on the west site is serviced every second Tuesday.',
+    ].join('\n'),
+    'other.md': 'Unrelated notes about the weather.',
+  }
+
+  test('a nested MEMORY.md is an ordinary entry and still ranks', () => {
+    const ranked = rankMemories('lantern maintenance', NESTED, 10)
+    expect(ranked.map(r => r.key)).toEqual(['project/MEMORY.md'])
+  })
+
+  test('only the root index is dropped from the searched count', () => {
+    expect(rankMemoriesDetailed('lantern maintenance', NESTED, 10).searched).toBe(2)
+  })
+
+  // Degenerate namespace: the index is all there is. The ranker must return an
+  // empty ranking rather than throw on an empty candidate set, and its counts
+  // must stay coherent (nothing searched, nothing withheld).
+  test('a namespace whose only entry is the index ranks nothing and does not throw', () => {
+    const onlyIndex = { 'MEMORY.md': '# index\n- [deploy](project/deploy.md)' }
+    expect(rankMemories('deploy', onlyIndex, 5)).toEqual([])
+    const d = rankMemoriesDetailed('deploy', onlyIndex, 5)
+    expect(`${d.results.length}/${d.searched}/${d.belowFloor}`).toBe('0/0/0')
+  })
+
+  /**
+   * The interaction case with U3's rarity weighting, and the reason this unit
+   * was sequenced after it. `lantern` is carried by one real note; the index
+   * lists it too, so counting the index makes the term look twice as common as
+   * it is. `beacon` is genuinely in two notes. With the index in the
+   * denominator the two terms are equally rare and the note that answers loses
+   * the key sort to the one that does not; excluded, `lantern` is correctly the
+   * rarer term and its note wins outright.
+   */
+  const withIndex: Record<string, string> = {
+    'MEMORY.md': ['# index', '- [lantern](note-z.md)', '- [lantern log](note-z.md)'].join('\n'),
+    'note-a.md': 'The beacon is checked nightly.',
+    'note-z.md': 'The lantern is checked nightly.',
+    'filler-0.md': 'The beacon on the far ridge was replaced.',
+  }
+  for (let i = 1; i < 7; i++) withIndex[`filler-${i}.md`] = 'Unrelated notes about the weather.'
+
+  /** Same corpus with the index removed outright: what the exclusion must equal. */
+  const withoutIndex = Object.fromEntries(
+    Object.entries(withIndex).filter(([k]) => k !== 'MEMORY.md'),
+  )
+  /** Same corpus with the index under an ordinary key: what it must NOT equal. */
+  const indexCounted = Object.fromEntries(
+    Object.entries(withIndex).map(([k, v]) => [k === 'MEMORY.md' ? 'notes/toc.md' : k, v]),
+  )
+
+  test('a term is rare when only the index made it look common', () => {
+    const excluded = rankMemories('lantern beacon', withIndex, 10)
+    const counted = rankMemories('lantern beacon', indexCounted, 10)
+    const at = (r: typeof excluded, key: string) => r.find(x => x.key === key)
+    // The ordering flip, which is the observable form of the denominator
+    // change: with the index counted the two notes score identically and
+    // `localeCompare` puts the wrong one first; the index itself, being an
+    // ordinary key here, beats them both.
+    expect(excluded[0]?.key).toBe('note-z.md')
+    expect(counted[0]?.key).toBe('notes/toc.md')
+    expect(counted.map(r => r.key).indexOf('note-a.md')).toBeLessThan(
+      counted.map(r => r.key).indexOf('note-z.md'),
+    )
+    expect(at(counted, 'note-z.md')?.score).toBeCloseTo(at(counted, 'note-a.md')?.score ?? 0, 10)
+    // And the note that answers scores strictly higher once the term stops
+    // being double-counted.
+    expect(at(excluded, 'note-z.md')?.score).toBeGreaterThan(at(counted, 'note-z.md')?.score ?? 0)
+  })
+
+  test('ranking with the index present equals ranking with it deleted', () => {
+    // The whole property in one line: the index contributes to neither the
+    // document frequency of the terms it lists nor the entry count they are
+    // weighed against, so its presence cannot change a single score.
+    for (const q of ['lantern beacon', 'lantern', 'beacon']) {
+      const a = rankMemories(q, withIndex, 10).map(r => `${r.key}:${r.score.toFixed(6)}`)
+      const b = rankMemories(q, withoutIndex, 10).map(r => `${r.key}:${r.score.toFixed(6)}`)
+      expect(`${q} :: ${a.join(' | ')}`).toBe(`${q} :: ${b.join(' | ')}`)
+      // Non-vacuous: a ranker that returned nothing would satisfy the equality.
+      expect(a.length).toBeGreaterThan(0)
     }
   })
 })

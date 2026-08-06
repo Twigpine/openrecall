@@ -19,6 +19,29 @@
 export type ScoredEntry = { key: string; score: number; content: string }
 
 /**
+ * The namespace-root index, skipped as ranking input.
+ *
+ * The memory guidance tells agents to keep a `MEMORY.md` table of contents, so
+ * it names every other entry and carries the whole namespace's vocabulary
+ * without answering anything. Ranked alongside real notes it wins any query
+ * that spans a few topics and returns a list of links where the answer was
+ * wanted, which is worse the larger the namespace gets.
+ *
+ * It is dropped from the INPUT rather than filtered out of the results,
+ * because the results are the smaller half of the damage. Left in the corpus
+ * it still counts toward the entry total and, worse, still adds itself to the
+ * document frequency of every term it lists, so a term carried by exactly one
+ * note looks like it is carried by two and the note that answers is
+ * downweighted for it. Filtering after scoring fixes what is displayed and
+ * leaves that intact.
+ *
+ * Exact key match, and only at the namespace root: `project/MEMORY.md` is a
+ * note somebody wrote, not the guidance-named index, and a basename or suffix
+ * test would swallow it.
+ */
+const INDEX_KEY = 'MEMORY.md'
+
+/**
  * Function words that carry no topical signal, removed before scoring.
  *
  * Deliberately not left to document frequency. Rarity weighting only downweights
@@ -163,13 +186,22 @@ const RELATIVE_FLOOR = 0.25
  * the floor can reach (0.55) and below the weakest must-pass (0.66), with about
  * 9% either side rather than the 6% the pre-stoplist value had. The consequence
  * is stated rather than hidden: 3 of 12 irrelevant probes still return a hit.
+ *
+ * RE-CHECKED after the index exclusion below, which drops the entry count these
+ * scores are weighed against from 26 to 25 and removes the index from the
+ * document frequency of every term it lists. Scores rose; the gap did not
+ * close. The weakest must-pass went from 0.66 to 2.93, the named strongest
+ * irrelevant ("braise short ribs") from 0.55 to 0.54, and the lowest non-zero
+ * score among all relevant probes is 0.65. 0.6 still separates them, so the
+ * value stands unchanged rather than being refitted to a distribution it was
+ * not measured against.
  */
 const ABSOLUTE_FLOOR = 0.6
 
 export type RankedResult = {
   /** Entries that cleared both floors, highest score first, capped at `limit`. */
   results: ScoredEntry[]
-  /** Entries considered for this query. */
+  /** Entries considered for this query, which excludes the namespace-root index. */
   searched: number
   /** Entries that scored but did not clear the floor. Excludes `limit` trimming. */
   belowFloor: number
@@ -202,14 +234,19 @@ export function rankMemoriesDetailed(
   entries: Record<string, string>,
   limit = 5,
 ): RankedResult {
-  const searched = Object.keys(entries).length
+  // The index is removed here, before anything counts entries or terms, so
+  // every number downstream (the searched count, the document frequencies, the
+  // entry total they are weighed against) is computed over the same population
+  // the caller can actually be answered from.
+  const candidates = Object.entries(entries).filter(([key]) => key !== INDEX_KEY)
+  const searched = candidates.length
   const qTerms = new Set(tokenize(query))
   if (qTerms.size === 0) return { results: [], searched, belowFloor: 0 }
 
   // One tokenizing pass, reused by the document-frequency pass and the scoring
   // pass, so rarity weighting costs an extra walk over the term sets rather than
   // an extra tokenization of every entry.
-  const docs = Object.entries(entries).map(([key, content]) => {
+  const docs = candidates.map(([key, content]) => {
     const keyTokens = new Set(tokenize(key))
     const descTokens = new Set(tokenize(frontmatterDescription(content)))
     const bodyTf = new Map<string, number>()

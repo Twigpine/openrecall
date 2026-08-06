@@ -320,6 +320,32 @@ describe('held-out set (paraphrase probes)', () => {
   })
 })
 
+describe('index exclusion at the recall surface', () => {
+  // The ranker-level cases live in tests/relevance.test.ts; these two are here
+  // because they are about what the caller sees. The first is the degenerate
+  // namespace: the index is the only entry, ranking is empty, and recall has to
+  // render that as its no-match message rather than throw or hand back an empty
+  // success. The second is the layer constraint: the exclusion belongs to the
+  // ranker alone, and `search` is a substring tool that must go on finding the
+  // index (the exact-output pin below is the byte-level half of that).
+  test('a namespace holding only the index recalls as no-match, not an error', async () => {
+    const tools = makeTools(stubClient({ 'MEMORY.md': CORPUS['MEMORY.md'] }), NS)
+    const r = await tools.recall('roadmap onboarding escalation')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toBe(`(nothing in ${NS} looks relevant to "roadmap onboarding escalation")`)
+    // Distinct from the empty-namespace message, which this is not.
+    expect(r.text).not.toContain('no memory stored')
+  })
+
+  test('recall never returns the index while search still finds it', async () => {
+    const tools = makeTools(stubClient(CORPUS), NS)
+    const recalled = await tools.recall('commit style tone planning review', undefined, 20)
+    expect(recalled.text).not.toContain('### MEMORY.md')
+    const searched = await tools.search('MEMORY.md')
+    expect(searched.text).toContain('- MEMORY.md:')
+  })
+})
+
 describe('search output (pinned baseline)', () => {
   // Exact output, not toContain. U6 changes what recall returns and must leave
   // search byte-identical; a loose assertion would let a shared formatting
