@@ -8,7 +8,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { OpenRecallClient } from '../client/index.ts'
+import { OpenRecallClient, type PullResult, type PushResult } from '../client/index.ts'
+import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
 import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
 
@@ -161,6 +162,16 @@ describe('memory_get', () => {
  * MAX_ENTRIES_PER_NAMESPACE=5 and MAX_NAMESPACE_BYTES=5000, so a 250KB save
  * trips the server's quota gates before the tool under test is ever exercised.
  * `pullError` injects a client-layer failure. U6 reuses this same stub.
+ *
+ * There is one of these, and it is checked. It used to answer `push` with
+ * `{ version, uploaded, skipped, deleted }` — a field the real `PushResult`
+ * does not have, in place of `unchanged`, and without `namespace` — while a
+ * second, differently-wrong stub lived in tests/recall-regression.test.ts.
+ * Both reached `makeTools` through an `as unknown as MemlawbClient` cast, which
+ * is what let a stub disagree with the client it stands in for. The casts are
+ * gone: `makeTools` takes the structural `MemoryClient`, so tsc now checks
+ * every method here against `client/index.ts`, and the other stub imports this
+ * one instead of hand-rolling a third answer.
  */
 export function makeStubClient(entries: Record<string, string> = {}) {
   const store = { ...entries }
@@ -169,18 +180,24 @@ export function makeStubClient(entries: Record<string, string> = {}) {
     setPullError(e: Error | undefined) {
       pullError = e
     },
-    async pull(namespace: string) {
+    async pull(namespace: string): Promise<PullResult> {
       if (pullError) throw pullError
       return { namespace, version: 1, entries: { ...store } }
     },
-    async push(_namespace: string, next: Record<string, string>) {
+    async push(namespace: string, next: Record<string, string>): Promise<PushResult> {
       Object.assign(store, next)
-      return { version: 1, uploaded: Object.keys(next), skipped: [], deleted: [] }
+      return {
+        namespace,
+        version: 1,
+        uploaded: Object.keys(next),
+        unchanged: [],
+        deleted: [],
+      }
     },
-    async hashes() {
+    async hashes(_namespace: string): Promise<Record<string, string>> {
       return Object.fromEntries(Object.keys(store).map(k => [k, 'stub-hash']))
     },
-    async delete(_namespace: string, key: string) {
+    async delete(_namespace: string, key: string): Promise<void> {
       delete store[key]
     },
   }
@@ -201,7 +218,7 @@ describe('recall region bounds against the in-memory client stub', () => {
 
   test('a structureless entry at the 250KB cap is truncated to the per-hit budget', async () => {
     const stub = makeStubClient({ 'blob.md': STRUCTURELESS })
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.recall('rollout deployment')
     expect(r.isError).toBeUndefined()
     expect(r.text).toContain('blob.md')
@@ -228,7 +245,7 @@ describe('recall region bounds against the in-memory client stub', () => {
       'The on-call rota is generated monthly from the roster spreadsheet. '.repeat(8),
     ].join('\n')
     const stub = makeStubClient({ 'ops/runbook.md': body })
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.recall('certificate renewal acme sidecar')
 
     expect(r.text).toContain('ops/runbook.md')
@@ -254,7 +271,7 @@ describe('recall region bounds against the in-memory client stub', () => {
       'Nothing here matches.',
     ].join('\n')
     const stub = makeStubClient({ 'ops/incident.md': body })
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.recall('queue drain shard seven')
 
     expect(r.text).toContain('## Queue drain')
@@ -277,7 +294,7 @@ describe('recall region bounds against the in-memory client stub', () => {
       '```',
     ].join('\n')
     const stub = makeStubClient({ 'ops/rotate.md': body })
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.recall('memlawb rotate verify command')
 
     expect(r.text).toContain('```sh')
@@ -300,7 +317,7 @@ describe('recall region bounds against the in-memory client stub', () => {
       '```',
     ].join('\n')
     const stub = makeStubClient({ 'ops/transcript.md': body })
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.recall('rebalance shard moved keys')
 
     expect(r.text).toContain('code block elided')
@@ -309,6 +326,76 @@ describe('recall region bounds against the in-memory client stub', () => {
     expect(r.text).not.toContain('```')
     expect(r.text).not.toContain('rebalance shard 0 moved')
     expect(r.text.length).toBeLessThan(900)
+  })
+
+  // The region picker weights a query term by how few of the entry's own blocks
+  // carry it, which hands the maximum weight to a term confined to one block.
+  // A function word is exactly that shape, so while this layer derived its own
+  // word list without the ranker's stoplist, "should" outscored "retry" and
+  // recall returned the one paragraph with nothing to do with the question.
+  test('a function word in the query does not win the region from the topical term', async () => {
+    const body = [
+      '## Backoff',
+      '',
+      'The retry budget is three attempts.',
+      '',
+      '## Timeouts',
+      '',
+      'A retry waits two seconds before the next attempt.',
+      '',
+      '## Idempotency',
+      '',
+      'Every retry must be idempotent.',
+      '',
+      '## Ownership',
+      '',
+      'You should ask the platform team about the roster.',
+    ].join('\n')
+    const stub = makeStubClient({ 'ops/retry-policy.md': body })
+    const t = makeTools(stub, 'user:me')
+    const r = await t.recall('should I use retry')
+
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('ops/retry-policy.md')
+    // The region is one of the three that answer the query...
+    expect(r.text).toContain('retry budget is three attempts')
+    // ...and never the one that carries only the stopword.
+    expect(r.text).not.toContain('platform team')
+    expect(r.text).not.toContain('## Ownership')
+  })
+
+  // Both shapes that leave `blocksOf` with nothing to return. The hit used to
+  // render as a key with no text under it, and for the frontmatter-only entry
+  // not even as partial, so there was no memory_get pointer either: an empty
+  // result presented as a successful one.
+  test('a frontmatter-only entry still renders text and a pointer, never an empty hit', async () => {
+    const stub = makeStubClient({
+      'birds/kestrel.md': '---\nname: kestrel\ndescription: kestrel roosting sites\n---\n',
+    })
+    const t = makeTools(stub, 'user:me')
+    const r = await t.recall('kestrel roosting')
+
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('birds/kestrel.md')
+    // Something of the entry came back...
+    expect(r.text).toContain('kestrel roosting sites')
+    // ...and the hit says it is not the whole entry.
+    expect(r.text).toContain('memory_get')
+  })
+
+  test('an entry with a whitespace-only body still carries its memory_get pointer', async () => {
+    const stub = makeStubClient({
+      'birds/kestrel-roost.md': '   \n\n\t\n  ',
+      'other.md': 'Weather.',
+    })
+    const t = makeTools(stub, 'user:me')
+    const r = await t.recall('kestrel roost')
+
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('birds/kestrel-roost.md')
+    // Nothing can be shown, so the pointer is the entire value of the hit.
+    expect(r.text).toContain('memory_get')
+    expect(r.text).toContain('region only')
   })
 
   test('a limit-20 query over many long entries stays under the aggregate budget', async () => {
@@ -324,11 +411,53 @@ describe('recall region bounds against the in-memory client stub', () => {
       ].join('\n')
     }
     const stub = makeStubClient(entries)
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.recall('rollout deployment sequence', undefined, 20)
     expect(r.isError).toBeUndefined()
     expect(r.text).toContain('notes/rollout-0.md')
     expect(r.text.length).toBeLessThan(6000)
+
+    // The bound is only half the contract. Hits the budget could not reach are
+    // dropped, and a drop the caller is not told about is indistinguishable
+    // from there being nothing more to find; deleting the omitted reporting
+    // left every other assertion in this file green. So: the tail must be
+    // there, must count more than zero, and must name the way to reach them.
+    const m = /\((\d+) further relevant entr(?:y|ies) not shown/.exec(r.text)
+    expect(`tail present:${m !== null}`).toBe('tail present:true')
+    const omitted = Number((m as RegExpExecArray)[1])
+    expect(omitted).toBeGreaterThan(0)
+    // Every ranked hit is either shown or counted: 20 entries, all above the
+    // floor, so shown + omitted must account for all of them.
+    const shown = r.text.split('### ').length - 1
+    expect(`${shown}+${omitted}`).toBe(`${shown}+${20 - shown}`)
+    expect(r.text).toContain('memory_list')
+  })
+})
+
+/**
+ * The tool description is the only part of recall an agent reads before it
+ * decides what the result means, so it is contract and not documentation. It
+ * described "the memories most relevant to a query" long after recall started
+ * returning a capped region of each entry, and an agent told it receives the
+ * memories treats a fragment as the whole one and never calls memory_get, which
+ * is the entire bounded-region design defeated by a sentence.
+ *
+ * Read out of the source rather than off the registered tool: server.ts exits
+ * the process at module scope when MEMLAWB_PASSPHRASE is unset (as it is under
+ * tests/setup.ts) and connects a stdio transport on import.
+ */
+describe('the recall tool description', () => {
+  const SRC = readFileSync(join(import.meta.dir, '../src/mcp/server.ts'), 'utf8')
+  const block = /'memory_recall',\s*\{[\s\S]*?description:\s*((?:'[^']*'\s*\+?\s*)+)/.exec(SRC)
+
+  test('states that a result is a region of an entry and points at memory_get', () => {
+    // Fail loudly rather than vacuously if the registration is reshaped.
+    expect(`recall description found:${block !== null}`).toBe('recall description found:true')
+    const text = (block as RegExpExecArray)[1]
+    for (const needed of ['region', 'memory_get', 'entry key'])
+      expect(`${needed}:${text.includes(needed)}`).toBe(`${needed}:true`)
+    // And it must no longer promise the whole memory.
+    expect(text).not.toContain('the memories most relevant')
   })
 })
 
@@ -337,7 +466,7 @@ describe('memory_get against the in-memory client stub', () => {
 
   test('an entry at the 250KB cap comes back whole', async () => {
     const stub = makeStubClient({ 'big.md': BIG })
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.get('big.md')
     expect(r.isError).toBeUndefined()
     expect(r.text).toContain(BIG)
@@ -347,7 +476,7 @@ describe('memory_get against the in-memory client stub', () => {
   test('a client pull failure surfaces as fail() carrying the message', async () => {
     const stub = makeStubClient({ 'a.md': 'body' })
     stub.setPullError(new Error('upstream exploded'))
-    const t = makeTools(stub as unknown as MemlawbClient, 'user:me')
+    const t = makeTools(stub, 'user:me')
     const r = await t.get('a.md')
     expect(r.isError).toBe(true)
     expect(r.text).toContain('upstream exploded')
@@ -373,7 +502,7 @@ describe('recall no-match recovery', () => {
     'zephyr/lorikeet-pylon.md': 'Cinnabar lorikeet pylons need annual varnish.',
   }
   const toolsOver = (entries: Record<string, string>) =>
-    makeTools(makeStubClient(entries) as unknown as MemlawbClient, 'user:me')
+    makeTools(makeStubClient(entries), 'user:me')
 
   test('a below-floor query reports the count searched and the memory_list recovery', async () => {
     const r = await toolsOver(BELOW_FLOOR).recall('xylophone submarine treaty')
@@ -401,13 +530,65 @@ describe('recall no-match recovery', () => {
 
   test('the counts are the ranker s, not a recount of the entry map', async () => {
     // MEMORY.md is not a ranking candidate (U4), so a recount over the entry
-    // map would say 4 searched. And a stoplist-only query never scores anyone,
-    // so belowFloor is 0 while searched is 3; a belowFloor recomputed as
-    // "everything that was not returned" would say 3.
+    // map would say 4 searched.
+    const withIndex = { ...BELOW_FLOOR, 'MEMORY.md': '- zephyr/quokka-ledger.md: the ledger' }
+    const r = await toolsOver(withIndex).recall('xylophone submarine treaty')
+    expect(r.text).toContain('3 entries searched')
+    expect(r.text).toContain('3 below the relevance floor')
+    expect(r.text).not.toContain('MEMORY.md')
+  })
+
+  // The counts recall prints are the ranker's return values, not numbers recall
+  // works out for itself. The property used to be pinned through the
+  // stoplist-only query, where belowFloor is 0 while searched is 3 so a recount
+  // of "everything not returned" was visibly wrong; that query now takes the
+  // no-searchable-words branch and prints no floor count at all, which left the
+  // property covered only against rankMemoriesDetailed directly. This restores
+  // it at the surface on a real below-floor query, by asserting the two printed
+  // numbers against the ranker's own answer for the same input rather than
+  // against a literal, and by pinning that both differ from the entry-map
+  // recount and do not move with `limit`.
+  test('the printed counts are the ranker s own numbers on a real below-floor query', async () => {
+    const withIndex = { ...BELOW_FLOOR, 'MEMORY.md': '- zephyr/quokka-ledger.md: the ledger' }
+    const query = 'xylophone submarine treaty'
+    const d = rankMemoriesDetailed(query, withIndex, 5)
+
+    // Non-vacuous: this is the below-floor branch, and the ranker's numbers are
+    // not the ones a recount over the entry map would produce.
+    expect(d.results).toEqual([])
+    expect(d.reason).toBe('below-floor')
+    expect(`${d.searched}/${d.belowFloor}`).not.toBe(
+      `${Object.keys(withIndex).length}/${Object.keys(withIndex).length}`,
+    )
+
+    const r = await toolsOver(withIndex).recall(query)
+    expect(r.text).toContain(`${d.searched} entries searched`)
+    expect(r.text).toContain(`${d.belowFloor} below the relevance floor`)
+
+    // And `limit` trims results, never the count: a belowFloor recomputed as
+    // "candidates minus what was shown" would move with it.
+    for (const limit of [1, 20]) {
+      const l = await toolsOver(withIndex).recall(query, undefined, limit)
+      expect(`limit ${limit}: ${l.text}`).toBe(`limit ${limit}: ${r.text}`)
+    }
+  })
+
+  // A stoplist-only query is not a miss: nothing was scored, so the corpus was
+  // never consulted and its below-floor count is 0 for a reason that has
+  // nothing to do with relevance. Rendering it as "N below the relevance floor
+  // and withheld" tells the agent the fact is unrecorded, which is the exact
+  // read that produces a duplicate save under a second key.
+  test('a query of nothing but function words says so instead of reporting a miss', async () => {
     const withIndex = { ...BELOW_FLOOR, 'MEMORY.md': '- zephyr/quokka-ledger.md: the ledger' }
     const r = await toolsOver(withIndex).recall('the and of it')
-    expect(r.text).toContain('3 entries searched')
-    expect(r.text).toContain('0 below the relevance floor')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toMatch(/no searchable words/)
+    // Distinguishable from a real miss in both directions: it must not claim
+    // the floor withheld anything, and it must not claim nothing is recorded.
+    expect(r.text).not.toContain('below the relevance floor')
+    expect(r.text).not.toContain('unrecorded')
+    // The searched count is still the ranker's: 3, not the 4 keys in the map.
+    expect(r.text).toContain('3 entries')
     expect(r.text).not.toContain('MEMORY.md')
   })
 

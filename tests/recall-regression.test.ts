@@ -32,10 +32,12 @@
 
 import { afterAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
-import { MemlawbClient } from '../client/index.ts'
+import { ciphertextHash, MemlawbClient } from '../client/index.ts'
 import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
+import { makeStubClient } from './mcp-tools.test.ts'
 import {
   BASELINE_RANK_MS,
   CORPUS,
@@ -63,21 +65,15 @@ const keyPairFor = (query: string) => {
   return { query: p.query, expect: p.expect }
 }
 
-/** Minimal client surface makeTools touches. The corpus never goes near the wire. */
-function stubClient(entries: Record<string, string>) {
-  return {
-    pull: async (namespace: string) => ({ namespace, version: 1, entries }),
-    push: async (namespace: string) => ({
-      namespace,
-      version: 1,
-      uploaded: [],
-      unchanged: [],
-      deleted: [],
-    }),
-    hashes: async () => Object.fromEntries(Object.keys(entries).map(k => [k, 'x'])),
-    delete: async () => undefined,
-  } as unknown as MemlawbClient
-}
+/**
+ * The one stub, imported rather than re-declared. A second hand-rolled stand-in
+ * lived here and answered `push` differently from both the real client and the
+ * stub in tests/mcp-tools.test.ts; each reached `makeTools` behind an
+ * `as unknown as MemlawbClient` cast, which is precisely what let them disagree.
+ * `makeTools` now takes the structural `MemoryClient`, so this is type-checked.
+ * The corpus still never goes near the wire.
+ */
+const stubClient = (entries: Record<string, string>) => makeStubClient(entries)
 
 describe('recall tuning set (current ranker)', () => {
   // Guard for the markers below, and the reason it is a plain test: bun's
@@ -184,20 +180,112 @@ describe('tuning-pair match arity', () => {
     expect: p.expect as string,
   }))
 
-  /** Matched-term counts for one pair: the target's, and the best any other entry reaches. */
+  /**
+   * Where each matched term sits, per pair. A count alone is blind to the field
+   * a match came from, and the ranker is not: a description match is worth 3, a
+   * key match 2, a body match 1 plus its term frequency. So an entry that loses
+   * its frontmatter `description:` line keeps every one of its matched terms —
+   * the words are still in the body — while its score collapses and the pair it
+   * anchors starts passing or failing on something else. Recording placement
+   * turns that into a red naming the term and the field it fell out of.
+   */
+  const TARGET_PLACEMENT: Record<string, string[]> = {
+    'namespace validation rules': [
+      'namespace=description+key+body',
+      'rule=description+body',
+      'valid=description+body',
+    ],
+    // The one description-only anchor among the four: "deploy" is the whole
+    // reason this pair beats the datastore note without ever carrying the
+    // query's own token "process", so losing the description line is exactly
+    // the damage that the arity count alone would not show.
+    'deployment process': ['deploy=description+key+body'],
+    'am I allowed to open a pull request': ['open=body', 'request=body'],
+    'what do I need to do before I push my work to the remote': [
+      'need=body',
+      'push=body',
+      'work=body',
+    ],
+  }
+
+  /**
+   * The ranker's own frontmatter extraction, lifted out of its source. Same
+   * reason the stoplist is parsed rather than imported: `frontmatterDescription`
+   * is not exported from src/mcp/relevance.ts and this unit may not change
+   * src/. A second hand-written copy here would drift from the ranker exactly
+   * the way the corpus module's private stemmer did, and would then measure a
+   * description the ranker never saw.
+   */
+  const FM_SOURCE = /function frontmatterDescription\([\s\S]*?\n}/.exec(
+    readFileSync(join(REPO_ROOT, 'src/mcp/relevance.ts'), 'utf8'),
+  )
+  const FM_LITERALS = [
+    ...(FM_SOURCE?.[0] ?? '').matchAll(/\/((?:\\.|\[[^\]]*\]|[^/\\\n])+)\/([gimsuy]*)/g),
+  ].map(m => new RegExp(m[1], m[2]))
+
+  const descriptionOf = (content: string): string => {
+    const block = FM_LITERALS[0].exec(content)
+    if (!block) return ''
+    const d = FM_LITERALS[1].exec(block[1])
+    return d ? d[1] : ''
+  }
+
+  /** The three fields the ranker scores separately, as the ranker splits them. */
+  const fieldsOf = (key: string) => ({
+    description: contentTerms(descriptionOf(CORPUS[key]), stemTerm),
+    key: contentTerms(key, stemTerm),
+    body: contentTerms(CORPUS[key], stemTerm),
+  })
+
+  /** `term=field[+field]` for every query term this entry carries, sorted. */
+  const placementOf = (query: string, key: string): string[] => {
+    const f = fieldsOf(key)
+    const out: string[] = []
+    for (const t of [...contentTerms(query, stemTerm)].sort()) {
+      const where = (['description', 'key', 'body'] as const).filter(w => f[w].has(t))
+      if (where.length) out.push(`${t}=${where.join('+')}`)
+    }
+    return out
+  }
+
+  /**
+   * Matched-term counts for one pair: the target's, and the best any other
+   * entry reaches. MEMORY.md is not in the competitor set because it is not in
+   * the ranker's candidate set either (U4 drops the namespace-root index before
+   * anything is scored), so counting it here measured a competitor that can
+   * never win.
+   */
   function arityOf(query: string, expected: string) {
     const qTerms = contentTerms(query, stemTerm)
-    const matched = (key: string) => {
-      const entry = contentTerms(`${key} ${CORPUS[key]}`, stemTerm)
-      return [...qTerms].filter(t => entry.has(t)).length
-    }
-    const others = Object.keys(CORPUS).filter(k => k !== expected)
+    const matched = (key: string) => placementOf(query, key).length
+    const others = Object.keys(CORPUS).filter(k => k !== expected && k !== 'MEMORY.md')
     return {
       qTerms: qTerms.size,
       target: matched(expected),
       best: Math.max(...others.map(matched)),
     }
   }
+
+  test('the ranker frontmatter extraction was found and does extract a description', () => {
+    // Fail loudly rather than vacuously: an unparseable extraction must not read
+    // as "no entry has a description", which would make every placement `body`.
+    expect(`frontmatter extraction found:${FM_SOURCE !== null}`).toBe(
+      'frontmatter extraction found:true',
+    )
+    expect(FM_LITERALS.length).toBe(2)
+    expect(descriptionOf(CORPUS['project/deploy.md'])).toContain('deploy')
+    expect(descriptionOf('no frontmatter here')).toBe('')
+  })
+
+  test('each expected entry carries its query terms in the pinned fields', () => {
+    expect(Object.keys(TARGET_PLACEMENT).sort()).toEqual(pairs.map(p => p.query).sort())
+    for (const p of pairs) {
+      const got = placementOf(p.query, p.expect)
+      expect(`${p.query} :: ${got.join(' ')}`).toBe(
+        `${p.query} :: ${TARGET_PLACEMENT[p.query].join(' ')}`,
+      )
+    }
+  })
 
   // Non-vacuity, both directions: the pin table must cover exactly the pairs the
   // assertions below iterate, so a pair added to TUNING cannot slip past
@@ -332,15 +420,22 @@ describe('index exclusion at the recall surface', () => {
     const tools = makeTools(stubClient({ 'MEMORY.md': CORPUS['MEMORY.md'] }), NS)
     const r = await tools.recall('roadmap onboarding escalation')
     expect(r.isError).toBeUndefined()
-    // The index is not a candidate, so nothing was searched: 0, not 1.
+    // The index is not a candidate, so nothing was searched. Reporting that as
+    // "0 entries searched, 0 below the relevance floor" read as an empty
+    // namespace, which this is not: the one entry here is the table of contents
+    // naming everything that was ever written, and recall has to say so and
+    // name the tool that reads it.
     expect(r.text).toBe(
-      `(nothing in ${NS} looks relevant to "roadmap onboarding escalation". ` +
-        '0 entries searched, 0 below the relevance floor and withheld. ' +
-        'Call memory_list before concluding the fact is unrecorded; ' +
-        'it may be stored under wording this query did not match.)',
+      `(nothing in ${NS} was searched for "roadmap onboarding escalation": ` +
+        'the namespace holds only its MEMORY.md index, which recall does not rank. ' +
+        'Call memory_get with key "MEMORY.md" to read the index itself.)',
     )
     // Distinct from the empty-namespace message, which this is not.
     expect(r.text).not.toContain('no memory stored')
+    // And distinct from a real miss: nothing was searched, so nothing was
+    // withheld and nothing licenses concluding the fact is unrecorded.
+    expect(r.text).not.toContain('0 entries searched')
+    expect(r.text).not.toContain('unrecorded')
   })
 
   test('recall never returns the index while search still finds it', async () => {
@@ -398,6 +493,9 @@ describe('search output (pinned baseline)', () => {
 const PKG = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
   name: string
   exports: Record<string, string>
+  /** Never present: a subpath-imports map is a second way a bare specifier
+   * resolves into the repo, and `resolveSelf` only follows `exports`. */
+  imports?: unknown
 }
 
 /**
@@ -456,8 +554,237 @@ function stripComments(src: string): string {
   return out
 }
 
+/**
+ * Source reduced to code alone: comments removed, string / template / regex
+ * bodies blanked, `${...}` interpolations kept because they are code.
+ *
+ * `stripComments` above deliberately keeps string bodies, because the import
+ * scan needs the specifiers out of them. The guards below need the opposite:
+ * they read identifiers, and fixture prose, tool descriptions and error
+ * messages legitimately contain any word at all. Scanning identifiers over
+ * un-blanked strings would make them fire on text and, worse, would let a
+ * violation hide inside a string that a later `eval` reads back.
+ */
+function stripToCode(src: string): string {
+  const regexCanStart = /[=(,:[!&|?{};+\-*%~^<>]/
+  let out = ''
+  let prev = ''
+  let i = 0
+  // Template nesting: an entry per `${` currently open, so the closing `}`
+  // returns to template text rather than being read as a block end.
+  let interpolations = 0
+  // Scan template text from `i`, stopping at the closing backtick or at `${`.
+  const scanTemplate = () => {
+    while (i < src.length) {
+      if (src[i] === '\\') {
+        i += 2
+        continue
+      }
+      if (src[i] === '`') {
+        i++
+        return
+      }
+      if (src[i] === '$' && src[i + 1] === '{') {
+        i += 2
+        interpolations++
+        return
+      }
+      i++
+    }
+  }
+  while (i < src.length) {
+    const c = src[i]
+    if (c === '/' && src[i + 1] === '/') {
+      while (i < src.length && src[i] !== '\n') i++
+      continue
+    }
+    if (c === '/' && src[i + 1] === '*') {
+      i += 2
+      while (i < src.length && !(src[i] === '*' && src[i + 1] === '/')) i++
+      i += 2
+      continue
+    }
+    if (c === '}' && interpolations > 0) {
+      interpolations--
+      i++
+      scanTemplate()
+      out += ' 0 '
+      prev = 'x'
+      continue
+    }
+    if (c === "'" || c === '"') {
+      const q = c
+      i++
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          i += 2
+          continue
+        }
+        const ch = src[i]
+        i++
+        if (ch === q) break
+      }
+      out += ' 0 '
+      prev = 'x'
+      continue
+    }
+    if (c === '`') {
+      i++
+      scanTemplate()
+      out += ' 0 '
+      prev = 'x'
+      continue
+    }
+    if (c === '/' && (prev === '' || regexCanStart.test(prev))) {
+      i++
+      let inClass = false
+      while (i < src.length) {
+        if (src[i] === '\\') {
+          i += 2
+          continue
+        }
+        if (src[i] === '\n') break
+        if (src[i] === '[') inClass = true
+        else if (src[i] === ']') inClass = false
+        else if (src[i] === '/' && !inClass) {
+          i++
+          break
+        }
+        i++
+      }
+      while (i < src.length && /[a-z]/.test(src[i])) i++
+      out += ' 0 '
+      prev = 'x'
+      continue
+    }
+    out += c
+    if (!/\s/.test(c)) prev = c
+    i++
+  }
+  return out
+}
+
+/**
+ * Reserved words and type-position words, excluded from identifier scanning.
+ * `import` and `require` are deliberately absent from every allowlist below and
+ * are checked separately: the module graph is the one thing no file is allowed
+ * to reach for in a way the walker cannot follow.
+ */
+const KEYWORDS = new Set(
+  (
+    'abstract any as asserts async await bigint boolean break case catch class const constructor ' +
+    'continue declare default delete do else enum export extends false finally for function get ' +
+    'if implements in infer instanceof interface is keyof let new null number object of out ' +
+    'override package private protected public readonly return satisfies set static string super ' +
+    'switch symbol this throw true try type typeof undefined unique unknown var void while with ' +
+    'yield never global'
+  ).split(' '),
+)
+
+/** True when the identifier starting at `at` is a property access (`x.y`, `x?.y`). */
+function isMemberAccess(code: string, at: number): boolean {
+  let i = at - 1
+  while (i >= 0 && /\s/.test(code[i])) i--
+  return i >= 0 && code[i] === '.'
+}
+
+/** Every identifier in `code` that is not a property name and not a keyword. */
+function freeIdentifiers(code: string): string[] {
+  const out: string[] = []
+  for (const m of code.matchAll(/[A-Za-z_$][\w$]*/g)) {
+    if (isMemberAccess(code, m.index)) continue
+    if (KEYWORDS.has(m[0])) continue
+    out.push(m[0])
+  }
+  return out
+}
+
+/**
+ * Identifiers in callee or receiver position: `x(`, `new x(`, `x.y(`. Every way
+ * of loading a module is one of these, so this is the position where an
+ * unaccounted-for capability shows up, and restricting to it keeps object keys
+ * and type names out of the way.
+ */
+function calleeRoots(code: string): string[] {
+  const out: string[] = []
+  for (const m of code.matchAll(/([A-Za-z_$][\w$]*)\s*(?=[(.])/g)) {
+    if (isMemberAccess(code, m.index)) continue
+    if (KEYWORDS.has(m[1])) continue
+    out.push(m[1])
+  }
+  return out
+}
+
+/**
+ * Names a file binds itself: imports, declarations, destructuring, parameters,
+ * method names. Deliberately generous — a name wrongly counted as local only
+ * costs a missed report, while a name wrongly counted as global would turn the
+ * guard red on ordinary code and get it weakened. Whatever this misses lands in
+ * the pinned allowlists below, where it is visible.
+ */
+function declaredNames(code: string): Set<string> {
+  const names = new Set<string>()
+  const add = (s: string) => {
+    for (const n of s.match(/[A-Za-z_$][\w$]*/g) ?? []) names.add(n)
+  }
+  for (const m of code.matchAll(
+    /\b(?:const|let|var|function|class|enum|interface|type)\s+([A-Za-z_$][\w$]*)/g,
+  ))
+    names.add(m[1])
+  for (const m of code.matchAll(/\b(?:const|let|var)\s*([{[][^=]*?[}\]])\s*=/g)) add(m[1])
+  for (const m of code.matchAll(/\bimport\s+([\s\S]*?)\s+from\b/g))
+    add(m[1].replace(/\btype\b/g, ''))
+  for (const m of code.matchAll(/\(([^()]*)\)\s*(?::[^=({]*)?=>/g)) add(m[1].replace(/:[^,]*/g, ''))
+  for (const m of code.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) names.add(m[1])
+  for (const m of code.matchAll(
+    /\b(?:function\s*[A-Za-z_$\w]*|[A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?::[^{]*)?\{/g,
+  ))
+    add(m[1].replace(/:[^,]*/g, ''))
+  for (const m of code.matchAll(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1])
+  for (const m of code.matchAll(/\bfor\s*\(\s*(?:const|let|var)\s+([^;]*?)\s+of\b/g)) add(m[1])
+  // Method and standalone function definitions, plus every `name:` binding at
+  // the head of a line (parameter lists whose types carry their own parens).
+  for (const m of code.matchAll(
+    /^[ \t]*(?:export\s+|async\s+|static\s+|private\s+|public\s+|protected\s+|readonly\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/gm,
+  ))
+    names.add(m[1])
+  for (const m of code.matchAll(/^[ \t]*([A-Za-z_$][\w$]*)\s*\??\s*:/gm)) names.add(m[1])
+  // Parameter lists whose own type annotations carry parens (`fn: () => T`),
+  // which the flat regexes above cannot span. A paren group counts only when a
+  // body or an arrow follows it, so an argument list is never mistaken for one
+  // — treating `getStore(Bun.file(p))` as a declaration site would hand back
+  // exactly the free-global blindness this guard exists to remove.
+  let depth = 0
+  let start = 0
+  for (let i = 0; i < code.length; i++) {
+    if (code[i] === '(') {
+      if (depth === 0) start = i + 1
+      depth++
+    } else if (code[i] === ')') {
+      depth = Math.max(0, depth - 1)
+      if (depth === 0 && /^\s*(?::[^{;=]*)?(?:\{|=>)/.test(code.slice(i + 1, i + 160)))
+        add(code.slice(start, i).replace(/:[^,]*/g, ''))
+    }
+  }
+  return names
+}
+
 const DYNAMIC_CALL = /\b(?:import|require)\s*\(/g
 const DYNAMIC_LITERAL = /\b(?:import|require)\s*\(\s*['"]([^'"]+)['"]\s*\)/g
+
+/**
+ * Static import / export-from / bare-import / literal-`import()` forms, matched
+ * whole so they can be removed before the module-graph token sweep below. An
+ * accounted-for edge is one the walker resolved; anything else naming the module
+ * system is an edge nobody can follow.
+ */
+const ACCOUNTED_LOADS = [
+  /\bimport\s+type\s+[\s\S]*?\bfrom\s*['"][^'"]+['"]/g,
+  /\bimport\s+[\s\S]*?\bfrom\s*['"][^'"]+['"]/g,
+  /\bexport\s+[\s\S]*?\bfrom\s*['"][^'"]+['"]/g,
+  /\bimport\s*\(\s*['"][^'"]+['"]\s*\)/g,
+  /\bimport\s*['"][^'"]+['"]/g,
+]
 
 /**
  * Import edges of one module, plus the count of `import(` / `require(` calls
@@ -495,35 +822,118 @@ function resolveSelf(spec: string): string | null {
   return target ? resolve(REPO_ROOT, target) : null
 }
 
+/**
+ * Corpus provenance, as a reproducibility property rather than a token hunt.
+ *
+ * The rule is that the fixture is self-contained synthetic text: if it could
+ * read a path, an env var or the network, pointing it at a real memory
+ * directory would be one line away and the suite would silently start ranking
+ * someone's actual notes. Two generations of denylist have now been holed by
+ * somebody finding a route the list did not enumerate — first a helper module
+ * doing the `readFileSync` behind an import, then
+ * `Bun.spawnSync(['cat', path]).stdout.toString()`, which pulled 39,724 bytes
+ * of a real instruction file into the ranked corpus with every listed token
+ * absent. Adding the newly-found route to the list would be the third instance
+ * of the same mistake, so the guards below are inverted to fail closed: they
+ * flag everything they cannot positively account for.
+ *
+ * `program` serializes every export, plus the results of calling the exported
+ * functions, so the comparison covers what the module computes and not only
+ * what it stores.
+ */
+const corpusProbe = (abs: string) => `
+const m = await import(${JSON.stringify(abs)})
+const norm = v =>
+  v instanceof Set ? { set: [...v] } : typeof v === 'function' ? { fn: String(v) } : v
+const payload = Object.keys(m).sort().map(k => [k, norm(m[k])])
+payload.push(['nearCapCorpus(64)', m.nearCapCorpus(64)])
+payload.push(['nearCapCorpus(2000)', m.nearCapCorpus(2000)])
+payload.push(['contentTerms', [...m.contentTerms('routing keys deployment notes', t => t)]])
+payload.push([
+  'sharedTerms',
+  m.sharedTerms('deployment process', 'project/deploy.md', m.CORPUS['project/deploy.md'], t => t),
+])
+process.stdout.write(JSON.stringify(payload))
+`
+
 describe('corpus provenance', () => {
-  // Mechanical, because the rule is easy to break by accident and impossible to
-  // see in a diff review of the corpus body: the fixture must be self-contained
-  // synthetic text. If it could read a path, an env var, or the network, then
-  // pointing it at a real memory directory would be one line away, and the
-  // suite would silently start ranking someone's actual notes.
-  test('the corpus module has no runtime input hooks and imports nothing', () => {
-    const abs = join(REPO_ROOT, 'tests/recall-corpus.ts')
-    const source = stripComments(readFileSync(abs, 'utf8'))
-    for (const hook of [
-      'readFile',
-      'readFileSync',
-      'Bun.file',
-      'Bun.env',
-      'process.env',
-      'node:',
-      'require(',
-      'import(',
-      'fetch(',
-    ]) {
-      expect(`${hook}:${source.includes(hook)}`).toBe(`${hook}:false`)
-    }
-    // The token list alone was bypassable, and provably so: a helper module doing
-    // the readFileSync, imported from here, kept every token out of this file
-    // while putting a real memory directory into the ranked corpus. A synthetic
-    // fixture needs no imports at all, so the graph must be a single node.
-    const edges = edgesOf(abs)
+  const CORPUS_MODULE = join(REPO_ROOT, 'tests/recall-corpus.ts')
+
+  /**
+   * Every identifier the corpus module names that it does not itself declare.
+   * An allowlist, pinned exactly, and that is the whole point: a denylist can
+   * only ever refuse the routes somebody thought of, while this refuses
+   * everything nobody vouched for. `Bun`, `process`, `globalThis`, `fetch`,
+   * `eval`, `Function`, `Reflect` and every other capability root are absent
+   * from it without being named, which is what makes it fail closed. A legal
+   * new name here is a one-line edit made on purpose; an illegal one is red.
+   */
+  const CORPUS_IDENTIFIERS = ['Boolean', 'Record', 'Set', 'String']
+
+  test('the corpus module names nothing it does not declare, and loads nothing', () => {
+    const code = stripToCode(readFileSync(CORPUS_MODULE, 'utf8'))
+    const declared = declaredNames(code)
+    const free = [...new Set(freeIdentifiers(code))].filter(n => !declared.has(n)).sort()
+    expect(free).toEqual(CORPUS_IDENTIFIERS)
+
+    // The module system, separately: a synthetic fixture loads nothing, so
+    // neither token may appear in the code at all. This covers `import(...)`,
+    // `import.meta.*`, `require(...)` and `createRequire` in one rule, without
+    // naming any of them.
+    expect(code.match(/\b(?:import|require)\b/g)).toBeNull()
+    const edges = edgesOf(CORPUS_MODULE)
     expect(edges.specs).toEqual([])
     expect(edges.opaque).toBe(0)
+
+    // Cheap fast-fail kept underneath, widened to the whole `Bun` namespace and
+    // to any bare `process`, neither of which has a legitimate use in a static
+    // fixture. This is no longer the load-bearing check; it just names the
+    // likely mistake in one line when it happens.
+    for (const hook of ['Bun.', 'Bun[', 'process', 'readFile', 'node:', 'fetch('])
+      expect(`${hook}:${code.includes(hook)}`).toBe(`${hook}:false`)
+  })
+
+  /**
+   * The property the token list was always a proxy for: the module's exports do
+   * not depend on the machine it runs on. Two fresh subprocesses import it with
+   * different working directories and different environments, and their
+   * serialized exports must be byte-identical. Anything the module reads from
+   * outside itself — an env var, a relative path, a subprocess, a socket —
+   * differs across those two runs or fails outright in one of them.
+   */
+  test('the corpus module exports the same bytes under a different cwd and environment', () => {
+    const program = corpusProbe(CORPUS_MODULE)
+    const run = (cwd: string, env: Record<string, string>) =>
+      Bun.spawnSync({ cmd: [process.execPath, '-e', program], cwd, env, stderr: 'pipe' })
+
+    const a = run(REPO_ROOT, { ...process.env } as Record<string, string>)
+    const b = run(tmpdir(), {
+      PATH: process.env.PATH ?? '',
+      HOME: tmpdir(),
+      PWD: tmpdir(),
+      TZ: 'UTC',
+      LANG: 'C',
+      MEMLAWB_CORPUS_PROBE: 'second-run',
+    })
+
+    // Fail loudly rather than vacuously: two crashed runs also produce equal
+    // (empty) output, which would make the comparison below meaningless.
+    for (const [name, r] of [
+      ['a', a],
+      ['b', b],
+    ] as const)
+      expect(`${name} exit:${r.exitCode} ${r.stderr.toString().slice(0, 400)}`).toBe(
+        `${name} exit:0 `,
+      )
+
+    const outA = a.stdout.toString()
+    const outB = b.stdout.toString()
+    // Non-vacuous: the payload must actually carry the corpus, not an empty
+    // array that two runs would agree on trivially.
+    expect(outA.length).toBeGreaterThan(50_000)
+    expect(outA).toContain('project/deploy.md')
+    expect(outA).toContain('BASELINE_RANK_MS')
+    expect(`identical:${outA === outB}`).toBe('identical:true')
   })
 
   // Asserts the property its name claims. The previous body only checked that
@@ -565,6 +975,17 @@ describe('corpus provenance', () => {
     const ranker = (m as RegExpExecArray)[1].split(' ').filter(Boolean)
     expect(ranker.length).toBeGreaterThan(20)
     expect([...new Set(ranker)].sort()).toEqual([...STOPWORDS].sort())
+
+    // Reading the declaration is only half of it: a `Set` is mutable, so an
+    // `add` / `delete` / `clear` anywhere later in the file would change the
+    // list the ranker actually uses while this parse kept reporting the literal.
+    // An allowlist of the one method the ranker may call, rather than a list of
+    // the three mutators, so a future `STOP[Symbol.iterator]` reassignment or
+    // any other member is red too.
+    const code = stripToCode(src)
+    const members = [...code.matchAll(/\bSTOP\s*\.\s*([A-Za-z_$][\w$]*)/g)].map(x => x[1])
+    expect(members.length).toBeGreaterThan(0)
+    expect([...new Set(members)].sort()).toEqual(['has'])
   })
 
   // Same failure mode as the stoplist, one layer worse. The corpus module used
@@ -596,22 +1017,157 @@ describe('corpus provenance', () => {
   })
 })
 
+/** Extensions bun will execute as a module. A file with one of these is walked. */
+const EXEC_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']
+
+/**
+ * Extensions that carry no executable module. Everything under `src/` must be
+ * in one list or the other: an unrecognised extension is a violation rather
+ * than a skip, because the walk seeding only `.ts` is exactly how a `.mjs`
+ * under `src/` importing `client/crypto.ts` stayed invisible while bun loaded
+ * it happily.
+ */
+const INERT_EXTS = ['.json', '.md', '.txt', '.sql', '.yml', '.yaml', '.toml', '.lock']
+
+const extOf = (name: string) => {
+  const i = name.lastIndexOf('.')
+  return i <= 0 ? '' : name.slice(i)
+}
+
+/**
+ * Globals a module under `src/` may call. An allowlist, for the same reason the
+ * corpus identifier pin is one: enumerating loader forms (`createRequire`,
+ * `new Worker(`, `Bun.plugin(`, `import.meta.resolve(`) only ever refuses the
+ * ones somebody listed, and that list has now been holed twice. Every way of
+ * loading a module is a call or a construction, so requiring the callee to be
+ * either declared in the file or named here refuses all of them at once,
+ * including the ones nobody has thought of.
+ */
+const VETTED_GLOBALS = new Set([
+  'Array',
+  'Buffer',
+  'Bun',
+  'Date',
+  'Error',
+  'JSON',
+  'Math',
+  'NodeJS',
+  'Number',
+  'Object',
+  'Promise',
+  'Response',
+  'String',
+  'TextDecoder',
+  'TextEncoder',
+  'URL',
+  'Uint8Array',
+  'console',
+  'decodeURIComponent',
+  'fetch',
+  'process',
+])
+
+/** Members of `Bun` a module under `src/` may reach. Allowlist, same reasoning. */
+const VETTED_BUN_MEMBERS = new Set(['serve', 'S3Client'])
+
+/**
+ * Bare specifiers a module under `src/` may import. The walker resolves
+ * relative paths and this package's own `exports`, and returns null for
+ * everything else — so an import of a module that can itself load code
+ * (`node:module`, `node:worker_threads`, `node:vm`) is an edge it reads as
+ * nothing at all. Pinning the set means the walker only ignores specifiers
+ * somebody vouched for, instead of ignoring every one it cannot follow.
+ */
+const VETTED_BARE_SPECIFIERS = new Set(['node:crypto', 'node:fs/promises', 'node:path'])
+
+/**
+ * Everything in one module that touches the module system, or the outside
+ * world, in a way this walk cannot follow. Returns human-readable violations.
+ *
+ * The module-system rule is subtractive: remove every statically resolved
+ * import form from the source, and any surviving `import` or `require` token is
+ * an edge nobody can follow. That covers `createRequire`, `require.resolve`,
+ * `import.meta.resolve`, `module.require` and any future spelling, without
+ * naming one of them.
+ */
+function unresolvableLoads(abs: string): string[] {
+  const raw = readFileSync(abs, 'utf8')
+  const code = stripToCode(raw)
+  let residue = stripComments(raw)
+  for (const re of ACCOUNTED_LOADS) residue = residue.replace(re, ' ')
+  const residueCode = stripToCode(residue)
+
+  const out: string[] = []
+  const leftover = residueCode.match(/\b(?:import|require)\b/g)
+  if (leftover)
+    out.push(`${leftover.length} unaccounted module-system reference(s): ${leftover.join(', ')}`)
+
+  const declared = declaredNames(code)
+  for (const root of new Set(calleeRoots(code)))
+    if (!declared.has(root) && !VETTED_GLOBALS.has(root))
+      out.push(`calls unvetted global \`${root}\``)
+
+  for (const m of code.matchAll(/\bBun\s*\.\s*([A-Za-z_$][\w$]*)/g))
+    if (!VETTED_BUN_MEMBERS.has(m[1])) out.push(`uses unvetted \`Bun.${m[1]}\``)
+
+  for (const spec of edgesOf(abs).specs)
+    if (!spec.startsWith('.') && !resolveSelf(spec) && !VETTED_BARE_SPECIFIERS.has(spec))
+      out.push(`imports unvetted bare specifier \`${spec}\``)
+
+  return out
+}
+
 describe('crypto-blind import boundary', () => {
   // A deny rule over the whole boundary, not an allowlist of known-good module
   // names. An allowlist goes green the day a new src/ module reaches plaintext
   // through src/mcp/tools.ts (which imports client/index.ts) or through a
   // dynamic import of the kind bin/memlawb.ts already uses, which is precisely
   // the regression worth catching. Resolution is transitive for the same reason.
+  //
+  // Two ways past it have been demonstrated and are closed here rather than
+  // patched: the walk seeded only `.ts`, so a `.mjs` under `src/` was invisible,
+  // and it enumerated loader forms, so `createRequire` and friends were not
+  // looked for. Both are now allowlists (extensions, callable globals), which
+  // fail closed on the route nobody listed.
   test('no module under src/ outside src/mcp/ can reach client/ or src/mcp/', () => {
     const files: string[] = []
+    const unclassified: string[] = []
     const walk = (dir: string) => {
       for (const e of readdirSync(dir, { withFileTypes: true })) {
         const full = join(dir, e.name)
-        if (e.isDirectory()) walk(full)
-        else if (e.name.endsWith('.ts')) files.push(full)
+        if (e.isDirectory()) {
+          walk(full)
+          continue
+        }
+        const ext = extOf(e.name)
+        if (EXEC_EXTS.includes(ext)) files.push(full)
+        else if (!INERT_EXTS.includes(ext)) unclassified.push(relative(REPO_ROOT, full))
       }
     }
     walk(join(REPO_ROOT, 'src'))
+
+    // Fail closed on an extension neither list knows: a new one is either
+    // executable (and must be walked) or inert (and must be declared so).
+    expect(unclassified).toEqual([])
+
+    // Non-vacuity per extension: every executable extension present under src/
+    // has at least one seeded file. Shrinking EXEC_EXTS to hide a file cannot
+    // pass either check — the file drops out of `files` and lands in
+    // `unclassified` instead.
+    const present = [...new Set(files.map(f => extOf(f)))].sort()
+    expect(present.length).toBeGreaterThan(0)
+    for (const ext of present)
+      expect(`${ext}:${files.filter(f => f.endsWith(ext)).length > 0}`).toBe(`${ext}:true`)
+
+    // A bare specifier resolves into this repo only through the package's own
+    // `exports` map, which `resolveSelf` follows. Either of these would open a
+    // second route the self-resolver returns null for, leaving the walker to
+    // skip a live edge.
+    const tsconfig = JSON.parse(readFileSync(join(REPO_ROOT, 'tsconfig.json'), 'utf8')) as {
+      compilerOptions?: { paths?: unknown }
+    }
+    expect(tsconfig.compilerOptions?.paths).toBeUndefined()
+    expect(PKG.imports).toBeUndefined()
 
     const isMcp = (abs: string) => relative(REPO_ROOT, abs).startsWith('src/mcp/')
     const forbidden = (abs: string) => {
@@ -640,6 +1196,11 @@ describe('crypto-blind import boundary', () => {
           `${relative(REPO_ROOT, current)} -> ${opaque} unresolvable import()/require()`,
         )
       }
+      // Everything else the walk cannot follow: a module-system token left over
+      // after the resolved imports are removed, a call to a global nobody
+      // vouched for, an unvetted `Bun` member.
+      for (const risk of unresolvableLoads(current))
+        violations.push(`${relative(REPO_ROOT, current)} -> ${risk}`)
       for (const spec of specs) {
         // Relative first, then this package's own name through `exports`: a bare
         // `@gitlawb/memlawb/crypto` resolves to client/crypto.ts and bun runs it,
@@ -678,11 +1239,111 @@ describe('crypto-blind import boundary', () => {
   })
 })
 
+/**
+ * Everything one intercepted request put on the wire. Headers are captured
+ * because a body-and-URL scan is blind to them, and a client that moved
+ * plaintext into a header would have satisfied the old check exactly.
+ */
+type Capture = { hrefs: string[]; headers: string[]; bodies: string[]; unrecognised: string[] }
+
+/**
+ * A request body as the bytes that actually leave the machine.
+ *
+ * The old capture was `typeof body === 'string' ? body : (body ?? '').toString()`,
+ * which turns a Blob into `[object Blob]` and a typed array into a comma-joined
+ * list of code points — so "the sentinel is in no body" held for a body that
+ * plainly contained it. Anything the normalizer does not recognise (a
+ * ReadableStream, say) is recorded as unrecognised and asserted on, rather than
+ * scanned as the empty string: an unreadable body must fail the check, not pass it.
+ */
+async function bodyText(body: BodyInit | null | undefined, cap: Capture): Promise<string> {
+  if (body === null || body === undefined) return ''
+  if (typeof body === 'string') return body
+  if (body instanceof Blob) return await body.text()
+  if (body instanceof ArrayBuffer || ArrayBuffer.isView(body)) return new TextDecoder().decode(body)
+  if (body instanceof URLSearchParams) return body.toString()
+  if (body instanceof FormData) {
+    const parts: string[] = []
+    for (const [k, v] of body) parts.push(`${k}=${typeof v === 'string' ? v : await v.text()}`)
+    return parts.join('&')
+  }
+  cap.unrecognised.push(Object.prototype.toString.call(body))
+  return ''
+}
+
+/** Install a fetch that records every request and answers it with `respond`. */
+function intercept(
+  respond: (req: { href: string; method: string; body: string }) => Promise<Response>,
+) {
+  const cap: Capture = { hrefs: [], headers: [], bodies: [], unrecognised: [] }
+  const fn = (async (input: RequestInfo | URL, init?: RequestInit) => {
+    const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+    const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
+    const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}))
+    const body = await bodyText(init?.body, cap)
+    cap.hrefs.push(href)
+    cap.headers.push([...headers.entries()].map(([k, v]) => `${k}: ${v}`).join('\n'))
+    cap.bodies.push(body)
+    return await respond({ href, method, body })
+  }) as typeof fetch
+  return { cap, fn }
+}
+
+/**
+ * An in-memory stand-in for the sync server that speaks the real wire contract
+ * over real ciphertext: the client encrypts before it ever reaches here, so
+ * what this stores is exactly what a live server would store. It exists because
+ * a stub that 404s every GET leaves recall, search and get running against an
+ * empty namespace, and a check whose whole purpose is "no plaintext on the
+ * wire" then never once exercises a namespace that holds any.
+ */
+function ciphertextServer() {
+  const entries = new Map<string, string>()
+  let version = 0
+  return async ({ href, method, body }: { href: string; method: string; body: string }) => {
+    const u = new URL(href)
+    if (method === 'PUT') {
+      let payload: { entries?: Record<string, string>; deletions?: string[] }
+      try {
+        payload = JSON.parse(body)
+      } catch {
+        return new Response(null, { status: 400 })
+      }
+      for (const [k, v] of Object.entries(payload.entries ?? {})) entries.set(k, v)
+      const deleted = (payload.deletions ?? []).filter(k => entries.delete(k))
+      version++
+      return Response.json({ version, deleted })
+    }
+    if (method === 'DELETE') {
+      entries.delete(u.searchParams.get('key') ?? '')
+      version++
+      return new Response(null, { status: 204 })
+    }
+    if (entries.size === 0) return new Response(null, { status: 404 })
+    if (u.searchParams.get('view') === 'hashes')
+      return Response.json({
+        version,
+        entryChecksums: Object.fromEntries([...entries].map(([k, v]) => [k, ciphertextHash(v)])),
+      })
+    return Response.json({ version, content: { entries: Object.fromEntries(entries) } })
+  }
+}
+
 describe('single-origin tool traffic', () => {
   const realFetch = globalThis.fetch
+  const url = 'http://recall-r18.test'
+  const sentinel = 'ZQXJ-recall-r18-plaintext-sentinel-ZQXJ'
   afterAll(() => {
     globalThis.fetch = realFetch
   })
+
+  /** The sentinel must be in no URL, no header and no body, and every body must be readable. */
+  const assertNoPlaintext = (cap: Capture) => {
+    expect(cap.unrecognised).toEqual([])
+    expect(cap.hrefs.filter(h => h.includes(sentinel))).toEqual([])
+    expect(cap.headers.filter(h => h.includes(sentinel))).toEqual([])
+    expect(cap.bodies.filter(b => b.includes(sentinel))).toEqual([])
+  }
 
   // Runnable, not static: server.ts is import-unsafe here (it exits the process
   // at module scope when MEMLAWB_PASSPHRASE is unset, as it is under
@@ -691,28 +1352,22 @@ describe('single-origin tool traffic', () => {
   //
   // Origins alone were never the requirement. A client that uploaded plaintext
   // to the configured host would satisfy a single-origin check exactly, so the
-  // interceptor captures the full URL and the request body too, and a sentinel
-  // string is driven through save so there is something specific to look for.
+  // interceptor captures the full URL, the headers and the request body too,
+  // and a sentinel string is driven through save so there is something specific
+  // to look for.
   test('every tool request goes to the configured origin carrying no plaintext', async () => {
-    const url = 'http://recall-r18.test'
-    const sentinel = 'ZQXJ-recall-r18-plaintext-sentinel-ZQXJ'
-    const hrefs: string[] = []
-    const bodies: string[] = []
     // Requests attributable to `get` alone. The total-count guard below is not
     // enough to prove get is covered: the other four tools already clear it
     // between them, so dropping the get call would leave the check silently
     // green over five tools.
     let getHrefs: string[] = []
-    globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
-      const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
-      hrefs.push(href)
-      bodies.push(typeof init?.body === 'string' ? init.body : (init?.body ?? '').toString())
-      const method = init?.method ?? 'GET'
+    const { cap, fn } = intercept(async ({ method }) => {
       if (method === 'PUT') return Response.json({ version: 1, deleted: [] })
       if (method === 'DELETE') return new Response(null, { status: 204 })
       // 404 is the empty-namespace path: pull returns no entries, hashes {}.
       return new Response(null, { status: 404 })
-    }) as typeof fetch
+    })
+    globalThis.fetch = fn
 
     try {
       const client = new MemlawbClient({ url, passphrase: 'test-passphrase' })
@@ -724,9 +1379,9 @@ describe('single-origin tool traffic', () => {
       // get returns whole entry bodies, so it is the surface where a leak would
       // be worth the most; it is driven here rather than left as the one tool
       // outside the boundary check.
-      const beforeGet = hrefs.length
+      const beforeGet = cap.hrefs.length
       await tools.get('notes/plain.md')
-      getHrefs = hrefs.slice(beforeGet)
+      getHrefs = cap.hrefs.slice(beforeGet)
       await tools.delete('notes/plain.md')
     } finally {
       globalThis.fetch = realFetch
@@ -734,21 +1389,22 @@ describe('single-origin tool traffic', () => {
 
     // Non-vacuous: six tool calls must have produced traffic before the
     // all-equal assertion means anything.
-    expect(hrefs.length).toBeGreaterThanOrEqual(6)
+    expect(cap.hrefs.length).toBeGreaterThanOrEqual(6)
     expect(getHrefs.length).toBeGreaterThanOrEqual(1)
-    expect([...new Set(hrefs.map(h => new URL(h).origin))]).toEqual([url])
+    expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
     expect([...new Set(getHrefs.map(h => new URL(h).origin))]).toEqual([url])
 
-    // Non-vacuous the other way: at least one request must have carried a body,
-    // or "the sentinel is in no body" is a statement about nothing.
-    expect(bodies.filter(b => b.length > 0).length).toBeGreaterThan(0)
-    expect(hrefs.filter(h => h.includes(sentinel))).toEqual([])
-    expect(bodies.filter(b => b.includes(sentinel))).toEqual([])
+    // Non-vacuous the other way: at least one request must have carried a body
+    // and at least one a header, or the absence assertions are statements about
+    // nothing.
+    expect(cap.bodies.filter(b => b.length > 0).length).toBeGreaterThan(0)
+    expect(cap.headers.filter(h => h.length > 0).length).toBeGreaterThan(0)
+    assertNoPlaintext(cap)
 
     // And what did go out in place of the plaintext: the single PUT's entry
     // values must be base64 envelopes. Absence of the sentinel on its own would
     // also hold for a body that never contained the entry at all.
-    const puts = bodies
+    const puts = cap.bodies
       .filter(b => b.startsWith('{'))
       .map(b => JSON.parse(b) as { entries?: Record<string, string> })
       .filter(b => b.entries !== undefined)
@@ -758,5 +1414,47 @@ describe('single-origin tool traffic', () => {
     for (const v of values) {
       expect(`base64:${/^[A-Za-z0-9+/]+={0,2}$/.test(v)}`).toBe('base64:true')
     }
+  })
+
+  // The same rule against a namespace that actually holds something. Above, the
+  // stub 404s every GET, so recall, search and get all ran over an empty
+  // namespace: the read tools never had any plaintext available to leak, which
+  // is the one condition under which "no plaintext on the wire" is free. Here
+  // the entries are pushed through the real client first, so the store holds
+  // genuine ciphertext, and every read is answered from it.
+  test('no plaintext reaches the wire from a namespace that holds some', async () => {
+    const { cap, fn } = intercept(ciphertextServer())
+    globalThis.fetch = fn
+    let recalled = ''
+    let got = ''
+    let searched = ''
+    let listed = ''
+    try {
+      const client = new MemlawbClient({ url, passphrase: 'test-passphrase' })
+      const tools = makeTools(client, NS)
+      await tools.save(
+        'notes/ledger.md',
+        `---\ndescription: the quokka ledger note\n---\nThe quokka ledger records ${sentinel} in full.`,
+      )
+      await tools.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      recalled = (await tools.recall('quokka ledger records')).text
+      searched = (await tools.search('quokka')).text
+      got = (await tools.get('notes/ledger.md')).text
+      listed = (await tools.list()).text
+    } finally {
+      globalThis.fetch = realFetch
+    }
+
+    // Non-vacuous, and the part that makes this test different from the one
+    // above: the namespace really was populated, the ciphertext really did
+    // decrypt, and the reads really did return the sentinel to the caller.
+    expect(got).toContain(sentinel)
+    expect(recalled).toContain('notes/ledger.md')
+    expect(searched).toContain('notes/ledger.md')
+    expect(listed).toContain('notes/other.md')
+    // Reads against a populated namespace, so the GET bodies carry real entries.
+    expect(cap.bodies.filter(b => b.includes('"entries"')).length).toBeGreaterThan(1)
+    expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
+    assertNoPlaintext(cap)
   })
 })

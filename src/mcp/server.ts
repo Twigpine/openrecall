@@ -94,7 +94,7 @@ server.registerTool(
   {
     title: 'Recall relevant memories',
     description:
-      'Return the memories most relevant to a natural-language query, ranked. Call this before answering when prior context might help.',
+      'Search stored memory with a natural-language query. Returns one bounded region per matching entry, ranked: the part of the entry that matches, capped in size, under the entry key, not the entry itself. Any hit marked as a region has more behind it, so call `memory_get` with that key when you need the full entry. If nothing matches you get the number of entries searched and what to do next. Call this before answering when prior context might help.',
     inputSchema: {
       query: z.string().describe('What you want to remember about.'),
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),

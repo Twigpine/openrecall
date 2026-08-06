@@ -120,7 +120,17 @@ export function stemTerm(term: string): string {
   return term
 }
 
-function tokenize(s: string): string[] {
+/**
+ * Words of `s` as the ranker counts them: lowercased, single characters and
+ * function words dropped, each stemmed. Exported because a second layer needs
+ * the same answer to "what is a query term". `tools.ts` picks which region of a
+ * hit to show by weighting the query's terms within that entry, and when it
+ * derived its own word list the stoplist never reached it: a stopword confined
+ * to one block scored as the rarest term in the entry and won the region from
+ * the topical word that made the entry rank at all. Two definitions of a term
+ * disagree the moment either moves, so there is one.
+ */
+export function tokenize(s: string): string[] {
   return (s.toLowerCase().match(/[a-z0-9]+/g) ?? [])
     .filter(t => t.length > 1 && !STOP.has(t))
     .map(stemTerm)
@@ -205,6 +215,17 @@ export type RankedResult = {
   searched: number
   /** Entries that scored but did not clear the floor. Excludes `limit` trimming. */
   belowFloor: number
+  /**
+   * Why `results` is empty, absent when anything was returned. The two empty
+   * cases are not the same event and must not render as the same sentence: a
+   * query the corpus was searched for and could not answer ('below-floor') is
+   * an answer about the corpus, while a query of nothing but function words
+   * ('no-content-terms') never reached the corpus at all and its zero
+   * below-floor count means nothing was scored, not that nothing was withheld.
+   * Reporting the second as the first tells the caller its fact is unrecorded
+   * and invites the duplicate save the no-match recovery exists to prevent.
+   */
+  reason?: 'no-content-terms' | 'below-floor'
 }
 
 /**
@@ -241,7 +262,7 @@ export function rankMemoriesDetailed(
   const candidates = Object.entries(entries).filter(([key]) => key !== INDEX_KEY)
   const searched = candidates.length
   const qTerms = new Set(tokenize(query))
-  if (qTerms.size === 0) return { results: [], searched, belowFloor: 0 }
+  if (qTerms.size === 0) return { results: [], searched, belowFloor: 0, reason: 'no-content-terms' }
 
   // One tokenizing pass, reused by the document-frequency pass and the scoring
   // pass, so rarity weighting costs an extra walk over the term sets rather than
@@ -287,8 +308,16 @@ export function rankMemoriesDetailed(
   scored.sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
 
   const top = scored[0]?.score ?? 0
-  if (top < ABSOLUTE_FLOOR) return { results: [], searched, belowFloor: searched }
-  const kept = scored.filter(r => r.score >= top * RELATIVE_FLOOR)
+  if (top < ABSOLUTE_FLOOR)
+    return { results: [], searched, belowFloor: searched, reason: 'below-floor' }
+  // Both floors gate every member, not just the top hit. Applying the absolute
+  // one only to the top score let the relative cut admit a tail underneath it:
+  // a strong top hit lifts `top * RELATIVE_FLOOR` above the absolute floor and
+  // nothing is lost, but a top hit near the floor drops the bar below it and
+  // returns entries from exactly the score band the floor was measured to
+  // exclude (0.36 members were reaching the caller under a 0.6 floor).
+  const cut = Math.max(top * RELATIVE_FLOOR, ABSOLUTE_FLOOR)
+  const kept = scored.filter(r => r.score >= cut)
   return { results: kept.slice(0, limit), searched, belowFloor: searched - kept.length }
 }
 

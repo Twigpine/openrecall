@@ -58,6 +58,51 @@ describe('rankMemories', () => {
   })
 })
 
+/**
+ * Where a term sits, holding everything else equal. The older assertion here
+ * ("runtime choices" ranks stack.md first) passed with the description and key
+ * weights deleted outright, because stack.md carries the terms in its body too
+ * and wins on that alone. These two pin the weights themselves: each pair
+ * differs ONLY in which field carries the query term, and the entry that
+ * carries it in the weighted field is deliberately the one that LOSES the
+ * alphabetical tie-break, so removing the weight does not merely equalize the
+ * scores, it inverts the order.
+ */
+describe('field weighting', () => {
+  const filler = (o: Record<string, string>) => {
+    for (let i = 0; i < 2; i++) o[`filler-${i}.md`] = 'Unrelated notes about the weather.'
+    return o
+  }
+  const note = (description: string, body: string) =>
+    ['---', 'name: n', `description: ${description}`, '---', body].join('\n')
+
+  // Same description text apart from the term, same body text apart from the
+  // term. `zulu.md` sorts last, so a tie hands rank 1 to `alpha.md`.
+  const byField = filler({
+    'zulu.md': note('kestrel identification notes', 'A sentence about the moor at dusk.'),
+    'alpha.md': note('assorted identification notes', 'A sentence about the kestrel at dusk.'),
+  })
+
+  test('a term in the description outranks the same term in the body', () => {
+    const r = rankMemories('kestrel', byField, 10)
+    expect(r.map(x => x.key)).toEqual(['zulu.md', 'alpha.md'])
+    expect(r[0].score).toBeGreaterThan(r[1].score)
+  })
+
+  // Same again for the key. `zulu/kestrel.md` carries the term in its key and
+  // nowhere else; `alpha.md` carries it in its body and nowhere else.
+  const byKey = filler({
+    'zulu/kestrel.md': note('assorted identification notes', 'A sentence about the moor at dusk.'),
+    'alpha.md': note('assorted identification notes', 'A sentence about the kestrel at dusk.'),
+  })
+
+  test('a term in the entry key outranks the same term in the body', () => {
+    const r = rankMemories('kestrel', byKey, 10)
+    expect(r.map(x => x.key)).toEqual(['zulu/kestrel.md', 'alpha.md'])
+    expect(r[0].score).toBeGreaterThan(r[1].score)
+  })
+})
+
 describe('rarity weighting', () => {
   // Seven entries talk about the queue; one mentions a kestrel and nothing
   // else. Both candidates cover exactly one of the two query terms, so
@@ -127,6 +172,28 @@ describe('the relevance floor', () => {
     const ranked = rankMemories(IRRELEVANT, CORPUS, Object.keys(CORPUS).length)
     // Assert on the keys, so a failure names what leaked through.
     expect(ranked.map(r => r.key)).toEqual([])
+  })
+
+  // The absolute floor gates every member, not only the top hit. It used to
+  // decide nothing but whether the result set was empty, after which the
+  // relative cut took over, and a relative cut scales with the top score: a top
+  // hit just above the floor drops the bar to a quarter of it. Measured on this
+  // query, whose best entry scores 0.6507: the returned set was eleven entries
+  // deep and nine of them sat between 0.33 and 0.57, inside the band this
+  // corpus's floor was fitted to exclude as noise.
+  const WEAK_TOP = 'what should a fresh joiner do on day one'
+  // ABSOLUTE_FLOOR, which is not exported. Kept as a literal deliberately: this
+  // asserts the measured constant, so a silent change to it should surface here.
+  const FLOOR = 0.6
+
+  test('a returned member below the absolute floor never reaches the caller', () => {
+    const ranked = rankMemories(WEAK_TOP, CORPUS, Object.keys(CORPUS).length)
+    // Non-vacuous: the query does have an answer, so this is not the empty case.
+    expect(ranked.length).toBeGreaterThan(0)
+    // Names the offenders on failure rather than asserting a count.
+    expect(ranked.filter(r => r.score < FLOOR).map(r => `${r.key}:${r.score.toFixed(4)}`)).toEqual(
+      [],
+    )
   })
 
   test('a relevant query still returns its answer and withholds the long tail', () => {

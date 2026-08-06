@@ -11,9 +11,19 @@
 
 import type { OpenRecallClient } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
-import { rankMemoriesDetailed, stemTerm } from './relevance.ts'
+import { rankMemoriesDetailed, tokenize } from './relevance.ts'
 
 export type ToolResult = { text: string; isError?: boolean }
+
+/**
+ * The client surface these tools actually use. Declared structurally, and
+ * narrowed to the four methods, so a test double is checked against the real
+ * client's signatures by the compiler instead of being waved through with an
+ * `as unknown as MemlawbClient` cast. Two stubs had already drifted under those
+ * casts (one returning `skipped` where `PushResult` says `unchanged`, and
+ * omitting `namespace`), which is exactly the drift a cast hides.
+ */
+export type MemoryClient = Pick<OpenRecallClient, 'pull' | 'push' | 'hashes' | 'delete'>
 
 const ok = (text: string): ToolResult => ({ text })
 const fail = (text: string): ToolResult => ({ text, isError: true })
@@ -113,22 +123,23 @@ function blocksOf(body: string): Block[] {
   return blocks
 }
 
-function regionTerms(s: string): string[] {
-  return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(t => t.length > 1).map(stemTerm)
-}
-
 /**
  * The block carrying the strongest query-term match, earliest on a tie.
  *
  * A term is weighted by how few of this entry's blocks contain it, which is the
  * same rarity idea the ranker applies across entries, applied here within one.
- * That is what keeps a word repeated in every paragraph (the entry's own topic,
- * or a function word the ranker's stoplist caught but this layer cannot reach)
+ * That is what keeps a word repeated in every paragraph (the entry's own topic)
  * from outvoting the rare word that actually located the answer.
+ *
+ * Terms come from the ranker's own `tokenize`, so the stoplist reaches this
+ * layer too. It has to: within-entry rarity gives its highest weight to a term
+ * confined to one block, which is the usual shape of a function word, so a
+ * query's "should" outweighed its "retry" and returned the one paragraph that
+ * had nothing to do with the question.
  */
 function pickBlock(blocks: Block[], query: string): Block {
-  const q = new Set(regionTerms(query))
-  const sets = blocks.map(b => new Set(regionTerms(`${b.heading}\n${b.text}`)))
+  const q = new Set(tokenize(query))
+  const sets = blocks.map(b => new Set(tokenize(`${b.heading}\n${b.text}`)))
   const weight = new Map<string, number>()
   for (const t of q) {
     const df = sets.reduce((n, s) => n + (s.has(t) ? 1 : 0), 0)
@@ -175,7 +186,14 @@ function regionFor(
 ): { text: string; partial: boolean } {
   const body = stripFrontmatter(content).trim()
   const blocks = blocksOf(body)
-  if (blocks.length === 0) return { text: '', partial: body.length > 0 }
+  // No block at all means the entry is frontmatter-only, or whitespace, or
+  // anything else the splitter finds nothing in. Emitting '' here rendered the
+  // hit as a bare key with nothing under it, and with an empty body it was not
+  // even marked partial, so the caller got a heading, no text and no pointer to
+  // the entry that would have shown what was actually stored. Fall back to the
+  // raw content and always claim partial: whatever this is, it is not the
+  // entry's body rendered whole.
+  if (blocks.length === 0) return { text: clip(content.trim(), cap), partial: true }
   const block = pickBlock(blocks, query)
   const text = block.fence && block.text.length > cap ? ELIDED_FENCE : block.text
 
@@ -190,7 +208,7 @@ function regionFor(
 
 export type MemoryTools = ReturnType<typeof makeTools>
 
-export function makeTools(client: OpenRecallClient, defaultNamespace: string) {
+export function makeTools(client: MemoryClient, defaultNamespace: string) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
 
   return {
@@ -221,7 +239,31 @@ export function makeTools(client: OpenRecallClient, defaultNamespace: string) {
           results: ranked,
           searched,
           belowFloor,
+          reason,
         } = rankMemoriesDetailed(query, entries, limit)
+        if (ranked.length === 0 && searched === 0) {
+          // Entries exist but none of them is a ranking candidate, which today
+          // means the namespace holds nothing but its MEMORY.md index. "0
+          // entries searched" reads as an empty namespace and is how an agent
+          // concludes there is nothing here, when in fact the one thing here is
+          // the table of contents naming everything that was ever written.
+          return ok(
+            `(nothing in ${ns} was searched for "${query}": the namespace holds only its ` +
+              'MEMORY.md index, which recall does not rank. Call memory_get with key ' +
+              '"MEMORY.md" to read the index itself.)',
+          )
+        }
+        if (ranked.length === 0 && reason === 'no-content-terms') {
+          // Nothing was scored, so the below-floor count is 0 and reporting it
+          // would claim the corpus was searched and came back empty. It was
+          // not: the query was all function words.
+          return ok(
+            `(no searchable words in "${query}": every term is a function word the ranker ` +
+              `drops, so none of the ${searched} entr${searched === 1 ? 'y' : 'ies'} in ${ns} ` +
+              'was scored. Retry with the distinctive words you expect the entry to contain, ' +
+              'or call memory_list.)',
+          )
+        }
         if (ranked.length === 0) {
           // A bare miss is read as "this fact was never recorded", and the agent
           // then saves it again under a second key that phase 1 has no way to
