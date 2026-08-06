@@ -30,7 +30,15 @@ import { dirname, join, relative, resolve } from 'node:path'
 import { MemlawbClient } from '../client/index.ts'
 import { rankMemories } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
-import { BASELINE_RANK_MS, CORPUS, HELD_OUT, sharedTerms, TUNING } from './recall-corpus.ts'
+import {
+  BASELINE_RANK_MS,
+  CORPUS,
+  HELD_OUT,
+  nearCapCorpus,
+  STOPWORDS,
+  sharedTerms,
+  TUNING,
+} from './recall-corpus.ts'
 
 const REPO_ROOT = resolve(import.meta.dir, '..')
 const NS = 'user:recall-fixture'
@@ -171,14 +179,25 @@ describe('held-out set (paraphrase probes)', () => {
     expect(HELD_OUT.length).toBeGreaterThanOrEqual(10)
   })
 
-  // Reported, never asserted all-green. This number is the U1 baseline the
-  // definition of done compares later units against, so it is printed rather
-  // than buried in an expectation.
-  test('reports the held-out pass rate', () => {
+  // Printed, because the number itself is what later units are compared
+  // against, and ratcheted, because a printed number gates nothing: a ranker
+  // that regressed to returning nothing at all used to produce an identical
+  // green run here.
+  //
+  // BASELINE: 4 of 12 top-1 correct, measured 2026-08-06 against the current
+  // ranker and the corpus in its present (fictional Quillrun) form. This is a
+  // FLOOR. Later units raise it as they land. It is never lowered to let a
+  // regression through: if a change drops the rate, the change is what is
+  // wrong, not this number. Still not asserted all-green, because phase 1 is
+  // not expected to close every pair.
+  const HELD_OUT_BASELINE = 4
+
+  test('reports the held-out pass rate and holds it at or above the baseline', () => {
     const passed = HELD_OUT.filter(p => rankMemories(p.query, CORPUS)[0]?.key === p.expect)
     const rate = ((passed.length / HELD_OUT.length) * 100).toFixed(0)
     console.log(`[held-out] ${passed.length}/${HELD_OUT.length} (${rate}%) top-1 correct`)
     expect(HELD_OUT.length).toBeGreaterThan(0)
+    expect(passed.length).toBeGreaterThanOrEqual(HELD_OUT_BASELINE)
   })
 })
 
@@ -333,8 +352,45 @@ describe('corpus provenance', () => {
     expect(edges.opaque).toBe(0)
   })
 
+  // Asserts the property its name claims. The previous body only checked that
+  // BASELINE_RANK_MS was positive and never called the generator at all, which
+  // left the function U3's latency comparison rests on with zero callers in the
+  // repo: it could have been deleted, or made to vary run over run, in silence.
   test('the near-cap generator is deterministic', () => {
+    expect(nearCapCorpus(64)).toEqual(nearCapCorpus(64))
+  })
+
+  test('the near-cap generator produces exactly the requested number of entries', () => {
+    // Keys are built from a topic and an index, so a formatting mistake could
+    // collide two indices and hand U3 a corpus quietly smaller than it asked
+    // for. A Record dedups silently, so the entry count IS the collision check;
+    // 2000 is the size the baseline was measured at, where zero-padding to four
+    // digits is the part most likely to break.
+    for (const n of [64, 2000]) {
+      expect(`${n}:${Object.keys(nearCapCorpus(n)).length}`).toBe(`${n}:${n}`)
+    }
+  })
+
+  test('the recorded baseline latency is a positive number of milliseconds', () => {
     expect(BASELINE_RANK_MS).toBeGreaterThan(0)
+  })
+
+  // The corpus module carries its own stoplist for the held-out overlap floor,
+  // and a comment used to be all that kept it in step with the ranker's. If
+  // they drift, the floor measures different terms than the ranker sees and the
+  // held-out set stops meaning what it says. `STOP` is not exported from
+  // src/mcp/relevance.ts and this unit may not change src/, so the ranker's list
+  // is parsed out of its source instead of imported. That is the whole reason
+  // for the regex: it is not preference.
+  test('the corpus stoplist matches the ranker stoplist exactly', () => {
+    const src = readFileSync(join(REPO_ROOT, 'src/mcp/relevance.ts'), 'utf8')
+    const m = /const STOP = new Set\(\s*'([^']*)'/.exec(src)
+    // Fail loudly rather than vacuously if the ranker's declaration is
+    // reshaped: an unparseable list must not read as an empty one.
+    expect(`STOP literal found:${m !== null}`).toBe('STOP literal found:true')
+    const ranker = (m as RegExpExecArray)[1].split(' ').filter(Boolean)
+    expect(ranker.length).toBeGreaterThan(20)
+    expect([...new Set(ranker)].sort()).toEqual([...STOPWORDS].sort())
   })
 })
 
@@ -363,6 +419,11 @@ describe('crypto-blind import boundary', () => {
 
     const violations: string[] = []
     const seen = new Set<string>()
+    // Every edge the traversal actually resolved, as `from -> to`. `seen` cannot
+    // stand in for this: it is seeded from the directory walk, so stubbing the
+    // edge extraction to return nothing leaves seen.size unchanged and a dead
+    // walk looks identical to a live one.
+    const resolvedEdges: string[] = []
     const queue = files.filter(f => !isMcp(f))
     for (const f of queue) seen.add(f)
     while (queue.length) {
@@ -383,6 +444,7 @@ describe('crypto-blind import boundary', () => {
         // so skipping every non-relative specifier left the boundary wide open.
         const target = spec.startsWith('.') ? resolve(dirname(current), spec) : resolveSelf(spec)
         if (!target) continue
+        resolvedEdges.push(`${relative(REPO_ROOT, current)} -> ${relative(REPO_ROOT, target)}`)
         if (forbidden(target)) {
           violations.push(`${relative(REPO_ROOT, current)} -> ${relative(REPO_ROOT, target)}`)
           continue
@@ -394,7 +456,21 @@ describe('crypto-blind import boundary', () => {
       }
     }
 
-    // Non-vacuous: the walk must actually have found the server modules.
+    // Non-vacuous, in the only way that catches a dead walk. The old check was
+    // `seen.size > 5`, which the directory walk satisfies on its own: an edge
+    // extractor returning nothing scored identically. These two assert that
+    // edges were read out of the sources and followed.
+    //
+    // 20 is a floor, not a pin: the traversal resolves 33 edges today, and a
+    // module gaining or losing an import must not turn this red. Raise it only
+    // if the real number moves far above it.
+    expect(resolvedEdges.length).toBeGreaterThanOrEqual(20)
+    // One named edge, so the count cannot be met by some other set of edges.
+    // src/handler.ts imports ./memory.ts (verified against the source); it is
+    // produced by reading handler.ts, never by the directory walk.
+    expect(resolvedEdges).toContain('src/handler.ts -> src/memory.ts')
+
+    // The walk itself must still have found the server modules.
     expect(seen.size).toBeGreaterThan(5)
     expect(violations).toEqual([])
   })

@@ -414,9 +414,11 @@ export const HELD_OUT: HeldOutPair[] = [
   { query: 'what should a fresh joiner do on day one', expect: 'project/onboarding.md' },
 ]
 
-// Words too common to carry meaning. Kept in step with the ranker's own list so
-// the overlap floor measures the same terms the ranker would.
-const STOPWORDS = new Set(
+// Words too common to carry meaning. Must match the ranker's own list, so the
+// overlap floor measures the same terms the ranker sees. Exported because
+// `tests/recall-regression.test.ts` asserts set equality against the ranker's
+// list; the claim used to be a comment nothing enforced.
+export const STOPWORDS = new Set(
   (
     'the a an and or to of in is it for on with that this i you my your we our as at be are was ' +
     'were do does what how when which their them they me'
