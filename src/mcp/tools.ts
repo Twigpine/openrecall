@@ -63,6 +63,45 @@ export function makeTools(client: OpenRecallClient, defaultNamespace: string) {
       }
     },
 
+    /**
+     * Return one entry's full body, untruncated. This is the read affordance
+     * that makes bounding other surfaces safe: nothing they trim is lost,
+     * because the agent can always name the key and get the whole entry back.
+     *
+     * Three properties of this tool are contract, not accident:
+     *
+     * Bound. Output is bounded by the caller naming exactly one key per call,
+     * so unlike recall the size of the namespace cannot amplify a single call.
+     * An agent looping this over `memory_list` keys can still reassemble the
+     * whole namespace, but only one host-visible call at a time — which is the
+     * property that makes the loop observable. A batch or multi-key variant
+     * would break that and is deliberately out of scope for phase 1.
+     *
+     * Data contract. The body is passed through verbatim, as data. Nothing in
+     * the entry is parsed or interpreted, and no value derived from entry
+     * content is ever used to choose a key, namespace, or path: the key and
+     * namespace echoed back are the caller's arguments and nothing else.
+     *
+     * Cost. This reuses `client.pull(ns)`, so it pays a whole-namespace
+     * download and decrypt per single-entry read. Accepted for phase 1: no
+     * client-side single-entry fetch exists and client/index.ts is out of
+     * scope here. A list-then-get loop multiplies that cost linearly.
+     */
+    async get(key: string, namespace?: string): Promise<ToolResult> {
+      const ns = nsOf(namespace)
+      try {
+        const { entries } = await client.pull(ns)
+        if (Object.keys(entries).length === 0) return ok(`(no memory stored in ${ns} yet)`)
+        // Own-property check, not `entries[key]`: a key like "__proto__" or
+        // "toString" must miss, never resolve to something off the prototype.
+        if (!Object.hasOwn(entries, key))
+          return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
+        return ok(`### ${key} (${ns})\n${entries[key]}`)
+      } catch (e) {
+        return fail(`get failed: ${(e as Error).message}`)
+      }
+    },
+
     /** Literal substring/keyword search over keys and decrypted content. */
     async search(query: string, namespace?: string): Promise<ToolResult> {
       const ns = nsOf(namespace)

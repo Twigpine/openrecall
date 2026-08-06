@@ -1,6 +1,6 @@
 ---
 name: openrecall-memory
-description: Long-term memory shared across sessions and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact (a preference, decision, convention, or feedback) to save it. Tools: memory_recall, memory_save, memory_search, memory_list, memory_delete. End-to-end encrypted — the server cannot read it.
+description: Long-term memory shared across sessions and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact (a preference, decision, convention, or feedback) to save it. Tools: memory_recall, memory_save, memory_search, memory_get, memory_list, memory_delete. End-to-end encrypted — the server cannot read it.
 ---
 
 # OpenRecall memory
@@ -67,6 +67,8 @@ same tools. If your agent shows MCP tools by name only until you look them up
   layout; `content` is markdown. Saving the same `key` overwrites it.
 - `memory_recall(query, limit?)` — relevance-ranked entries for a query.
 - `memory_search(query)` — literal substring/keyword search.
+- `memory_get(key)` — the full, untruncated body of one entry. Use it when
+  recall or search surfaces an entry you need to read in full.
 - `memory_list()` — list entry keys without downloading content.
 - `memory_delete(key)` — remove an entry that's wrong or stale.
 

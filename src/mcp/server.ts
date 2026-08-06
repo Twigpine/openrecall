@@ -118,6 +118,20 @@ server.registerTool(
 )
 
 server.registerTool(
+  'memory_get',
+  {
+    title: 'Read one memory entry',
+    description:
+      'Return the full, untruncated body of a single memory entry by key. Use it when recall or search shows an entry you need in full. One key per call; use `memory_list` to find the keys that exist.',
+    inputSchema: {
+      key: z.string().describe('Entry key to read, e.g. "preferences.md" or "project/api.md".'),
+      namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+    },
+  },
+  async ({ key, namespace }) => run(t => t.get(key, namespace)),
+)
+
+server.registerTool(
   'memory_list',
   {
     title: 'List memory entries',

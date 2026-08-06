@@ -669,6 +669,11 @@ describe('single-origin tool traffic', () => {
     const sentinel = 'ZQXJ-recall-r18-plaintext-sentinel-ZQXJ'
     const hrefs: string[] = []
     const bodies: string[] = []
+    // Requests attributable to `get` alone. The total-count guard below is not
+    // enough to prove get is covered: the other four tools already clear it
+    // between them, so dropping the get call would leave the check silently
+    // green over five tools.
+    let getHrefs: string[] = []
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
       hrefs.push(href)
@@ -687,15 +692,23 @@ describe('single-origin tool traffic', () => {
       await tools.recall('anything at all')
       await tools.search('anything at all')
       await tools.list()
+      // get returns whole entry bodies, so it is the surface where a leak would
+      // be worth the most; it is driven here rather than left as the one tool
+      // outside the boundary check.
+      const beforeGet = hrefs.length
+      await tools.get('notes/plain.md')
+      getHrefs = hrefs.slice(beforeGet)
       await tools.delete('notes/plain.md')
     } finally {
       globalThis.fetch = realFetch
     }
 
-    // Non-vacuous: five tool calls must have produced traffic before the
+    // Non-vacuous: six tool calls must have produced traffic before the
     // all-equal assertion means anything.
-    expect(hrefs.length).toBeGreaterThanOrEqual(5)
+    expect(hrefs.length).toBeGreaterThanOrEqual(6)
+    expect(getHrefs.length).toBeGreaterThanOrEqual(1)
     expect([...new Set(hrefs.map(h => new URL(h).origin))]).toEqual([url])
+    expect([...new Set(getHrefs.map(h => new URL(h).origin))]).toEqual([url])
 
     // Non-vacuous the other way: at least one request must have carried a body,
     // or "the sentinel is in no body" is a statement about nothing.
