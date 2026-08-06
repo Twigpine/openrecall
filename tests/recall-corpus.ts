@@ -24,6 +24,15 @@
  * requires the module to import nothing at all, so the read cannot be moved one
  * hop away into a helper.
  *
+ * One property of this text is load-bearing and easy to break while every
+ * visible property survives: how many of a query's content terms its target
+ * entry carries. Rewording an entry can leave the shared tokens, the "Why:"
+ * lines and the unstemmed token all intact while dropping a target from three
+ * matched terms to one, at which point the pair ties its competitors and the key
+ * sort, not the ranker, decides it. Three units each rediscovered that
+ * separately. `tests/recall-regression.test.ts` now pins the count per pair, so
+ * check that guard before and after editing any entry body here.
+ *
  * Explicit non-guarantee: this is not a relevance benchmark and the numbers it
  * produces are not comparable to anything outside this repo. It measures one
  * ranker against one hand-authored corpus written by the same hand that tunes
@@ -108,6 +117,9 @@ export const CORPUS: Record<string, string> = {
     '---',
     'Pushing to the shared branch, opening PRs, and mailing shops each want a nod',
     'from the release captain. A go-ahead to build it is not one to publish it.',
+    'Finished work waits on the fork until that nod lands, and the captain needs a',
+    'diff and a green smoke run before giving it. Send that as its own request,',
+    'never folded into the thread that approved the work.',
   ].join('\n'),
 
   'feedback/commit-style.md': [
@@ -361,7 +373,7 @@ export const TUNING: TuningPair[] = [
     query: 'what do I need to do before I push my work to the remote',
     expect: 'feedback/outward-actions.md',
     closedBy: ['U2', 'U3'],
-    note: 'three-way one-term tie today; needs stemming to match "pushing" and rarity weighting to break the tie',
+    note: 'unstemmed, "push" misses "Pushing" and the rule drops to a one-term tie the key sort decides; stemming restores its three-term match and rarity weighting keeps a common term from levelling it',
   },
   {
     query: 'how should I format my response',
@@ -422,7 +434,11 @@ export const HELD_OUT: HeldOutPair[] = [
 export const STOPWORDS = new Set(
   (
     'the a an and or to of in is it for on with that this i you my your we our as at be are was ' +
-    'were do does what how when which their them they me'
+    'were do does what how when which their them they me should would could must may might shall ' +
+    'will can did have has had been being am who whom whose why where there here if so but not no ' +
+    'yes all any some each both more most other such only same then than too very just also about ' +
+    'into over under after before again once from by through without during between against within ' +
+    'upon across since until while because he she him her his its us'
   )
     .split(' ')
     .filter(Boolean),

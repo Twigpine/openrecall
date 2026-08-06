@@ -4,13 +4,19 @@
  * This suite is the evidence trail for the recall work: it pins what the ranker
  * does today so every later unit has a mechanical flip to point at instead of an
  * impression. Pairs the current ranker already answers are hard assertions and
- * must stay green forever. Pairs it gets wrong that phase 1 will fix carry a
+ * must stay green forever. Pairs it got wrong that phase 1 was to fix carried a
  * `test.failing` marker naming the unit set that closes them; bun runs a failing
- * test's body under plain `bun test`, so the marker turns red the moment the
- * body starts passing, which is exactly the signal we want. `test.todo` is
- * deliberately not used: its body never executes under the bare `bun test` that
- * CI runs, so it would prove nothing. Pairs phase 1 does not close are reported
- * rather than marked, because a marker that can never flip is noise.
+ * test's body under plain `bun test`, so a marker turns red the moment its body
+ * starts passing, which is exactly the signal we want. That is how the push pair
+ * was promoted to a hard assertion once U2 and U3 landed, and no marker is
+ * outstanding now. `test.todo` is deliberately not used: its body never executes
+ * under the bare `bun test` that CI runs, so it would prove nothing. Pairs phase
+ * 1 does not close are reported rather than marked, because a marker that can
+ * never flip is noise.
+ *
+ * Match arity is pinned separately, below the tuning set: a corpus edit that
+ * quietly drops how many query terms a target carries breaks these pairs in a
+ * way the pair assertions themselves cannot name.
  *
  * The suite also carries the two boundary checks that have no other home: the
  * crypto-blind import rule (nothing under `src/` outside `src/mcp/` may reach
@@ -83,7 +89,7 @@ describe('recall tuning set (current ranker)', () => {
   test('every query literal a test looks up still exists in the tuning set', () => {
     const src = readFileSync(join(REPO_ROOT, 'tests/recall-regression.test.ts'), 'utf8')
     const literals = [...src.matchAll(/keyPairFor\(\s*'([^']*)'/g)].map(m => m[1])
-    // Non-vacuous: the three hard-asserted pairs plus the test.failing marker.
+    // Non-vacuous: the four hard-asserted pairs, one lookup each.
     expect(literals.length).toBeGreaterThanOrEqual(4)
     for (const q of literals) {
       expect(`${q} :: ${TUNING.some(p => p.query === q)}`).toBe(`${q} :: true`)
@@ -114,12 +120,114 @@ describe('recall tuning set (current ranker)', () => {
     expect(rankMemories(p.query, CORPUS)[0]?.key).toBe(p.expect)
   })
 
-  // Three entries each match exactly one query term once, tie on score, and the
-  // key sort picks the winner. Stemming alone lifts the right entry to two
-  // terms; rarity weighting is what stops a common term from tying it again.
-  test.failing('closed by {U2, U3}: the push query beats the one-term tie', () => {
+  // The rule covers three of the query's four content terms ("needs", "push",
+  // "work"); the competitors reach one each. Unstemmed, "push" does not meet
+  // "Pushing" and the entry falls back to a one-term tie the key sort decides,
+  // so stemming is what lifts it and rarity weighting is what keeps a common
+  // term from pulling a competitor level again.
+  test('closed by {U2, U3}: the push query beats the one-term tie', () => {
     const p = keyPairFor('what do I need to do before I push my work to the remote')
     expect(rankMemories(p.query, CORPUS)[0]?.key).toBe(p.expect)
+  })
+})
+
+/**
+ * Match arity: how many of a query's content terms its expected entry actually
+ * carries. Nothing pinned this, and three separate units have now each lost a
+ * day to the same failure. The corpus was rewritten into fiction under a brief
+ * that named its load-bearing properties (shared tokens, the repeated "Why:"
+ * lines, one unstemmed token) and preserved every one of them, while silently
+ * dropping targets from three matched terms to one. A pair whose target and
+ * competitors all match a single term is not the pair that was measured: it is
+ * decided by `localeCompare` on the key, so it passes or fails on alphabetical
+ * accident and no ranking unit can move it.
+ *
+ * The pin is the count, never the score. Scores move every time a weight is
+ * tuned, which is the work these units exist to do; the number of query terms a
+ * target carries is a property of the fixture text alone, so pinning it turns a
+ * silent corpus rewrite into a red test naming the exact pair it damaged.
+ *
+ * Terms come from `contentTerms` with the ranker's own `stemTerm` injected, over
+ * the stoplist the suite already asserts equal to the ranker's. A private
+ * tokenizer here would drift from the ranker exactly the way the corpus module's
+ * own stemmer did before it was deleted, and would then measure something else
+ * while still reading as if it did the job.
+ */
+describe('tuning-pair match arity', () => {
+  /**
+   * Query -> how many of its content terms the expected entry carries. Measured,
+   * not chosen: these are the arities the original probe run recorded. Raising
+   * one is a corpus improvement and needs the number here updated with it;
+   * a drop is the defect this guard exists to catch.
+   */
+  const TARGET_ARITY: Record<string, number> = {
+    'namespace validation rules': 3,
+    'deployment process': 1,
+    'am I allowed to open a pull request': 2,
+    'what do I need to do before I push my work to the remote': 3,
+  }
+
+  /**
+   * The one pair allowed to tie a competitor on term count. "deployment process"
+   * is the stemming trap: the deploy note deliberately never carries the query's
+   * own token "process" (the datastore note's "in-process" lock does), which is
+   * the whole reason the pair returned a datastore answer before stemming. It
+   * wins on field weighting instead, with "deploy" in its key, its description
+   * and its body against a bare link in the index. Writing "process" into it
+   * would both destroy the trap and copy the query into its own answer.
+   */
+  const TIE_ALLOWED = new Set(['deployment process'])
+
+  /** Non-residual pairs that name an expected entry: everything this guard covers. */
+  const pairs = TUNING.filter(p => !p.residual && p.expect !== null).map(p => ({
+    query: p.query,
+    expect: p.expect as string,
+  }))
+
+  /** Matched-term counts for one pair: the target's, and the best any other entry reaches. */
+  function arityOf(query: string, expected: string) {
+    const qTerms = contentTerms(query, stemTerm)
+    const matched = (key: string) => {
+      const entry = contentTerms(`${key} ${CORPUS[key]}`, stemTerm)
+      return [...qTerms].filter(t => entry.has(t)).length
+    }
+    const others = Object.keys(CORPUS).filter(k => k !== expected)
+    return {
+      qTerms: qTerms.size,
+      target: matched(expected),
+      best: Math.max(...others.map(matched)),
+    }
+  }
+
+  // Non-vacuity, both directions: the pin table must cover exactly the pairs the
+  // assertions below iterate, so a pair added to TUNING cannot slip past
+  // unpinned and a pin cannot survive the pair it describes being deleted.
+  test('every non-residual tuning pair is pinned, and every pin has a pair', () => {
+    expect(pairs.length).toBeGreaterThanOrEqual(4)
+    expect(pairs.map(p => p.query).sort()).toEqual(Object.keys(TARGET_ARITY).sort())
+    // The exemption is a single named pair, not a list that can grow quietly.
+    expect([...TIE_ALLOWED]).toEqual(['deployment process'])
+  })
+
+  test('each expected entry carries the pinned number of query content terms', () => {
+    for (const p of pairs) {
+      const a = arityOf(p.query, p.expect)
+      expect(`${p.query} :: arity=${a.target}`).toBe(`${p.query} :: arity=${TARGET_ARITY[p.query]}`)
+      // A pair whose query tokenizes to nothing would pin an arity of 0 happily.
+      expect(`${p.query} :: qterms=${a.qTerms > 0} arity=${a.target > 0}`).toBe(
+        `${p.query} :: qterms=true arity=true`,
+      )
+    }
+  })
+
+  test('each expected entry outmatches every competitor on matched terms', () => {
+    for (const p of pairs) {
+      const a = arityOf(p.query, p.expect)
+      const beats = TIE_ALLOWED.has(p.query) ? a.target >= a.best : a.target > a.best
+      expect(`${p.query} :: target=${a.target} best-other=${a.best} beats=${beats}`).toBe(
+        `${p.query} :: target=${a.target} best-other=${a.best} beats=true`,
+      )
+    }
   })
 })
 
@@ -149,13 +257,23 @@ describe('recall residuals (not closed by phase 1)', () => {
 
   // The "Why:" line repeated across notes is the tie generator. Report its
   // width so U3's effect on tie breadth is visible run over run.
+  //
+  // The assertion moved at U3, and upward rather than downward. It used to be
+  // `tied.length > 1`, a non-vacuity guard on a tie that existed at the time.
+  // U3's floor cuts the whole 18-wide tie: every tied entry matched one common
+  // term at a score far below the query's own weak top, so the ranking is now
+  // empty. That is this pair's declared expectation (`expect: null`, "nothing
+  // should rank"), so the pin is the pair's own contract instead of the width
+  // of a tie that no longer reaches the caller. The width log stays, because
+  // the tie is still there underneath the floor and later units can move it.
   test('reports the width of the conventions tie', () => {
     const p = pairFor('why do we hold these conventions')
+    expect(p.expect).toBeNull()
     const ranked = rankMemories(p.query, CORPUS, Object.keys(CORPUS).length)
     const topScore = ranked[0]?.score ?? 0
     const tied = ranked.filter(r => r.score === topScore)
     console.log(`[residual] conventions tie width=${tied.length} at score ${topScore.toFixed(3)}`)
-    expect(tied.length).toBeGreaterThan(1)
+    expect(ranked.map(r => r.key)).toEqual([])
   })
 })
 

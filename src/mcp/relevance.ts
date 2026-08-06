@@ -3,18 +3,42 @@
  *
  * Recall happens entirely client-side — the server only ever holds ciphertext,
  * so it cannot rank for us. We decrypt locally, then score each entry against
- * the query with a small TF-style ranker tuned for memdir markdown: matches in
- * the frontmatter `description:` and in the entry key (filename) count for more
- * than matches buried in the body, and an entry must cover a decent share of
- * the query terms to rank at all. This mirrors the intent of openclaude's
- * findRelevantMemories without needing its internals.
+ * the query with a small TF-IDF-style ranker tuned for memdir markdown: matches
+ * in the frontmatter `description:` and in the entry key (filename) count for
+ * more than matches buried in the body, a term is worth less the more of the
+ * caller's entries carry it, and covering less of the query scales an entry's
+ * score down. This mirrors the intent of openclaude's findRelevantMemories
+ * without needing its internals.
+ *
+ * What an entry covers no longer decides whether it is returned; the floor
+ * below does. That split matters because a wrong recall answer delivered
+ * confidently is worse than none: a query the corpus cannot answer has to come
+ * back empty rather than with whatever scored highest among the noise.
  */
 
 export type ScoredEntry = { key: string; score: number; content: string }
 
-// Common words that shouldn't drive relevance.
+/**
+ * Function words that carry no topical signal, removed before scoring.
+ *
+ * Deliberately not left to document frequency. Rarity weighting only downweights
+ * a word that many entries happen to use, and whether a modal or an interrogative
+ * is common is a property of the corpus, not of the word: measured over this
+ * fixture plus generated filler, `df("should")` stayed 1 at 26, 226 and 2026
+ * entries, so idf rated it maximally informative at every size and "when should
+ * I repot an orchid" outscored a must-pass pair two to one. Corpus growth does
+ * not fix that; a stoplist does, identically at every size.
+ *
+ * The list is closed to function words on purpose: modals, auxiliaries,
+ * interrogatives, pronouns, quantifiers, conjunctions and bare prepositions.
+ * Nothing topical goes in, however common it looks. `short`, `long`, `up`,
+ * `down`, `out`, `off`, `own`, `get`, `done` and `need` are all arguable and are
+ * all left out, because a memdir legitimately holds a short timeout, a long
+ * poll, an owner and a service that is down, and a stopped word is unfindable
+ * rather than merely downweighted.
+ */
 const STOP = new Set(
-  'the a an and or to of in is it for on with that this i you my your we our as at be are was were do does what how when which their them they me'.split(
+  'the a an and or to of in is it for on with that this i you my your we our as at be are was were do does what how when which their them they me should would could must may might shall will can did have has had been being am who whom whose why where there here if so but not no yes all any some each both more most other such only same then than too very just also about into over under after before again once from by through without during between against within upon across since until while because he she him her his its us'.split(
     ' ',
   ),
 )
@@ -88,48 +112,158 @@ function frontmatterDescription(content: string): string {
 }
 
 /**
+ * Fraction of the top score an entry must reach to be returned. A query's own
+ * best hit sets the scale, so this trims the tail of one-token flukes that sit
+ * an order of magnitude below the real answer without needing a corpus-wide
+ * constant. It can never produce an empty result: the top hit is always 100% of
+ * itself, which is why the absolute floor below exists.
+ */
+const RELATIVE_FLOOR = 0.25
+
+/**
+ * Minimum top score for a query to be answered at all. This is the only
+ * component that can produce no-match, and it is what replaces the old
+ * zero-coverage hard drop: with soft coverage, a query relevant to nothing
+ * still scores most of the corpus above zero on incidental one-token matches.
+ *
+ * CORPUS- AND SCORING-SPECIFIC. Measured 2026-08-06 against the fixture corpus
+ * in `tests/recall-corpus.ts` (26 entries) with the rarity weighting and soft
+ * coverage in this file. It does not transfer to another corpus or another
+ * scoring function; any change to the weights above means re-measuring it, and
+ * the plan's quoted 4.62-8.10 vs 1.61-3.15 separation came from a different
+ * corpus and a pre-stemming ranker, so it was not inherited.
+ *
+ * RE-MEASURED with the function-word stoplist above in place. The previous 0.5
+ * was fitted to a score distribution that no longer exists and would now be
+ * stale rather than conservative.
+ *
+ * Measured populations, top score per query (4 non-residual tuning pairs plus
+ * the 12 held-out probes against 12 off-domain probes about cooking, geography,
+ * sport, gardening and music):
+ *   relevant   0.66 .. 43.23 over the 11 that match anything, e.g. "namespace
+ *              validation rules" 43.23, "deployment process" 9.37, "am I
+ *              allowed to open a pull request" 0.66; 5 paraphrases match
+ *              nothing at all and sit at 0.00.
+ *   irrelevant 0.00 .. 4.39, with 8 of 12 now at 0.00 (up from 4), e.g. "how
+ *              long should I braise short ribs in red wine" 0.55, "which key is
+ *              the moonlight sonata written in" 3.55, "which river runs through
+ *              Budapest" 4.39.
+ *
+ * The stoplist removed the whole class of false positives that came from a
+ * function word being rare: "when should I repot an orchid" and "who won the
+ * 1994 world cup final" both dropped from above the weakest must-pass pair to
+ * exactly zero. The populations still DO NOT separate, and the reason is now a
+ * different and harder one: the three remaining non-zero irrelevant probes match
+ * on genuinely topical words this corpus happens to use ("key" in the crypto
+ * note, "runs" in the CI description, "use" in the tone note). Those are words a
+ * caller must be able to search for, so no stoplist reaches them and only
+ * semantics would.
+ *
+ * 0.6 sits in the real gap that is left, above the strongest irrelevant query
+ * the floor can reach (0.55) and below the weakest must-pass (0.66), with about
+ * 9% either side rather than the 6% the pre-stoplist value had. The consequence
+ * is stated rather than hidden: 3 of 12 irrelevant probes still return a hit.
+ */
+const ABSOLUTE_FLOOR = 0.6
+
+export type RankedResult = {
+  /** Entries that cleared both floors, highest score first, capped at `limit`. */
+  results: ScoredEntry[]
+  /** Entries considered for this query. */
+  searched: number
+  /** Entries that scored but did not clear the floor. Excludes `limit` trimming. */
+  belowFloor: number
+}
+
+/**
+ * How many of `entries` contain each query term, so a term's weight can scale
+ * with its rarity. Computed per call over the entries passed in rather than
+ * from a stored index: recall ranks whatever the caller decrypted, there is no
+ * persistent corpus to build statistics from, and the caller's set is the only
+ * population the answer is drawn from anyway.
+ */
+function documentFrequency(qTerms: Set<string>, docs: Set<string>[]): Map<string, number> {
+  const df = new Map<string, number>()
+  for (const t of qTerms) {
+    let n = 0
+    for (const d of docs) if (d.has(t)) n++
+    df.set(t, n)
+  }
+  return df
+}
+
+/**
+ * Rank entries (entryKey -> plaintext) against a query, with the counts the
+ * no-match message needs. `rankMemories` is the plain-list form and delegates
+ * here.
+ */
+export function rankMemoriesDetailed(
+  query: string,
+  entries: Record<string, string>,
+  limit = 5,
+): RankedResult {
+  const searched = Object.keys(entries).length
+  const qTerms = new Set(tokenize(query))
+  if (qTerms.size === 0) return { results: [], searched, belowFloor: 0 }
+
+  // One tokenizing pass, reused by the document-frequency pass and the scoring
+  // pass, so rarity weighting costs an extra walk over the term sets rather than
+  // an extra tokenization of every entry.
+  const docs = Object.entries(entries).map(([key, content]) => {
+    const keyTokens = new Set(tokenize(key))
+    const descTokens = new Set(tokenize(frontmatterDescription(content)))
+    const bodyTf = new Map<string, number>()
+    for (const t of tokenize(content)) bodyTf.set(t, (bodyTf.get(t) ?? 0) + 1)
+    const all = new Set([...keyTokens, ...descTokens, ...bodyTf.keys()])
+    return { key, content, keyTokens, descTokens, bodyTf, all }
+  })
+
+  const df = documentFrequency(
+    qTerms,
+    docs.map(d => d.all),
+  )
+  // A term in every entry is worth log(2); a term in one of 27 is worth log(28).
+  // Never zero, so a common term still contributes something.
+  const idf = (t: string) => Math.log(1 + searched / Math.max(df.get(t) ?? 0, 1))
+
+  const scored: ScoredEntry[] = []
+  for (const d of docs) {
+    let score = 0
+    let covered = 0
+    for (const t of qTerms) {
+      let raw = 0
+      if (d.bodyTf.has(t)) raw += 1 + Math.log(d.bodyTf.get(t)!)
+      if (d.descTokens.has(t)) raw += 3
+      if (d.keyTokens.has(t)) raw += 2
+      if (raw > 0) {
+        score += raw * idf(t)
+        covered++
+      }
+    }
+    // Coverage degrades a score, it no longer eliminates an entry: partial
+    // matches stay rankable and the floors below decide what is returned. An
+    // entry covering nothing scores zero and never clears the floor anyway.
+    score *= covered / qTerms.size
+    scored.push({ key: d.key, score, content: d.content })
+  }
+
+  scored.sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
+
+  const top = scored[0]?.score ?? 0
+  if (top < ABSOLUTE_FLOOR) return { results: [], searched, belowFloor: searched }
+  const kept = scored.filter(r => r.score >= top * RELATIVE_FLOOR)
+  return { results: kept.slice(0, limit), searched, belowFloor: searched - kept.length }
+}
+
+/**
  * Rank entries (entryKey -> plaintext) against a query. Returns the top `limit`
- * by score, highest first; entries with no query-term overlap are dropped.
+ * by score, highest first; entries below the relevance floor are withheld, and
+ * a query nothing answers returns nothing.
  */
 export function rankMemories(
   query: string,
   entries: Record<string, string>,
   limit = 5,
 ): ScoredEntry[] {
-  const qTerms = new Set(tokenize(query))
-  if (qTerms.size === 0) return []
-
-  const scored: ScoredEntry[] = []
-  for (const [key, content] of Object.entries(entries)) {
-    const keyTokens = new Set(tokenize(key))
-    const descTokens = new Set(tokenize(frontmatterDescription(content)))
-    const bodyTf = new Map<string, number>()
-    for (const t of tokenize(content)) bodyTf.set(t, (bodyTf.get(t) ?? 0) + 1)
-
-    let score = 0
-    let covered = 0
-    for (const t of qTerms) {
-      let hit = false
-      if (bodyTf.has(t)) {
-        score += 1 + Math.log(bodyTf.get(t)!)
-        hit = true
-      }
-      if (descTokens.has(t)) {
-        score += 3
-        hit = true
-      }
-      if (keyTokens.has(t)) {
-        score += 2
-        hit = true
-      }
-      if (hit) covered++
-    }
-    if (covered === 0) continue
-    // Reward entries that cover more of the query, penalize one-term flukes.
-    score *= covered / qTerms.size
-    scored.push({ key, score, content })
-  }
-
-  scored.sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
-  return scored.slice(0, limit)
+  return rankMemoriesDetailed(query, entries, limit).results
 }

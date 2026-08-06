@@ -4,8 +4,14 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
-import { CORPUS, DAMAGE_VOCAB, DAMAGE_WORDS } from './recall-corpus.ts'
+import { rankMemories, rankMemoriesDetailed, stemTerm } from '../src/mcp/relevance.ts'
+import {
+  BASELINE_RANK_MS,
+  CORPUS,
+  DAMAGE_VOCAB,
+  DAMAGE_WORDS,
+  nearCapCorpus,
+} from './recall-corpus.ts'
 
 const entries = {
   'MEMORY.md': '# index\n- [prefs](prefs.md)\n- [deploy](deploy.md)',
@@ -47,6 +53,154 @@ describe('rankMemories', () => {
   // different grammatical shapes, and the ranker has to see through that.
   test('a query in a different word form still finds its note', () => {
     expect(rankMemories('deployment plans', entries)[0]?.key).toBe('deploy.md')
+  })
+})
+
+describe('rarity weighting', () => {
+  // Seven entries talk about the queue; one mentions a kestrel and nothing
+  // else. Both candidates cover exactly one of the two query terms, so
+  // coverage cannot be what separates them: under the pre-U3 ranker the entry
+  // saying "queue" three times won at 1.049 against the kestrel entry's 0.500,
+  // because three occurrences of a word every entry uses outweighed one
+  // occurrence of a word nobody else uses. Document frequency inverts that,
+  // and the ordering is where it is observable.
+  const flock: Record<string, string> = {}
+  for (let i = 0; i < 8; i++) flock[`note-${i}.md`] = 'The queue drains in order.'
+  flock['note-0.md'] = 'The queue feeds the queue that feeds the queue.'
+  flock['note-3.md'] = 'A kestrel was watched at dusk.'
+
+  test('a term in every entry counts for less than a term in one', () => {
+    const r = rankMemories('queue kestrel', flock, 8)
+    expect(r[0]?.key).toBe('note-3.md')
+    // And the repetition still counts for something among equals: the entry
+    // saying "queue" three times outranks the ones saying it once.
+    const rest = r.filter(x => x.key !== 'note-3.md')
+    expect(rest[0]?.key).toBe('note-0.md')
+  })
+})
+
+describe('soft coverage', () => {
+  // Coverage degrades a score instead of eliminating an entry. `narrow.md`
+  // carries its single query term in the key, the description and the body,
+  // which is twice the raw match strength of any one of `wide.md`'s three
+  // hits; covering three of four terms is what puts wide ahead anyway. Both
+  // stay in the result: partial coverage is a penalty, not a rejection.
+  const birds: Record<string, string> = {
+    'birds/wide.md': [
+      '---',
+      'name: wide',
+      'description: a survey of the moor',
+      '---',
+      'A kestrel, a merlin and an osprey were counted at dusk.',
+    ].join('\n'),
+    'birds/falcon.md': [
+      '---',
+      'name: falcon',
+      'description: falcon identification notes',
+      '---',
+      'The falcon is told apart by its wingbeat.',
+    ].join('\n'),
+  }
+  for (let i = 0; i < 6; i++) birds[`filler-${i}.md`] = 'Unrelated notes about the weather.'
+
+  test('covering more of the query outranks a stronger match on less of it', () => {
+    const r = rankMemories('kestrel merlin osprey falcon', birds, 10)
+    expect(r.map(x => x.key)).toEqual(['birds/wide.md', 'birds/falcon.md'])
+  })
+})
+
+describe('the relevance floor', () => {
+  // The must-not case, and the reason the floor and soft coverage are one
+  // change rather than two. A cooking question shares exactly one incidental
+  // token with the corpus ("red", from "a red run stops it", plus a couple of
+  // one-token flukes), so today's ranker answers it with three print-routing
+  // notes. Removing the zero-coverage drop without a floor makes that worse,
+  // not better: nearly every entry would come back. An empty ranking is the
+  // only correct answer, and only the absolute half of the floor can produce
+  // it, because a relative cut measured against the top score can never trim
+  // the top hit.
+  const IRRELEVANT = 'how long should I braise short ribs in red wine'
+
+  test('a query relevant to nothing clears no entry and returns an empty ranking', () => {
+    const ranked = rankMemories(IRRELEVANT, CORPUS, Object.keys(CORPUS).length)
+    // Assert on the keys, so a failure names what leaked through.
+    expect(ranked.map(r => r.key)).toEqual([])
+  })
+
+  test('a relevant query still returns its answer and withholds the long tail', () => {
+    const ranked = rankMemories('namespace validation rules', CORPUS, Object.keys(CORPUS).length)
+    expect(ranked[0]?.key).toBe('reference/namespaces.md')
+    // The floor is only doing work if it trims: without it this query scores
+    // most of the corpus above zero.
+    expect(ranked.length).toBeLessThan(Object.keys(CORPUS).length / 2)
+  })
+})
+
+describe('rankMemoriesDetailed', () => {
+  // The counts exist for the no-match message U7 builds, and an unread count is
+  // an unchecked one, so they are pinned here rather than at their consumer.
+  const all = Object.keys(CORPUS).length
+
+  test('reports what was searched and what the floor withheld', () => {
+    const d = rankMemoriesDetailed('namespace validation rules', CORPUS, 5)
+    expect(d.searched).toBe(all)
+    expect(d.results[0]?.key).toBe('reference/namespaces.md')
+    // belowFloor counts what the floor withheld, not what `limit` trimmed:
+    // results plus below-floor must not add up to more than the corpus.
+    expect(d.belowFloor).toBeGreaterThan(0)
+    expect(d.belowFloor).toBeLessThan(all)
+    expect(d.results.length + d.belowFloor).toBeLessThanOrEqual(all)
+  })
+
+  test('a no-match query reports every entry as below the floor', () => {
+    const d = rankMemoriesDetailed('how long should I braise short ribs in red wine', CORPUS, 5)
+    expect(d.results).toEqual([])
+    expect(`${d.belowFloor}/${d.searched}`).toBe(`${all}/${all}`)
+  })
+
+  test('rankMemories returns exactly the detailed results', () => {
+    for (const q of ['namespace validation rules', 'deployment process', 'nothing at all here']) {
+      expect(rankMemories(q, CORPUS, 3)).toEqual(rankMemoriesDetailed(q, CORPUS, 3).results)
+    }
+  })
+})
+
+describe('near-cap scale', () => {
+  // Ranking runs over everything the caller decrypted, so the cost scales with
+  // the namespace, and U3 adds a document-frequency pass over the whole corpus.
+  // 2000 entries is the size BASELINE_RANK_MS was measured at. This cannot go
+  // through MemlawbClient or the server: tests/setup.ts pins the caps at 5
+  // entries and 5000 bytes, so the push would trip quota long before ranking.
+  const corpus = nearCapCorpus(2000)
+  const SEEDED = 'queue 1234'
+
+  test('ranks the seeded entry first at 2000 entries', () => {
+    expect(rankMemories(SEEDED, corpus, 5)[0]?.key).toBe('generated/queue-1234.md')
+  })
+
+  // BUDGET: 4x BASELINE_RANK_MS, the frozen pre-U2 literal in
+  // tests/recall-corpus.ts. The multiple was fixed before U3 was implemented,
+  // deliberately, so it could not be chosen to fit the result: it is generous
+  // enough to absorb a shared CI runner and a cold JIT, and exceeding it fails
+  // this unit rather than prompting a revision of the number. Measured
+  // 2026-08-06 on the dev box: 59.8ms median against the 112ms budget, with the
+  // pre-U3 ranker at 44.9ms on the same run, so the rarity pass costs ~33%.
+  // Median of five, because one timed run on a loaded box measures the box.
+  test('ranks a 2000-entry corpus within 4x the frozen baseline', () => {
+    const times: number[] = []
+    for (let i = 0; i < 5; i++) {
+      const started = performance.now()
+      rankMemories(SEEDED, corpus, 5)
+      times.push(performance.now() - started)
+    }
+    times.sort((a, b) => a - b)
+    const median = times[2]
+    console.log(
+      `[scale] rank of 2000 entries: ${median.toFixed(1)}ms (budget ${4 * BASELINE_RANK_MS}ms)`,
+    )
+    expect(`${median < 4 * BASELINE_RANK_MS} @ ${median.toFixed(1)}ms`).toBe(
+      `true @ ${median.toFixed(1)}ms`,
+    )
   })
 })
 
