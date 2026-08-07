@@ -1829,7 +1829,10 @@ describe('guard positive controls', () => {
     test('an ordinary module trips nothing', () => {
       // The false-positive control, and the reason PURE_BUILTINS exists: a
       // guard that fires on `new Map()` is a guard the next contributor
-      // weakens. Five shapes of unremarkable code, all silent.
+      // weakens. Eight shapes of unremarkable code, all silent. Add to this
+      // list rather than trimming it: the private-field entry was the one
+      // real false positive found, and it surfaced only because someone
+      // planted ordinary code instead of another attack.
       const ordinary = [
         "import { join } from 'node:path'\nexport const under = (a: string) => join('x', a)\n",
         'export const seen = new Map()\nseen.set(1, 2)\n',
