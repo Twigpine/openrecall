@@ -251,6 +251,28 @@ const RELATIVE_FLOOR = 0.25
  * it. That is the vocabulary-mismatch residual, and it is upstream of anything
  * this constant can do.
  *
+ * QUALIFIED the same day, and read this before acting on the paragraph above.
+ * Those 60 questions were written by the person who then read the results,
+ * which is the weakest ground truth available and, as it turned out, sampled
+ * one end of a curve rather than the middle. A held-out set was built to check
+ * it: 65 real bug reports, each asserted from timestamps to predate every
+ * entry that answers it, so none could borrow its answer's wording. Against
+ * the same 838-entry store this floor emptied the result set for 0 of those 65
+ * at full entry length, and 0 of 65 with entries truncated to the one-fact
+ * shape. hit@5 was 42% and 46% respectively, against a 1.7% chance baseline.
+ *
+ * So the floor is NOT currently withholding answers to held-out queries, and
+ * "48 of 60 fell below this floor" is a fact about self-authored questions.
+ * What governs the hit rate is how much of a query's wording already appears
+ * in the entry answering it: roughly 0% below a quarter shared, 15% in the
+ * middle, 75% above three quarters, reproduced on two independently built
+ * query sets. Supplying the missing vocabulary at write time was then measured
+ * against a control that appended the same text to the WRONG entries, and both
+ * moved identically, so that overlap predicts retrieval without causing it and
+ * is not a lever. Treat the constant as unvalidated rather than as proven
+ * harmful, and change it only on evidence from queries nobody wrote after
+ * seeing the answer.
+ *
  * Do not refit this number in response to the above. Reproduce it first with
  * `docs/plans/measurements/floor-vs-scale.ts`, and note that that harness
  * builds its relevant probes from each entry's own rarest terms, which is the
@@ -267,6 +289,15 @@ export type RankedResult = {
   searched: number
   /** Entries that scored but did not clear the floor. Excludes `limit` trimming. */
   belowFloor: number
+  /**
+   * Entries that cleared both floors and were then cut by `limit`. Deliberately
+   * separate from `belowFloor`, which is defined to exclude limit trimming, so
+   * neither number can absorb the other's meaning. Without it the caller cannot
+   * distinguish a namespace with exactly `limit` relevant entries from one with
+   * many more, and reporting the first as the second is how an agent concludes
+   * it has seen everything the corpus holds.
+   */
+  trimmedByLimit: number
   /**
    * Why `results` is empty, absent when anything was returned. The two empty
    * cases are not the same event and must not render as the same sentence: a
@@ -314,7 +345,8 @@ export function rankMemoriesDetailed(
   const candidates = Object.entries(entries).filter(([key]) => key !== INDEX_KEY)
   const searched = candidates.length
   const qTerms = new Set(tokenize(query))
-  if (qTerms.size === 0) return { results: [], searched, belowFloor: 0, reason: 'no-content-terms' }
+  if (qTerms.size === 0)
+    return { results: [], searched, belowFloor: 0, trimmedByLimit: 0, reason: 'no-content-terms' }
 
   // One tokenizing pass, reused by the document-frequency pass and the scoring
   // pass, so rarity weighting costs an extra walk over the term sets rather than
@@ -361,7 +393,7 @@ export function rankMemoriesDetailed(
 
   const top = scored[0]?.score ?? 0
   if (top < ABSOLUTE_FLOOR)
-    return { results: [], searched, belowFloor: searched, reason: 'below-floor' }
+    return { results: [], searched, belowFloor: searched, trimmedByLimit: 0, reason: 'below-floor' }
   // Both floors gate every member, not just the top hit. Applying the absolute
   // one only to the top score let the relative cut admit a tail underneath it:
   // a strong top hit lifts `top * RELATIVE_FLOOR` above the absolute floor and
@@ -370,7 +402,12 @@ export function rankMemoriesDetailed(
   // exclude (0.36 members were reaching the caller under a 0.6 floor).
   const cut = Math.max(top * RELATIVE_FLOOR, ABSOLUTE_FLOOR)
   const kept = scored.filter(r => r.score >= cut)
-  return { results: kept.slice(0, limit), searched, belowFloor: searched - kept.length }
+  return {
+    results: kept.slice(0, limit),
+    searched,
+    belowFloor: searched - kept.length,
+    trimmedByLimit: Math.max(0, kept.length - limit),
+  }
 }
 
 /**

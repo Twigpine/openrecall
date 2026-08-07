@@ -467,6 +467,58 @@ describe('recall region bounds against the in-memory client stub', () => {
     }
     expect(`over budget: ${over.join(', ')}`).toBe('over budget: ')
   })
+
+  // The ranker weights `description:` at +3, so an entry can be selected for
+  // terms that exist ONLY in its frontmatter. `regionFor` then strips that
+  // frontmatter before choosing a block, and computed `partial` against the
+  // already-stripped body, so removing the very text that caused the hit did
+  // not count as returning less than the whole entry. A short single-block
+  // body therefore came back unmarked and with no pointer: the caller got a
+  // confident hit whose reason for being a hit was invisible and unreachable.
+  test('an entry matched on frontmatter alone is marked partial and carries a pointer', async () => {
+    const entries = {
+      'deploy.md': '---\ndescription: never deploy on Friday\n---\nDeploys use Fly.\n',
+      'billing.md': 'Unrelated note about invoicing.\n',
+    }
+    const r = await makeTools(makeStubClient(entries), 'user:me').recall('deploy Friday')
+    expect(r.isError).toBeUndefined()
+    // Non-vacuity: the hit has to happen at all, or this asserts nothing.
+    expect(r.text).toContain('deploy.md')
+    // The body is what got emitted, so the constraint is genuinely absent from
+    // the text; the pointer is the only way the caller can still reach it.
+    expect(r.text).toContain('Deploys use Fly.')
+    expect(r.text).not.toContain('Friday')
+    expect(r.text).toContain('region only')
+    expect(r.text).toContain('memory_get')
+  })
+
+  // Two truncation paths, one of them silent. Budget omissions get a counted
+  // tail; hits trimmed by `limit` got nothing, so a namespace with far more
+  // above-floor entries than the limit rendered exactly like one with none to
+  // spare. `belowFloor` cannot cover this by design: it is computed before the
+  // slice and explicitly excludes limit trimming.
+  test('hits trimmed by limit are counted, not dropped in silence', async () => {
+    const entries: Record<string, string> = {}
+    for (let i = 0; i < 15; i++) {
+      entries[`k${i}.md`] = `The postgres migration rollback step number ${i}.`
+    }
+    const above = rankMemoriesDetailed('postgres migration rollback', entries, 999).results.length
+    // Non-vacuity: every entry must clear the floor, or "trimmed by limit" is
+    // not what is being measured.
+    expect(above).toBe(15)
+
+    const r = await makeTools(makeStubClient(entries), 'user:me').recall(
+      'postgres migration rollback',
+      undefined,
+      5,
+    )
+    const shown = r.text.split('### ').length - 1
+    expect(shown).toBe(5)
+    const m = /\((\d+) further relevant entr(?:y|ies) not shown/.exec(r.text)
+    expect(`tail present:${m !== null}`).toBe('tail present:true')
+    expect(Number((m as RegExpExecArray)[1])).toBe(above - shown)
+    expect(r.text).toContain('memory_get')
+  })
 })
 
 /**

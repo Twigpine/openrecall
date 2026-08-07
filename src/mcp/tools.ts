@@ -235,7 +235,16 @@ function regionFor(
   const avail = cap - prefix.length
   const text = block.fence && block.text.length > avail ? ELIDED_FENCE : block.text
   const out = prefix + clip(text, avail)
-  return { text: out, partial: out !== body }
+  // Compared against the WHOLE entry, not the frontmatter-stripped body. The
+  // ranker weights `description:` at +3 (`relevance.ts`), so an entry can be
+  // selected for terms that live only in its frontmatter, which this function
+  // then strips before picking a block. Measuring `partial` against the stripped
+  // body made that removal invisible: a short single-block entry came back with
+  // `partial: false` and no pointer, so the caller got a confident hit whose
+  // reason for matching had been deleted from the answer and was unreachable.
+  // `content.trim()` subsumes the old check, since with no frontmatter to strip
+  // it is exactly `body`.
+  return { text: out, partial: out !== content.trim() }
 }
 
 export type MemoryTools = ReturnType<typeof makeTools>
@@ -271,6 +280,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           results: ranked,
           searched,
           belowFloor,
+          trimmedByLimit,
           reason,
         } = rankMemoriesDetailed(query, entries, limit)
         if (ranked.length === 0 && searched === 0) {
@@ -328,12 +338,28 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         // both lengths depend on numbers that are only known once the loop that
         // spends the budget has finished.
         const leadFor = (n: number) => `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}:\n\n`
-        const tailFor = (n: number) =>
+        // Two different reasons a relevant entry is missing, and both have to be
+        // reported. Only budget omissions were counted, so `limit` trimming was
+        // silent: a namespace with 15 entries above the floor and a limit of 5
+        // rendered identically to one holding exactly 5, and "5 relevant
+        // memories" reads as the whole answer. `belowFloor` cannot cover this,
+        // since it is computed before the slice and excludes limit trimming by
+        // definition, which is why the ranker now reports `trimmedByLimit`.
+        const REASON_BUDGET = 'the recall size cap was reached'
+        const REASON_LIMIT = 'more cleared the relevance floor than `limit` allows'
+        const REASON_BOTH = `${REASON_BUDGET}, and ${REASON_LIMIT}`
+        const tailFor = (n: number, why: string) =>
           n
-            ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: the recall size cap was reached. Call memory_list, then memory_get by key.)`
+            ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: ${why}. Call memory_list, then memory_get by key.)`
             : ''
         const parts: string[] = []
-        let budget = AGGREGATE_CHARS - leadFor(ranked.length).length - tailFor(ranked.length).length
+        // Reserved at the worst case on BOTH axes, the widest count and the
+        // longest reason, because the cap covers the whole returned string and
+        // neither value is known until the loop below has finished.
+        let budget =
+          AGGREGATE_CHARS -
+          leadFor(ranked.length).length -
+          tailFor(ranked.length + trimmedByLimit, REASON_BOTH).length
         let omitted = 0
         for (const r of ranked) {
           const header = `### ${r.key}\n`
@@ -350,7 +376,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           parts.push(part)
         }
         const shown = parts.length
-        const tail = tailFor(omitted)
+        const tail = tailFor(
+          omitted + trimmedByLimit,
+          omitted && trimmedByLimit ? REASON_BOTH : omitted ? REASON_BUDGET : REASON_LIMIT,
+        )
         return ok(`${leadFor(shown)}${parts.join('\n\n')}${tail}`)
       } catch (e) {
         return fail(`recall failed: ${(e as Error).message}`)
