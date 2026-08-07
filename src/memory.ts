@@ -73,6 +73,11 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
   const store = getStore()
   const entries: Record<string, string> = {}
   const entryChecksums: Record<string, string> = {}
+  // Copied from the manifest the server already keeps, in the same pass and
+  // under the same drift guard, so an entry can never be served with a
+  // timestamp whose blob is missing. This is metadata the server authored
+  // itself; nothing here reads or derives anything from plaintext.
+  const entryUpdatedAt: Record<string, string> = {}
 
   await Promise.all(
     Object.entries(m.entries).map(async ([key, meta]) => {
@@ -80,6 +85,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
       if (!bytes) return // manifest/blob drift — skip rather than 500
       entries[key] = Buffer.from(bytes).toString('base64')
       entryChecksums[key] = meta.hash
+      entryUpdatedAt[key] = meta.updatedAt
     }),
   )
 
@@ -88,7 +94,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
     version: m.version,
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
-    content: { entries, entryChecksums },
+    content: { entries, entryChecksums, entryUpdatedAt },
   }
 }
 

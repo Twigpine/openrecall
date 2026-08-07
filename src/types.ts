@@ -41,6 +41,7 @@ export type MemoryData = {
   content: {
     entries: Record<string, string> // entryKey -> ciphertext (base64)
     entryChecksums: Record<string, string> // entryKey -> sha256:<hex>
+    entryUpdatedAt: Record<string, string> // entryKey -> ISO 8601, from the manifest
   }
 }
 
