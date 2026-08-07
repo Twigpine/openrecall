@@ -273,12 +273,12 @@ const RELATIVE_FLOOR = 0.25
  * harmful, and change it only on evidence from queries nobody wrote after
  * seeing the answer.
  *
- * Do not refit this number in response to the above. Reproduce it first with
- * `docs/plans/measurements/floor-vs-scale.ts`, and note that that harness
- * builds its relevant probes from each entry's own rarest terms, which is the
- * easiest query an entry can receive: it reports a comfortable separation at
- * every corpus size and is exactly the trap this paragraph exists to warn
- * about. Only real queries show the inversion.
+ * Do not refit this number in response to the above. Reproduce it first, and
+ * when you build the harness to do that, avoid the trap the original one fell
+ * into: it drew each relevant probe from the target entry's own rarest terms,
+ * which is the easiest query that entry can possibly receive, so it reported a
+ * comfortable separation at every corpus size while real queries showed the
+ * inversion. Probe with queries written without the answer in view.
  */
 const ABSOLUTE_FLOOR = 0.6
 
