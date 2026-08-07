@@ -24,6 +24,17 @@
  * requires the module to import nothing at all, so the read cannot be moved one
  * hop away into a helper.
  *
+ * What that guard does not do, stated plainly because the machinery reads as
+ * though it were airtight: it cannot see real content pasted in here as a
+ * string literal. Pasted text is reproducible across machines, names no
+ * identifier, reaches no property and uses no capability, so every check passes
+ * on it. The guard defends against content arriving by machinery — a read at
+ * import time, an env-dependent value, a route through an unvetted identifier —
+ * which is what both real incidents were. The control for someone deliberately
+ * pasting a person's notes into this file is a human reading the diff, and a
+ * change to this file should be reviewed as content, not skimmed as fixture
+ * noise.
+ *
  * One property of this text is load-bearing and easy to break while every
  * visible property survives: how many of a query's content terms its target
  * entry carries. Rewording an entry can leave the shared tokens, the "Why:"

@@ -136,6 +136,28 @@ export function tokenize(s: string): string[] {
     .map(stemTerm)
 }
 
+/**
+ * The same words without the stoplist, for the one caller that scores WITHIN a
+ * single entry rather than across a corpus.
+ *
+ * A function word carries no topic, which is why the ranker drops it when
+ * choosing between entries. Choosing between the blocks of one entry is a
+ * different question: the entry's topic is already settled, and what separates
+ * two of its sections is frequently exactly the word the ranker discards.
+ * "Before you push" and "After you push" are the same section to a stoplisted
+ * tokenizer, so a query asking for one gets the other by tie-break.
+ *
+ * This does not reopen the bug the stoplist closed at the region layer. That one
+ * needed a stopword confined to a single block while the topical terms were
+ * spread over several, so within-entry rarity handed the function word the
+ * highest weight. Rarity is still what weights these terms, and a word that
+ * appears in every block (the usual shape of a function word in prose) gets the
+ * minimum weight rather than the maximum.
+ */
+export function tokenizeAll(s: string): string[] {
+  return (s.toLowerCase().match(/[a-z0-9]+/g) ?? []).filter(t => t.length > 1).map(stemTerm)
+}
+
 /** Pull the `description:` value out of YAML-ish frontmatter, if present. */
 function frontmatterDescription(content: string): string {
   const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)

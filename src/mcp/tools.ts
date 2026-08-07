@@ -11,7 +11,7 @@
 
 import type { OpenRecallClient } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
-import { rankMemoriesDetailed, tokenize } from './relevance.ts'
+import { rankMemoriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
 
 export type ToolResult = { text: string; isError?: boolean }
 
@@ -66,9 +66,16 @@ const MIN_REGION_CHARS = 80
 type Block = { text: string; heading: string; fence: boolean }
 
 /**
- * Drop YAML-ish frontmatter. It is metadata the ranker already reads through
- * `description:`, and returning it as a region would spend the budget on the
- * one part of an entry that never answers the question.
+ * Drop YAML-ish frontmatter before the body is split into regions. It is
+ * metadata the ranker already reads through `description:`, and returning it
+ * alongside a body would spend the budget on the one part of an entry that
+ * never answers the question.
+ *
+ * So frontmatter is never a region of an entry that HAS a body. It is not
+ * unreachable, though: when the stripped body yields no block at all, the
+ * fallback in `regionFor` emits the raw content, frontmatter included. That is
+ * the whole entry, and an entry whose only content is its own description has
+ * nothing else to show.
  */
 function stripFrontmatter(content: string): string {
   const m = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(content)
@@ -131,28 +138,45 @@ function blocksOf(body: string): Block[] {
  * That is what keeps a word repeated in every paragraph (the entry's own topic)
  * from outvoting the rare word that actually located the answer.
  *
- * Terms come from the ranker's own `tokenize`, so the stoplist reaches this
- * layer too. It has to: within-entry rarity gives its highest weight to a term
- * confined to one block, which is the usual shape of a function word, so a
- * query's "should" outweighed its "retry" and returned the one paragraph that
- * had nothing to do with the question.
+ * Function words count here, but only as a tiebreak. Which entry answers a query
+ * says nothing about its function words, which is why the ranker drops them.
+ * Which REGION of an already-chosen entry answers it often turns on exactly
+ * those words: "Before you push" and "After you push" are the same section once
+ * the stoplist has run, so the query "after I push" got the first one by
+ * tie-break and answered the opposite of what was asked.
+ *
+ * They cannot be scored alongside topical terms, though. Within-entry rarity
+ * hands its highest weight to a term confined to one block, which is the usual
+ * shape of a function word in an entry about one subject, so scoring them
+ * together let a query's "should" outweigh its "retry" and return the paragraph
+ * with nothing to do with the question. Hence two keys: the topical terms
+ * (`tokenize`, stoplist applied) decide, and the function words (everything else
+ * in `tokenizeAll`) only separate blocks the topical terms scored equally.
  */
 function pickBlock(blocks: Block[], query: string): Block {
-  const q = new Set(tokenize(query))
-  const sets = blocks.map(b => new Set(tokenize(`${b.heading}\n${b.text}`)))
+  const all = new Set(tokenizeAll(query))
+  const topical = new Set(tokenize(query))
+  const sets = blocks.map(b => new Set(tokenizeAll(`${b.heading}\n${b.text}`)))
   const weight = new Map<string, number>()
-  for (const t of q) {
+  for (const t of all) {
     const df = sets.reduce((n, s) => n + (s.has(t) ? 1 : 0), 0)
     if (df > 0) weight.set(t, Math.log(1 + blocks.length / df))
   }
   let best = 0
   let bestScore = -1
+  let bestTie = -1
   for (let i = 0; i < blocks.length; i++) {
     let score = 0
-    for (const [t, w] of weight) if (sets[i].has(t)) score += w
-    if (score > bestScore) {
+    let tie = 0
+    for (const [t, w] of weight) {
+      if (!sets[i].has(t)) continue
+      if (topical.has(t)) score += w
+      else tie += w
+    }
+    if (score > bestScore || (score === bestScore && tie > bestTie)) {
       best = i
       bestScore = score
+      bestTie = tie
     }
   }
   // bestScore 0 means nothing in the entry matched at block level, e.g. the hit
@@ -192,17 +216,25 @@ function regionFor(
   // even marked partial, so the caller got a heading, no text and no pointer to
   // the entry that would have shown what was actually stored. Fall back to the
   // raw content and always claim partial: whatever this is, it is not the
-  // entry's body rendered whole.
+  // entry's body rendered whole. This is the one path on which frontmatter
+  // reaches the caller, and it is the right answer here: there is no body it
+  // could be competing with for the budget.
   if (blocks.length === 0) return { text: clip(content.trim(), cap), partial: true }
   const block = pickBlock(blocks, query)
-  const text = block.fence && block.text.length > cap ? ELIDED_FENCE : block.text
 
+  // The heading prefix is decided first because it is what the block's text
+  // actually has to fit inside. Deciding elision against `cap` and then clipping
+  // to `cap - prefix.length` left a band the width of the prefix in which a
+  // fence was judged to fit, then cut mid-block: an opening fence with no
+  // closer, which reads downstream as "the rest of this is code".
   let prefix = ''
   if (block.heading) {
     const h = clip(block.heading, Math.floor(cap / 3))
     if (cap - h.length - 1 >= MIN_REGION_CHARS) prefix = `${h}\n`
   }
-  const out = prefix + clip(text, cap - prefix.length)
+  const avail = cap - prefix.length
+  const text = block.fence && block.text.length > avail ? ELIDED_FENCE : block.text
+  const out = prefix + clip(text, avail)
   return { text: out, partial: out !== body }
 }
 
@@ -286,29 +318,40 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         // bounds the rest. Hits the budget cannot reach are reported by count
         // rather than dropped silently, so the caller can tell a short answer
         // from a truncated one.
+        //
+        // The budget covers the WHOLE returned string, not just the regions.
+        // Charging only the parts left the lead line, the tail and every "\n\n"
+        // joiner outside the bound, and a limit-20 recall measured 4,158 against
+        // a documented 4,000: a cap the output can exceed is not a cap. Both
+        // fixed pieces are reserved at their worst case (every hit omitted, so
+        // the tail is present and its count is as wide as it can get) because
+        // both lengths depend on numbers that are only known once the loop that
+        // spends the budget has finished.
+        const leadFor = (n: number) => `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}:\n\n`
+        const tailFor = (n: number) =>
+          n
+            ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: the recall size cap was reached. Call memory_list, then memory_get by key.)`
+            : ''
         const parts: string[] = []
-        let budget = AGGREGATE_CHARS
+        let budget = AGGREGATE_CHARS - leadFor(ranked.length).length - tailFor(ranked.length).length
         let omitted = 0
         for (const r of ranked) {
           const header = `### ${r.key}\n`
           const pointer = `\n(region only; call memory_get with key "${r.key}" for the full entry)`
-          const allowed = Math.min(PER_HIT_CHARS, budget - header.length - pointer.length)
+          const joiner = parts.length ? '\n\n'.length : 0
+          const allowed = Math.min(PER_HIT_CHARS, budget - joiner - header.length - pointer.length)
           if (allowed < MIN_REGION_CHARS) {
             omitted++
             continue
           }
           const region = regionFor(r.content, query, allowed)
           const part = header + region.text + (region.partial ? pointer : '')
-          budget -= part.length
+          budget -= joiner + part.length
           parts.push(part)
         }
         const shown = parts.length
-        const tail = omitted
-          ? `\n\n(${omitted} further relevant entr${omitted === 1 ? 'y' : 'ies'} not shown: the recall size cap was reached. Call memory_list, then memory_get by key.)`
-          : ''
-        return ok(
-          `${shown} relevant memor${shown === 1 ? 'y' : 'ies'} from ${ns}:\n\n${parts.join('\n\n')}${tail}`,
-        )
+        const tail = tailFor(omitted)
+        return ok(`${leadFor(shown)}${parts.join('\n\n')}${tail}`)
       } catch (e) {
         return fail(`recall failed: ${(e as Error).message}`)
       }

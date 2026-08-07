@@ -4,7 +4,13 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { rankMemories, rankMemoriesDetailed, stemTerm } from '../src/mcp/relevance.ts'
+import {
+  rankMemories,
+  rankMemoriesDetailed,
+  stemTerm,
+  tokenize,
+  tokenizeAll,
+} from '../src/mcp/relevance.ts'
 import {
   BASELINE_RANK_MS,
   CORPUS,
@@ -519,5 +525,32 @@ describe('stemming does not manufacture matches', () => {
         expect(`${a}/${b} :: ${ranked.length}`).toBe(`${a}/${b} :: 0`)
       }
     }
+  })
+})
+
+/**
+ * `tokenizeAll` is the region picker's word list: the ranker's tokenizer minus
+ * the stoplist. Two layers ask different questions of the same text, so the two
+ * functions have to differ in exactly one way and nowhere else.
+ */
+describe('tokenizeAll', () => {
+  test('keeps function words and drops nothing else that tokenize keeps', () => {
+    const s = 'Before you push, run the formatter. After I push, watch the pipelines.'
+    const all = tokenizeAll(s)
+    const topical = tokenize(s)
+
+    // The one difference: the function words survive.
+    expect(all).toContain('before')
+    expect(all).toContain('after')
+    expect(topical).not.toContain('before')
+    expect(topical).not.toContain('after')
+
+    // Everything else is identical: same stemming, same single-character drop,
+    // and every term the ranker keeps is present here too.
+    expect(all).toContain('pipeline')
+    expect(topical).toContain('pipeline')
+    expect(all).not.toContain('i')
+    for (const t of topical)
+      expect(`${t} in tokenizeAll: ${all.includes(t)}`).toBe(`${t} in tokenizeAll: true`)
   })
 })

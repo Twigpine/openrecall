@@ -24,6 +24,16 @@
  * nothing they send it carries plaintext). Corpus and probes live in
  * `tests/recall-corpus.ts`.
  *
+ * Each of those checks is a composite of several rules, and each rule is a
+ * function over source text (or a capture, or a directory) with its own
+ * positive control in `guard positive controls` at the foot of this file. That
+ * shape is not incidental: the guards were previously tested only by planting a
+ * violation and watching the composite go red, and five different sub-checks
+ * were later found to be neuterable one at a time with the suite still green.
+ * A rule added here without a control is a rule nobody can tell is alive. What
+ * each guard does and does not claim to catch is written on the rule functions
+ * themselves (`moduleRisks`, `corpusRisks`).
+ *
  * Explicit non-guarantee: the held-out pass rate printed here is a baseline for
  * comparison inside this repo only. It is not a relevance benchmark, it is not
  * asserted all-green during phase 1, and a run that improves it has not thereby
@@ -31,13 +41,21 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { readdirSync, readFileSync } from 'node:fs'
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { ciphertextHash, MemlawbClient } from '../client/index.ts'
 import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
-import { makeStubClient } from './mcp-tools.test.ts'
 import {
   BASELINE_RANK_MS,
   CORPUS,
@@ -48,8 +66,12 @@ import {
   sharedTerms,
   TUNING,
 } from './recall-corpus.ts'
+import { makeStubClient } from './stub-client.ts'
 
-const REPO_ROOT = resolve(import.meta.dir, '..')
+// Real path, not the lexical one: every boundary decision below compares a
+// resolved path against this prefix, so a repo reached through a symlinked
+// parent would otherwise classify every file in it as outside the repo.
+const REPO_ROOT = realpathSync(resolve(import.meta.dir, '..'))
 const NS = 'user:recall-fixture'
 
 const pairFor = (query: string) => {
@@ -68,9 +90,11 @@ const keyPairFor = (query: string) => {
 /**
  * The one stub, imported rather than re-declared. A second hand-rolled stand-in
  * lived here and answered `push` differently from both the real client and the
- * stub in tests/mcp-tools.test.ts; each reached `makeTools` behind an
- * `as unknown as MemlawbClient` cast, which is precisely what let them disagree.
- * `makeTools` now takes the structural `MemoryClient`, so this is type-checked.
+ * shared stub; each reached `makeTools` behind an `as unknown as MemlawbClient`
+ * cast, which is precisely what let them disagree. `makeTools` now takes the
+ * structural `MemoryClient`, so this is type-checked. It comes from
+ * `tests/stub-client.ts`, a plain module: importing it out of a test file
+ * booted that file's real HTTP server as a side effect of wanting a stub.
  * The corpus still never goes near the wire.
  */
 const stubClient = (entries: Record<string, string>) => makeStubClient(entries)
@@ -685,7 +709,13 @@ const KEYWORDS = new Set(
 function isMemberAccess(code: string, at: number): boolean {
   let i = at - 1
   while (i >= 0 && /\s/.test(code[i])) i--
-  return i >= 0 && code[i] === '.'
+  // `#name` is an ES private field, which is always a member of the enclosing
+  // class and can never be a global. Without this arm the `#` is skipped and
+  // the bare name reads as an undeclared callee, so an ordinary class writing
+  // `this.#cache.get(k)` is reported as calling an unvetted global `cache`.
+  // A guard that fires on a standard language feature gets deleted by the
+  // first contributor it blocks, which costs more than the hole it closes.
+  return i >= 0 && (code[i] === '.' || code[i] === '#')
 }
 
 /** Every identifier in `code` that is not a property name and not a keyword. */
@@ -700,19 +730,55 @@ function freeIdentifiers(code: string): string[] {
 }
 
 /**
- * Identifiers in callee or receiver position: `x(`, `new x(`, `x.y(`. Every way
- * of loading a module is one of these, so this is the position where an
- * unaccounted-for capability shows up, and restricting to it keeps object keys
- * and type names out of the way.
+ * Identifiers in callee or receiver position: `x(`, `new x(`, `x.y(`, `x<T>(`.
+ * Every way of loading a module is one of these, so this is the position where
+ * an unaccounted-for capability shows up, and restricting to it keeps object
+ * keys out of the way.
+ *
+ * `<` is in the lookahead because leaving it out made the classification depend
+ * on type arguments: `new Map()` was reported and `new Map<K, V>()` was not, so
+ * the guard fired on one of the two spellings of ordinary code and stayed quiet
+ * on the other. A guard that red-flags `new Map()` gets weakened by the first
+ * contributor it inconveniences, which costs more than the hole it closed.
  */
 function calleeRoots(code: string): string[] {
   const out: string[] = []
-  for (const m of code.matchAll(/([A-Za-z_$][\w$]*)\s*(?=[(.])/g)) {
+  for (const m of code.matchAll(/([A-Za-z_$][\w$]*)\s*(?=[(.<])/g)) {
     if (isMemberAccess(code, m.index)) continue
     if (KEYWORDS.has(m[1])) continue
     out.push(m[1])
   }
   return out
+}
+
+/** From the `(` at `open`, the index one past its matching `)`, or -1. */
+function afterParens(code: string, open: number): number {
+  let depth = 0
+  for (let i = open; i < code.length; i++) {
+    if (code[i] === '(') depth++
+    else if (code[i] === ')') {
+      depth--
+      if (depth === 0) return i + 1
+    }
+  }
+  return -1
+}
+
+/**
+ * True when the paren group opening at `open` is a parameter list rather than
+ * an argument list: a body follows it, or a return-type annotation and then a
+ * body, or (in an interface or a type literal) a return-type annotation alone.
+ *
+ * This is the whole fix for the hole that let a call in statement position be
+ * read as a declaration. `Function('s', 'return imp' + 'ort(s)')(spec)` on its
+ * own line matched the method-definition regex below, registered `Function` as
+ * a name the file declares, and skipped the global allowlist entirely — while
+ * bun ran it and loaded client/crypto.ts. An argument list is followed by the
+ * rest of an expression, never by `{`, `=>` or `:`.
+ */
+function isParameterList(code: string, open: number): boolean {
+  const end = afterParens(code, open)
+  return end >= 0 && /^\s*(?::|\{|=>)/.test(code.slice(end, end + 160))
 }
 
 /**
@@ -744,10 +810,13 @@ function declaredNames(code: string): Set<string> {
   for (const m of code.matchAll(/\bfor\s*\(\s*(?:const|let|var)\s+([^;]*?)\s+of\b/g)) add(m[1])
   // Method and standalone function definitions, plus every `name:` binding at
   // the head of a line (parameter lists whose types carry their own parens).
+  // The paren group must be a parameter list: without that test any call in
+  // statement position registered its callee as locally declared, which is the
+  // hole `isParameterList` exists to close.
   for (const m of code.matchAll(
     /^[ \t]*(?:export\s+|async\s+|static\s+|private\s+|public\s+|protected\s+|readonly\s+)*([A-Za-z_$][\w$]*)\s*(?:<[^>]*>)?\s*\(/gm,
   ))
-    names.add(m[1])
+    if (isParameterList(code, m.index + m[0].length - 1)) names.add(m[1])
   for (const m of code.matchAll(/^[ \t]*([A-Za-z_$][\w$]*)\s*\??\s*:/gm)) names.add(m[1])
   // Parameter lists whose own type annotations carry parens (`fn: () => T`),
   // which the flat regexes above cannot span. A paren group counts only when a
@@ -793,8 +862,8 @@ const ACCOUNTED_LOADS = [
  * caller treats an unresolvable edge as a violation: an edge nobody can follow
  * cannot be proven not to reach plaintext code.
  */
-function edgesOf(abs: string): { specs: string[]; opaque: number } {
-  const src = stripComments(readFileSync(abs, 'utf8'))
+function edgesOfSource(raw: string): { specs: string[]; opaque: number } {
+  const src = stripComments(raw)
   const specs: string[] = []
   // static `from '...'` and bare `import '...'`
   for (const re of [/\bfrom\s*['"]([^'"]+)['"]/g, /\bimport\s+['"]([^'"]+)['"]/g]) {
@@ -856,41 +925,177 @@ payload.push([
 process.stdout.write(JSON.stringify(payload))
 `
 
+/**
+ * Every identifier the corpus module names that it does not itself declare.
+ * An allowlist, pinned exactly, and that is the whole point: a denylist can
+ * only ever refuse the routes somebody thought of, while this refuses
+ * everything nobody vouched for. `Bun`, `process`, `globalThis`, `fetch`,
+ * `eval`, `Function`, `Reflect` and every other capability root are absent
+ * from it without being named, which is what makes it fail closed. A legal
+ * new name here is a one-line edit made on purpose; an illegal one is red.
+ */
+const CORPUS_IDENTIFIERS = ['Boolean', 'Record', 'Set', 'String']
+
+/**
+ * Property names the fixture may not reach, on anything.
+ *
+ * Pinning identifiers without pinning property names allowlists the whole
+ * language: `String` is on the list above and `String.constructor` IS
+ * `Function`, so `String.constructor('return Bu' + 'n')()` names only vetted
+ * identifiers, and `stripToCode` blanks the string so the `Bun` token inside it
+ * is invisible to a code-only scan. That route was verified to reach 39,724
+ * bytes of a real file. Both spellings are checked, plain and computed.
+ */
+const BANNED_PROPERTIES = ['__proto__', 'apply', 'bind', 'call', 'constructor', 'prototype']
+
+/**
+ * Tokens swept for over source with STRING LITERALS INTACT, because a fixture
+ * that has to spell a capability inside a string to reach it is exactly the
+ * case a code-only scan cannot see. None of these is a word English prose uses,
+ * which is what makes the strings-intact sweep safe on a file that is almost
+ * entirely prose. Comments are still stripped: the module's own doc comment
+ * discusses importing, and a guard that fires on prose about itself is a guard
+ * somebody deletes.
+ */
+const CORPUS_STRING_TOKENS = [
+  'Bun',
+  'Function',
+  'Proxy',
+  'Reflect',
+  'WebAssembly',
+  'Worker',
+  'eval',
+  'globalThis',
+  'import',
+  'node:',
+  'require',
+]
+
+/**
+ * The same idea for hooks whose names are ordinary English ("the deployment
+ * process", "we call the on-call engineer"), so these run over code alone and
+ * match on word boundaries. Substring matching here read `processedRoots` as a
+ * violation, which is the cry-wolf failure that gets a guard weakened.
+ */
+const CORPUS_CODE_HOOKS = [/\bprocess\b/, /\breadFile/, /\bfetch\s*\(/]
+
+/** Free identifiers of the corpus module: named but not declared by it. */
+function corpusFreeIdentifiers(raw: string): string[] {
+  const code = stripToCode(raw)
+  const declared = declaredNames(code)
+  return [...new Set(freeIdentifiers(code))].filter(n => !declared.has(n)).sort()
+}
+
+/**
+ * Corpus provenance rules over source text. One violation string per rule
+ * instance, so every rule below can be driven from a fixture on its own.
+ *
+ * WHAT THIS CATCHES: content arriving in the fixture by machinery. A read at
+ * import time (of a path, an env var, a subprocess, a socket), any route to one
+ * through an identifier or a property nobody vouched for, and — through the
+ * reproducibility check that runs alongside it — anything whose value differs
+ * between two machines.
+ *
+ * WHAT THIS EXPLICITLY DOES NOT CATCH: real content pasted into the fixture as
+ * a string literal. Pasted text is perfectly reproducible, names no identifier,
+ * reaches no property and uses no capability, so no check here can see it. The
+ * guard therefore defends against ACCIDENTAL and PROGRAMMATIC ingestion, which
+ * is what both real incidents were, and NOT against a person who means to put
+ * someone's notes in the corpus. The control for that is human diff review, and
+ * a corpus edit is exactly the diff a reviewer should read as content rather
+ * than as code.
+ */
+function corpusRisks(raw: string): string[] {
+  const out: string[] = []
+  const code = stripToCode(raw)
+  // Comments removed, string bodies kept: the sweep below needs to read inside
+  // the literals, and must not read the file's own prose about itself.
+  const literals = stripComments(raw)
+
+  const declared = declaredNames(code)
+  for (const n of [...new Set(freeIdentifiers(code))].sort())
+    if (!declared.has(n) && !CORPUS_IDENTIFIERS.includes(n))
+      out.push(`names unvetted identifier \`${n}\``)
+
+  const properties = [
+    ...[...code.matchAll(/\.\s*([A-Za-z_$][\w$]*)/g)].map(m => m[1]),
+    // Computed access with a literal key, read off the unblanked source: after
+    // `stripToCode`, `String['constructor']` is `String[ 0 ]`.
+    ...[...literals.matchAll(/\[\s*['"]([^'"]+)['"]\s*\]/g)].map(m => m[1]),
+  ]
+  for (const p of new Set(properties))
+    if (BANNED_PROPERTIES.includes(p)) out.push(`reaches property \`${p}\``)
+
+  // The module system, in one rule that names no loader form: a synthetic
+  // fixture loads nothing, so neither token may appear in its code at all. This
+  // covers `import(...)`, `import.meta.*`, `require(...)` and `createRequire`
+  // together.
+  const leftover = code.match(/\b(?:import|require)\b/g)
+  if (leftover) out.push(`${leftover.length} module-system reference(s)`)
+  const { specs, opaque } = edgesOfSource(raw)
+  for (const s of specs) out.push(`imports \`${s}\``)
+  if (opaque > 0) out.push(`${opaque} unresolvable import()/require()`)
+
+  for (const t of CORPUS_STRING_TOKENS) {
+    // Whole words for identifiers, literal for `node:`. Substring matching read
+    // "required" in an entry description as a `require` violation.
+    const hit = /^\w+$/.test(t) ? new RegExp(`\\b${t}\\b`).test(literals) : literals.includes(t)
+    if (hit) out.push(`carries capability token \`${t}\``)
+  }
+  for (const re of CORPUS_CODE_HOOKS)
+    if (re.test(code)) out.push(`carries input hook \`${re.source}\``)
+
+  return out
+}
+
+/**
+ * Runs `program` twice, in two working directories and two environments, and
+ * reports what stopped the two runs from agreeing.
+ *
+ * This is the property the token lists were always a proxy for: the module's
+ * exports do not depend on the machine it runs on. Anything read from outside
+ * itself — an env var, a relative path, a subprocess, a socket — differs across
+ * these two runs or fails outright in one of them. A crashed run is reported
+ * rather than compared, because two crashes also produce equal (empty) output.
+ */
+function reproducibility(program: string): { risks: string[]; out: string } {
+  const run = (cwd: string, env: Record<string, string>) =>
+    Bun.spawnSync({ cmd: [process.execPath, '-e', program], cwd, env, stderr: 'pipe' })
+
+  const a = run(REPO_ROOT, { ...process.env } as Record<string, string>)
+  const b = run(tmpdir(), {
+    PATH: process.env.PATH ?? '',
+    HOME: tmpdir(),
+    PWD: tmpdir(),
+    TZ: 'UTC',
+    LANG: 'C',
+    MEMLAWB_CORPUS_PROBE: 'second-run',
+  })
+
+  const risks: string[] = []
+  for (const [name, r] of [
+    ['a', a],
+    ['b', b],
+  ] as const)
+    if (r.exitCode !== 0)
+      risks.push(`run ${name} exit:${r.exitCode} ${r.stderr.toString().slice(0, 200)}`)
+  const outA = a.stdout.toString()
+  if (!risks.length && outA !== b.stdout.toString())
+    risks.push('exports differ across cwd and environment')
+  return { risks, out: outA }
+}
+
 describe('corpus provenance', () => {
   const CORPUS_MODULE = join(REPO_ROOT, 'tests/recall-corpus.ts')
 
-  /**
-   * Every identifier the corpus module names that it does not itself declare.
-   * An allowlist, pinned exactly, and that is the whole point: a denylist can
-   * only ever refuse the routes somebody thought of, while this refuses
-   * everything nobody vouched for. `Bun`, `process`, `globalThis`, `fetch`,
-   * `eval`, `Function`, `Reflect` and every other capability root are absent
-   * from it without being named, which is what makes it fail closed. A legal
-   * new name here is a one-line edit made on purpose; an illegal one is red.
-   */
-  const CORPUS_IDENTIFIERS = ['Boolean', 'Record', 'Set', 'String']
-
   test('the corpus module names nothing it does not declare, and loads nothing', () => {
-    const code = stripToCode(readFileSync(CORPUS_MODULE, 'utf8'))
-    const declared = declaredNames(code)
-    const free = [...new Set(freeIdentifiers(code))].filter(n => !declared.has(n)).sort()
-    expect(free).toEqual(CORPUS_IDENTIFIERS)
-
-    // The module system, separately: a synthetic fixture loads nothing, so
-    // neither token may appear in the code at all. This covers `import(...)`,
-    // `import.meta.*`, `require(...)` and `createRequire` in one rule, without
-    // naming any of them.
-    expect(code.match(/\b(?:import|require)\b/g)).toBeNull()
-    const edges = edgesOf(CORPUS_MODULE)
-    expect(edges.specs).toEqual([])
-    expect(edges.opaque).toBe(0)
-
-    // Cheap fast-fail kept underneath, widened to the whole `Bun` namespace and
-    // to any bare `process`, neither of which has a legitimate use in a static
-    // fixture. This is no longer the load-bearing check; it just names the
-    // likely mistake in one line when it happens.
-    for (const hook of ['Bun.', 'Bun[', 'process', 'readFile', 'node:', 'fetch('])
-      expect(`${hook}:${code.includes(hook)}`).toBe(`${hook}:false`)
+    const raw = readFileSync(CORPUS_MODULE, 'utf8')
+    expect(corpusRisks(raw)).toEqual([])
+    // The allowlist pinned in both directions, which the violation list alone
+    // does not do: an entry left behind after the last use of the name it
+    // vouches for is a stale vouch, and stale vouches are how a list stops
+    // meaning anything.
+    expect(corpusFreeIdentifiers(raw)).toEqual(CORPUS_IDENTIFIERS)
   })
 
   /**
@@ -902,38 +1107,13 @@ describe('corpus provenance', () => {
    * differs across those two runs or fails outright in one of them.
    */
   test('the corpus module exports the same bytes under a different cwd and environment', () => {
-    const program = corpusProbe(CORPUS_MODULE)
-    const run = (cwd: string, env: Record<string, string>) =>
-      Bun.spawnSync({ cmd: [process.execPath, '-e', program], cwd, env, stderr: 'pipe' })
-
-    const a = run(REPO_ROOT, { ...process.env } as Record<string, string>)
-    const b = run(tmpdir(), {
-      PATH: process.env.PATH ?? '',
-      HOME: tmpdir(),
-      PWD: tmpdir(),
-      TZ: 'UTC',
-      LANG: 'C',
-      MEMLAWB_CORPUS_PROBE: 'second-run',
-    })
-
-    // Fail loudly rather than vacuously: two crashed runs also produce equal
-    // (empty) output, which would make the comparison below meaningless.
-    for (const [name, r] of [
-      ['a', a],
-      ['b', b],
-    ] as const)
-      expect(`${name} exit:${r.exitCode} ${r.stderr.toString().slice(0, 400)}`).toBe(
-        `${name} exit:0 `,
-      )
-
-    const outA = a.stdout.toString()
-    const outB = b.stdout.toString()
+    const { risks, out } = reproducibility(corpusProbe(CORPUS_MODULE))
     // Non-vacuous: the payload must actually carry the corpus, not an empty
     // array that two runs would agree on trivially.
-    expect(outA.length).toBeGreaterThan(50_000)
-    expect(outA).toContain('project/deploy.md')
-    expect(outA).toContain('BASELINE_RANK_MS')
-    expect(`identical:${outA === outB}`).toBe('identical:true')
+    expect(out.length).toBeGreaterThan(50_000)
+    expect(out).toContain('project/deploy.md')
+    expect(out).toContain('BASELINE_RANK_MS')
+    expect(risks).toEqual([])
   })
 
   // Asserts the property its name claims. The previous body only checked that
@@ -1034,38 +1214,168 @@ const extOf = (name: string) => {
   return i <= 0 ? '' : name.slice(i)
 }
 
+/** Resolved path, falling back to the lexical one when the link is broken. */
+const realPath = (p: string) => {
+  try {
+    return realpathSync(p)
+  } catch {
+    return p
+  }
+}
+
 /**
- * Globals a module under `src/` may call. An allowlist, for the same reason the
- * corpus identifier pin is one: enumerating loader forms (`createRequire`,
- * `new Worker(`, `Bun.plugin(`, `import.meta.resolve(`) only ever refuses the
- * ones somebody listed, and that list has now been holed twice. Every way of
- * loading a module is a call or a construction, so requiring the callee to be
- * either declared in the file or named here refuses all of them at once,
- * including the ones nobody has thought of.
+ * Everything under `dir` split into modules bun would execute and entries the
+ * classifier cannot vouch for.
+ *
+ * Symlinks are reported rather than followed, and that is the fix for a
+ * demonstrated escape: the boundary test classifies by lexical path
+ * (`relative(REPO_ROOT, abs).startsWith('client/')`), so `src/shim.ts` pointing
+ * at `client/crypto.ts` reads as an ordinary `src/` module that imports
+ * nothing, and giving the same link a `.json` suffix got it skipped as inert on
+ * top of that. Deciding which links are benign is a judgement the walk is in no
+ * position to make, so it makes none: a link under `src/` is a violation until
+ * a human accounts for it. Files that survive are returned as real paths, so
+ * the prefix tests the caller runs are over resolved locations.
  */
-const VETTED_GLOBALS = new Set([
+function classifyTree(dir: string): { files: string[]; unclassified: string[] } {
+  const files: string[] = []
+  const unclassified: string[] = []
+  const walk = (d: string) => {
+    for (const e of readdirSync(d, { withFileTypes: true })) {
+      const full = join(d, e.name)
+      // Before the directory test: a dirent for a symlink reports isDirectory()
+      // false even when it points at one, and a link to a directory would
+      // otherwise be classified by its own (usually absent) extension.
+      if (e.isSymbolicLink()) {
+        unclassified.push(`${relative(REPO_ROOT, full)} (symlink)`)
+        continue
+      }
+      if (e.isDirectory()) {
+        walk(full)
+        continue
+      }
+      const ext = extOf(e.name)
+      if (EXEC_EXTS.includes(ext)) files.push(realPath(full))
+      else if (!INERT_EXTS.includes(ext)) unclassified.push(relative(REPO_ROOT, full))
+    }
+  }
+  walk(dir)
+  return { files, unclassified }
+}
+
+/**
+ * Globals a module under `src/` may call, in two lists that are read the same
+ * way but mean different things.
+ *
+ * `PURE_BUILTINS` is language and platform furniture that cannot load a module,
+ * spawn anything, or touch the outside world: `Map`, `RegExp`, a timer, a type
+ * utility. Using one is not a decision anybody needs to vouch for, and a guard
+ * that made a contributor justify `new Map()` would be edited out of the way
+ * within a week.
+ *
+ * `VETTED_GLOBALS` is the capability roots — the handful of names that can
+ * reach the module graph, the filesystem or the network, each vouched for by
+ * name for `src/`. This is the list that carries the security meaning, and it
+ * is an allowlist for the same reason the corpus identifier pin is one:
+ * enumerating loader forms (`createRequire`, `new Worker(`, `Bun.plugin(`,
+ * `import.meta.resolve(`) only ever refuses the ones somebody listed, and that
+ * list has now been holed twice. Every way of loading a module is a call or a
+ * construction, so requiring the callee to be declared in the file or named in
+ * one of these two lists refuses all of them at once.
+ *
+ * `Function`, `eval`, `globalThis`, `Reflect`, `Proxy`, `Worker` and friends
+ * are in neither list, and `CAPABILITY_ROOTS` below pins that they can never be
+ * quietly demoted into the pure list.
+ */
+const PURE_BUILTINS = new Set([
+  // Type-position names. `<` is in the callee lookahead so that `new Map<K,V>()`
+  // and `new Map()` classify alike, which brings type references along with it;
+  // none of these exists at run time at all.
   'Array',
+  'ArrayLike',
+  'Awaited',
+  'Exclude',
+  'Extract',
+  'InstanceType',
+  'Iterable',
+  'NonNullable',
+  'Omit',
+  'Parameters',
+  'Partial',
+  'Pick',
+  'Readonly',
+  'Record',
+  'Required',
+  'ReturnType',
+  'AbortController',
+  'Array',
+  'ArrayBuffer',
+  'BigInt',
+  'Blob',
+  'Boolean',
   'Buffer',
-  'Bun',
   'Date',
   'Error',
+  'FormData',
+  'Headers',
+  'Infinity',
+  'Intl',
   'JSON',
+  'Map',
   'Math',
+  'NaN',
   'NodeJS',
   'Number',
   'Object',
   'Promise',
+  'RegExp',
+  'Request',
   'Response',
+  'Set',
   'String',
+  'Symbol',
   'TextDecoder',
   'TextEncoder',
   'URL',
+  'URLSearchParams',
   'Uint8Array',
-  'console',
+  'WeakMap',
+  'WeakSet',
+  'clearInterval',
+  'clearTimeout',
   'decodeURIComponent',
-  'fetch',
-  'process',
+  'encodeURIComponent',
+  'isNaN',
+  'parseFloat',
+  'parseInt',
+  'queueMicrotask',
+  'setInterval',
+  'setTimeout',
+  'structuredClone',
 ])
+
+const VETTED_GLOBALS = new Set(['Bun', 'console', 'fetch', 'process'])
+
+/**
+ * Names that must never be treated as harmless. Splitting the allowlist in two
+ * created a way to weaken the guard that reads as housekeeping — move a name
+ * into the "cannot load a module" list and nobody looks twice — so the split
+ * comes with a pin that the capability roots are in neither the pure list nor,
+ * unless somebody vouches for them by name, anywhere else.
+ */
+const CAPABILITY_ROOTS = [
+  'Function',
+  'Proxy',
+  'Reflect',
+  'SharedArrayBuffer',
+  'WebAssembly',
+  'Worker',
+  'eval',
+  'globalThis',
+  'import',
+  'importScripts',
+  'require',
+]
 
 /** Members of `Bun` a module under `src/` may reach. Allowlist, same reasoning. */
 const VETTED_BUN_MEMBERS = new Set(['serve', 'S3Client'])
@@ -1081,36 +1391,59 @@ const VETTED_BUN_MEMBERS = new Set(['serve', 'S3Client'])
 const VETTED_BARE_SPECIFIERS = new Set(['node:crypto', 'node:fs/promises', 'node:path'])
 
 /**
- * Everything in one module that touches the module system, or the outside
- * world, in a way this walk cannot follow. Returns human-readable violations.
+ * Everything in one module's source that touches the module system, or the
+ * outside world, in a way the walk below cannot follow. Returns human-readable
+ * violations, one per rule instance, and takes source text rather than a path
+ * so every rule in it can be driven from a fixture string.
  *
- * The module-system rule is subtractive: remove every statically resolved
- * import form from the source, and any surviving `import` or `require` token is
- * an edge nobody can follow. That covers `createRequire`, `require.resolve`,
- * `import.meta.resolve`, `module.require` and any future spelling, without
- * naming one of them.
+ * WHAT THIS CATCHES: module loading the walk cannot account for. An `import()`
+ * or `require()` whose argument is not a literal; any `import` / `require`
+ * token still standing after the statically resolved forms are removed
+ * (`createRequire`, `require.resolve`, `import.meta.resolve`, `module.require`,
+ * and any future spelling, none of them named here); a call to a global that
+ * the file does not declare and nobody vouched for; a `Bun` member outside the
+ * vetted set; a bare specifier the resolver cannot follow into the repo.
+ *
+ * WHAT THIS IS NOT: a sandbox. It reads source text, so it constrains what a
+ * module can be seen to do, not what a module can do. A file that obtains a
+ * loader through a value the scanner cannot name statically, or that reaches
+ * plaintext through a route that is not a module edge at all, is outside its
+ * reach by construction. The property it does deliver is that every module
+ * edge under `src/` is either resolved and followed, or reported — which is
+ * what the two demonstrated escapes (a `.mjs` the walk never seeded, and
+ * `createRequire`) both broke.
+ *
+ * The module-system rule is subtractive rather than enumerated for the same
+ * reason: remove every statically resolved import form, and any surviving
+ * token is an edge nobody can follow.
  */
-function unresolvableLoads(abs: string): string[] {
-  const raw = readFileSync(abs, 'utf8')
+function moduleRisks(raw: string): string[] {
   const code = stripToCode(raw)
   let residue = stripComments(raw)
   for (const re of ACCOUNTED_LOADS) residue = residue.replace(re, ' ')
   const residueCode = stripToCode(residue)
 
   const out: string[] = []
+  const { specs, opaque } = edgesOfSource(raw)
+  // Fail closed. A dynamic import through a template literal or a variable,
+  // like a require() call, runs under bun exactly as well as a literal one, and
+  // none of them can be followed from here. An edge that cannot be resolved
+  // cannot be shown not to reach plaintext code.
+  if (opaque > 0) out.push(`${opaque} unresolvable import()/require()`)
+
   const leftover = residueCode.match(/\b(?:import|require)\b/g)
   if (leftover)
     out.push(`${leftover.length} unaccounted module-system reference(s): ${leftover.join(', ')}`)
 
   const declared = declaredNames(code)
   for (const root of new Set(calleeRoots(code)))
-    if (!declared.has(root) && !VETTED_GLOBALS.has(root))
+    if (!declared.has(root) && !PURE_BUILTINS.has(root) && !VETTED_GLOBALS.has(root))
       out.push(`calls unvetted global \`${root}\``)
 
   for (const m of code.matchAll(/\bBun\s*\.\s*([A-Za-z_$][\w$]*)/g))
     if (!VETTED_BUN_MEMBERS.has(m[1])) out.push(`uses unvetted \`Bun.${m[1]}\``)
 
-  for (const spec of edgesOf(abs).specs)
+  for (const spec of specs)
     if (!spec.startsWith('.') && !resolveSelf(spec) && !VETTED_BARE_SPECIFIERS.has(spec))
       out.push(`imports unvetted bare specifier \`${spec}\``)
 
@@ -1130,21 +1463,7 @@ describe('crypto-blind import boundary', () => {
   // looked for. Both are now allowlists (extensions, callable globals), which
   // fail closed on the route nobody listed.
   test('no module under src/ outside src/mcp/ can reach client/ or src/mcp/', () => {
-    const files: string[] = []
-    const unclassified: string[] = []
-    const walk = (dir: string) => {
-      for (const e of readdirSync(dir, { withFileTypes: true })) {
-        const full = join(dir, e.name)
-        if (e.isDirectory()) {
-          walk(full)
-          continue
-        }
-        const ext = extOf(e.name)
-        if (EXEC_EXTS.includes(ext)) files.push(full)
-        else if (!INERT_EXTS.includes(ext)) unclassified.push(relative(REPO_ROOT, full))
-      }
-    }
-    walk(join(REPO_ROOT, 'src'))
+    const { files, unclassified } = classifyTree(join(REPO_ROOT, 'src'))
 
     // Fail closed on an extension neither list knows: a new one is either
     // executable (and must be walked) or inert (and must be declared so).
@@ -1186,27 +1505,22 @@ describe('crypto-blind import boundary', () => {
     for (const f of queue) seen.add(f)
     while (queue.length) {
       const current = queue.shift() as string
-      const { specs, opaque } = edgesOf(current)
-      // Fail closed. A dynamic import through a template literal or a variable,
-      // like a require() call, runs under bun exactly as well as a literal one,
-      // and none of them can be followed from here. An edge that cannot be
-      // resolved cannot be shown not to reach plaintext code.
-      if (opaque > 0) {
-        violations.push(
-          `${relative(REPO_ROOT, current)} -> ${opaque} unresolvable import()/require()`,
-        )
-      }
-      // Everything else the walk cannot follow: a module-system token left over
-      // after the resolved imports are removed, a call to a global nobody
-      // vouched for, an unvetted `Bun` member.
-      for (const risk of unresolvableLoads(current))
+      const raw = readFileSync(current, 'utf8')
+      // Everything the walk cannot follow: an unresolvable dynamic import, a
+      // module-system token left over after the resolved imports are removed, a
+      // call to a global nobody vouched for, an unvetted `Bun` member, a bare
+      // specifier that resolves nowhere the walker can read.
+      for (const risk of moduleRisks(raw))
         violations.push(`${relative(REPO_ROOT, current)} -> ${risk}`)
-      for (const spec of specs) {
+      for (const spec of edgesOfSource(raw).specs) {
         // Relative first, then this package's own name through `exports`: a bare
         // `@gitlawb/memlawb/crypto` resolves to client/crypto.ts and bun runs it,
         // so skipping every non-relative specifier left the boundary wide open.
-        const target = spec.startsWith('.') ? resolve(dirname(current), spec) : resolveSelf(spec)
-        if (!target) continue
+        const lexical = spec.startsWith('.') ? resolve(dirname(current), spec) : resolveSelf(spec)
+        if (!lexical) continue
+        // Resolved, not lexical: a symlink is exactly how an edge into client/
+        // presents itself as an edge to somewhere harmless.
+        const target = realPath(lexical)
         resolvedEdges.push(`${relative(REPO_ROOT, current)} -> ${relative(REPO_ROOT, target)}`)
         if (forbidden(target)) {
           violations.push(`${relative(REPO_ROOT, current)} -> ${relative(REPO_ROOT, target)}`)
@@ -1280,7 +1594,17 @@ function intercept(
     const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
     const method = init?.method ?? (input instanceof Request ? input.method : 'GET')
     const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : {}))
-    const body = await bodyText(init?.body, cap)
+    // A Request carries its own body, and `fetch(new Request(url, { body }))`
+    // is a call the client could make tomorrow with no other change. Reading
+    // only `init.body` meant that request went out with the interceptor
+    // recording the empty string for it, so "no body carried plaintext" held
+    // for a body that plainly did. Clone, so the real send still has its body.
+    const body =
+      init?.body !== undefined && init?.body !== null
+        ? await bodyText(init.body, cap)
+        : input instanceof Request
+          ? await input.clone().text()
+          : ''
     cap.hrefs.push(href)
     cap.headers.push([...headers.entries()].map(([k, v]) => `${k}: ${v}`).join('\n'))
     cap.bodies.push(body)
@@ -1329,6 +1653,27 @@ function ciphertextServer() {
   }
 }
 
+/**
+ * What one captured conversation got wrong: an off-origin request, the sentinel
+ * in a URL, a header or a body, or a body the normalizer could not read.
+ *
+ * The unreadable case is a violation rather than a skip on purpose. The old
+ * capture was `typeof body === 'string' ? body : (body ?? '').toString()`,
+ * which renders a Blob as `[object Blob]`, so "the sentinel is in no body" held
+ * for a body that contained it. An unreadable body is an unchecked body.
+ */
+function wireRisks(cap: Capture, sentinel: string, origin: string): string[] {
+  const out: string[] = []
+  for (const t of cap.unrecognised) out.push(`unreadable body type ${t}`)
+  for (const h of cap.hrefs) {
+    if (h.includes(sentinel)) out.push('plaintext in url')
+    if (new URL(h).origin !== origin) out.push(`off-origin request to ${new URL(h).origin}`)
+  }
+  for (const h of cap.headers) if (h.includes(sentinel)) out.push('plaintext in header')
+  for (const b of cap.bodies) if (b.includes(sentinel)) out.push('plaintext in body')
+  return out
+}
+
 describe('single-origin tool traffic', () => {
   const realFetch = globalThis.fetch
   const url = 'http://recall-r18.test'
@@ -1337,13 +1682,7 @@ describe('single-origin tool traffic', () => {
     globalThis.fetch = realFetch
   })
 
-  /** The sentinel must be in no URL, no header and no body, and every body must be readable. */
-  const assertNoPlaintext = (cap: Capture) => {
-    expect(cap.unrecognised).toEqual([])
-    expect(cap.hrefs.filter(h => h.includes(sentinel))).toEqual([])
-    expect(cap.headers.filter(h => h.includes(sentinel))).toEqual([])
-    expect(cap.bodies.filter(b => b.includes(sentinel))).toEqual([])
-  }
+  const assertNoPlaintext = (cap: Capture) => expect(wireRisks(cap, sentinel, url)).toEqual([])
 
   // Runnable, not static: server.ts is import-unsafe here (it exits the process
   // at module scope when MEMLAWB_PASSPHRASE is unset, as it is under
@@ -1456,5 +1795,293 @@ describe('single-origin tool traffic', () => {
     expect(cap.bodies.filter(b => b.includes('"entries"')).length).toBeGreaterThan(1)
     expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
     assertNoPlaintext(cap)
+  })
+})
+
+/**
+ * Positive controls: one per rule, each proving that ITS rule is what fires.
+ *
+ * The guards above were inverted to fail closed after a denylist was holed
+ * twice, and the inversion was then tested the way the denylists had been: by
+ * planting a violation and watching the suite go red. That only ever proves the
+ * composite is alive. Five separate sub-checks were neutered one at a time
+ * inside the inverted guards and the suite stayed green through every one of
+ * them, because some other rule in the same test was still doing the work.
+ *
+ * So each rule below gets a fixture that should trip exactly it, and the
+ * assertion is the exact violation list rather than "something was reported".
+ * Delete a rule and its control is the test that goes red, by name. The rules
+ * take source text (or a Capture, or a directory) rather than reading the repo,
+ * which is the refactor that makes this possible at all.
+ */
+describe('guard positive controls', () => {
+  const tmp = (files: Record<string, string>) => {
+    const dir = mkdtempSync(join(tmpdir(), 'memlawb-guard-'))
+    for (const [name, body] of Object.entries(files)) {
+      const full = join(dir, name)
+      mkdirSync(dirname(full), { recursive: true })
+      writeFileSync(full, body)
+    }
+    return dir
+  }
+
+  describe('import boundary', () => {
+    test('an ordinary module trips nothing', () => {
+      // The false-positive control, and the reason PURE_BUILTINS exists: a
+      // guard that fires on `new Map()` is a guard the next contributor
+      // weakens. Five shapes of unremarkable code, all silent.
+      const ordinary = [
+        "import { join } from 'node:path'\nexport const under = (a: string) => join('x', a)\n",
+        'export const seen = new Map()\nseen.set(1, 2)\n',
+        'export const typed = new Map<string, number>()\ntyped.set("a", 1)\n',
+        'export class Store {\n  constructor(private root: string) {}\n  path() {\n    return this.root\n  }\n}\n',
+        "export { helper } from './helper.ts'\n",
+        'export function first<T>(xs: T[]): T | undefined {\n  return xs[0]\n}\n',
+        'export const counts = new Map<string, Set<string>>()\nconst now = Date.now()\nexport const at = String(now)\n',
+        // ES private fields. Without the `#` arm in isMemberAccess the name is
+        // read as an undeclared callee and an ordinary class is reported as
+        // calling an unvetted global `m`. Found by planting ordinary code
+        // rather than by planting an attack, which is the only way this class
+        // of defect surfaces.
+        'export class Cache<T> {\n  readonly #m = new Map<string, T>()\n  get(k: string) {\n    return this.#m.get(k)\n  }\n}\n',
+      ]
+      for (const src of ordinary)
+        expect(`${src.slice(0, 24)} :: ${moduleRisks(src).join(' | ')}`).toBe(
+          `${src.slice(0, 24)} :: `,
+        )
+    })
+
+    test('an opaque import() is reported', () => {
+      // Three rules see it, which is the point of layering them: the edge is
+      // unresolvable, the token survives the accounted-load subtraction, and
+      // the callee is a global nobody vouched for.
+      expect(moduleRisks("const spec = './x.ts'\nawait import(spec)\n")).toEqual([
+        '1 unresolvable import()/require()',
+        '1 unaccounted module-system reference(s): import',
+        'calls unvetted global `import`',
+      ])
+    })
+
+    test('a leftover import.meta.resolve is reported', () => {
+      expect(moduleRisks("export const p = import.meta.resolve('./x.ts')\n")).toEqual([
+        '1 unaccounted module-system reference(s): import',
+        'calls unvetted global `import`',
+      ])
+    })
+
+    test('a call to an unvetted global is reported, including in statement position', () => {
+      // The round-1 hole, as its own control. `declaredNames` used to treat any
+      // line-leading `ident(...)` as a method definition, so this exact line
+      // registered `Function` as locally declared and skipped the allowlist,
+      // and a src/ module carrying it loaded client/crypto.ts with the whole
+      // suite green.
+      expect(
+        moduleRisks(
+          "export function warm(spec: string) {\nFunction('s', 'return imp' + 'ort(s)')(spec)\n}\n",
+        ),
+      ).toEqual(['calls unvetted global `Function`'])
+      // And the same callee where it always was caught, so the control cannot
+      // pass on the declaration path alone.
+      expect(moduleRisks('export const warm = (s: string) => Function(s)()\n')).toEqual([
+        'calls unvetted global `Function`',
+      ])
+    })
+
+    test('an unvetted Bun member is reported', () => {
+      expect(moduleRisks("export const out = Bun.spawnSync(['cat', '/etc/hostname'])\n")).toEqual([
+        'uses unvetted `Bun.spawnSync`',
+      ])
+    })
+
+    test('an unvetted bare specifier is reported', () => {
+      expect(
+        moduleRisks(
+          "import { createRequire } from 'node:module'\nexport const r = createRequire('.')\n",
+        ),
+      ).toEqual(['imports unvetted bare specifier `node:module`'])
+    })
+
+    test('an unclassified extension is reported', () => {
+      const dir = tmp({ 'a.ts': 'export const a = 1\n', 'b.rs': 'fn main() {}\n' })
+      try {
+        const { files, unclassified } = classifyTree(dir)
+        expect(unclassified.map(u => u.split('/').pop())).toEqual(['b.rs'])
+        expect(files.map(f => f.split('/').pop())).toEqual(['a.ts'])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test('a symlink is reported rather than followed, whatever it is named', () => {
+      const dir = tmp({ 'real.ts': 'export const a = 1\n' })
+      try {
+        // Both demonstrated shapes: an executable-looking link, and a
+        // `.json`-suffixed one that the extension lists would wave through as
+        // inert. Neither may be classified by its lexical name.
+        symlinkSync(join(REPO_ROOT, 'client/crypto.ts'), join(dir, 'shim.ts'))
+        symlinkSync(join(REPO_ROOT, 'client'), join(dir, 'vendor.json'))
+        const { files, unclassified } = classifyTree(dir)
+        expect(unclassified.map(u => u.split('/').pop()).sort()).toEqual([
+          'shim.ts (symlink)',
+          'vendor.json (symlink)',
+        ])
+        expect(files.map(f => f.split('/').pop())).toEqual(['real.ts'])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('corpus provenance', () => {
+    test('an identifier the fixture does not declare is reported', () => {
+      expect(corpusRisks("export const CORPUS = { 'a.md': WeakRef }\n")).toEqual([
+        'names unvetted identifier `WeakRef`',
+      ])
+    })
+
+    test('a banned property is reported in both spellings', () => {
+      // `String` is on the identifier allowlist and `String.constructor` IS
+      // `Function`, so the identifier pin alone allowlists the whole language.
+      expect(
+        corpusRisks("export const CORPUS = { 'a.md': String.constructor('return 1')() }\n"),
+      ).toEqual(['reaches property `constructor`'])
+      // Computed access with a literal key: `stripToCode` blanks the string, so
+      // this spelling is invisible to a code-only scan.
+      expect(
+        corpusRisks("export const CORPUS = { 'a.md': String['constructor']('return 1')() }\n"),
+      ).toEqual(['reaches property `constructor`'])
+    })
+
+    test('a capability token inside a string literal is reported', () => {
+      // The verified evasion, whole: allowlisted identifier, banned property,
+      // and the capability named only inside a string. Both rules must fire.
+      expect(
+        corpusRisks(
+          "export const CORPUS = { 'a.md': String.constructor('return Bun.file(\"/etc/hostname\")')() }\n",
+        ),
+      ).toEqual(['reaches property `constructor`', 'carries capability token `Bun`'])
+    })
+
+    test('a module-system reference is reported', () => {
+      expect(corpusRisks('export const dir = import.meta.dir\n')).toEqual([
+        'names unvetted identifier `import`',
+        '1 module-system reference(s)',
+        'carries capability token `import`',
+      ])
+    })
+
+    test('an input hook is reported, and an identifier that merely contains one is not', () => {
+      expect(corpusRisks('export const home = process.env.HOME\n')).toEqual([
+        'names unvetted identifier `process`',
+        'carries input hook `\\bprocess\\b`',
+      ])
+      // Substring matching read this as a violation, which is the cry-wolf
+      // failure that gets a guard deleted rather than fixed.
+      expect(
+        corpusRisks("const processedRoots = 1\nexport const CORPUS = { 'a.md': processedRoots }\n"),
+      ).toEqual([])
+    })
+
+    test('a module whose exports depend on the environment is reported', () => {
+      const dir = tmp({ 'env.ts': 'export const WHERE = process.env.HOME ?? "none"\n' })
+      try {
+        const probe = `
+const m = await import(${JSON.stringify(join(dir, 'env.ts'))})
+process.stdout.write(JSON.stringify(Object.keys(m).sort().map(k => [k, m[k]])))
+`
+        expect(reproducibility(probe).risks).toEqual(['exports differ across cwd and environment'])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test('a self-contained module is reproducible', () => {
+      // The other direction, so the control above cannot pass by reporting
+      // every module as non-reproducible.
+      const dir = tmp({ 'flat.ts': 'export const WHERE = "fixed"\n' })
+      try {
+        const probe = `
+const m = await import(${JSON.stringify(join(dir, 'flat.ts'))})
+process.stdout.write(JSON.stringify(Object.keys(m).sort().map(k => [k, m[k]])))
+`
+        const { risks, out } = reproducibility(probe)
+        expect(risks).toEqual([])
+        expect(out).toContain('fixed')
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+  })
+
+  describe('wire checks', () => {
+    const sentinel = 'ZQXJ-control-sentinel-ZQXJ'
+    const origin = 'http://recall-r18.test'
+    const empty = (): Capture => ({ hrefs: [], headers: [], bodies: [], unrecognised: [] })
+
+    test('an off-origin request is reported', () => {
+      const cap = empty()
+      cap.hrefs.push(`${origin}/v1/x`, 'http://elsewhere.test/v1/x')
+      expect(wireRisks(cap, sentinel, origin)).toEqual([
+        'off-origin request to http://elsewhere.test',
+      ])
+    })
+
+    test('plaintext in a url is reported', () => {
+      const cap = empty()
+      cap.hrefs.push(`${origin}/v1/x?key=${sentinel}`)
+      expect(wireRisks(cap, sentinel, origin)).toEqual(['plaintext in url'])
+    })
+
+    test('plaintext in a header is reported', () => {
+      const cap = empty()
+      cap.headers.push(`x-note: ${sentinel}`)
+      expect(wireRisks(cap, sentinel, origin)).toEqual(['plaintext in header'])
+    })
+
+    test('plaintext in a body is reported', () => {
+      const cap = empty()
+      cap.bodies.push(`{"entries":{"a.md":"${sentinel}"}}`)
+      expect(wireRisks(cap, sentinel, origin)).toEqual(['plaintext in body'])
+    })
+
+    test('an unreadable body type is reported rather than scanned as empty', async () => {
+      const cap = empty()
+      const stream = new Response(sentinel).body as ReadableStream
+      expect(await bodyText(stream as unknown as BodyInit, cap)).toBe('')
+      expect(wireRisks(cap, sentinel, origin)).toEqual([
+        'unreadable body type [object ReadableStream]',
+      ])
+    })
+
+    test('a body carried on a Request object is captured, not missed', async () => {
+      // `fetch(new Request(url, { method: 'PUT', body }))` puts the body
+      // somewhere `init.body` does not appear, so the interceptor recorded the
+      // empty string and "no body carried plaintext" held for a body that did.
+      const { cap, fn } = intercept(async () => new Response(null, { status: 204 }))
+      const res = await fn(new Request(`${origin}/v1/x`, { method: 'PUT', body: sentinel }))
+      expect(res.status).toBe(204)
+      expect(cap.bodies).toEqual([sentinel])
+      expect(wireRisks(cap, sentinel, origin)).toEqual(['plaintext in body'])
+    })
+
+    test('a clean capture reports nothing', () => {
+      const cap = empty()
+      cap.hrefs.push(`${origin}/v1/x`)
+      cap.headers.push('content-type: application/json')
+      cap.bodies.push('{"entries":{"a.md":"Y2lwaGVydGV4dA=="}}')
+      expect(wireRisks(cap, sentinel, origin)).toEqual([])
+    })
+  })
+
+  test('no capability root is hiding in the pure-builtin list', () => {
+    // The split into PURE_BUILTINS and VETTED_GLOBALS created a way to weaken
+    // the boundary that reads as tidying: move a name into the list nobody
+    // reviews. These are the names that must never be in it.
+    expect(CAPABILITY_ROOTS.filter(n => PURE_BUILTINS.has(n))).toEqual([])
+    expect(CAPABILITY_ROOTS.filter(n => VETTED_GLOBALS.has(n))).toEqual([])
+    // And the pure list must not be empty of the names it exists to permit,
+    // which is how "just delete the list" would otherwise pass.
+    for (const n of ['Map', 'Set', 'RegExp', 'Date', 'Promise', 'setTimeout'])
+      expect(`${n}:${PURE_BUILTINS.has(n)}`).toBe(`${n}:true`)
   })
 })

@@ -12,6 +12,7 @@ import { OpenRecallClient, type PullResult, type PushResult } from '../client/in
 import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
 import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
+import { makeStubClient } from './stub-client.ts'
 
 const DATA_DIR = process.env.DATA_DIR!
 let server: ReturnType<typeof Bun.serve>
@@ -155,55 +156,6 @@ describe('memory_get', () => {
 })
 
 /**
- * Minimal in-memory stand-in for the MemlawbClient surface `makeTools` touches
- * (`pull`, `push`, `hashes`, `delete`) — nothing else is used, so nothing else
- * is implemented. It exists because the real-server harness cannot host the
- * cap-boundary and failure-injection cases: tests/setup.ts pins
- * MAX_ENTRIES_PER_NAMESPACE=5 and MAX_NAMESPACE_BYTES=5000, so a 250KB save
- * trips the server's quota gates before the tool under test is ever exercised.
- * `pullError` injects a client-layer failure. U6 reuses this same stub.
- *
- * There is one of these, and it is checked. It used to answer `push` with
- * `{ version, uploaded, skipped, deleted }` — a field the real `PushResult`
- * does not have, in place of `unchanged`, and without `namespace` — while a
- * second, differently-wrong stub lived in tests/recall-regression.test.ts.
- * Both reached `makeTools` through an `as unknown as MemlawbClient` cast, which
- * is what let a stub disagree with the client it stands in for. The casts are
- * gone: `makeTools` takes the structural `MemoryClient`, so tsc now checks
- * every method here against `client/index.ts`, and the other stub imports this
- * one instead of hand-rolling a third answer.
- */
-export function makeStubClient(entries: Record<string, string> = {}) {
-  const store = { ...entries }
-  let pullError: Error | undefined
-  return {
-    setPullError(e: Error | undefined) {
-      pullError = e
-    },
-    async pull(namespace: string): Promise<PullResult> {
-      if (pullError) throw pullError
-      return { namespace, version: 1, entries: { ...store } }
-    },
-    async push(namespace: string, next: Record<string, string>): Promise<PushResult> {
-      Object.assign(store, next)
-      return {
-        namespace,
-        version: 1,
-        uploaded: Object.keys(next),
-        unchanged: [],
-        deleted: [],
-      }
-    },
-    async hashes(_namespace: string): Promise<Record<string, string>> {
-      return Object.fromEntries(Object.keys(store).map(k => [k, 'stub-hash']))
-    },
-    async delete(_namespace: string, key: string): Promise<void> {
-      delete store[key]
-    },
-  }
-}
-
-/**
  * Recall's per-hit and aggregate bounds. These run against the stub for the same
  * reason memory_get's cap case does: the payloads are far past the quota gates
  * tests/setup.ts pins, so the real-server harness rejects them before the
@@ -255,7 +207,9 @@ describe('recall region bounds against the in-memory client stub', () => {
     expect(r.text.length).toBeLessThan(900)
     expect(r.text).not.toContain('cold bucket')
     expect(r.text).not.toContain('roster spreadsheet')
-    // Frontmatter is never a region.
+    // Frontmatter is never a region of an entry that has a body. (The
+    // frontmatter-only entry below is the one case where it does come back,
+    // because there is nothing else in the entry to show.)
     expect(r.text).not.toContain('description:')
     expect(r.text).not.toContain('name: runbook')
   })
@@ -328,6 +282,33 @@ describe('recall region bounds against the in-memory client stub', () => {
     expect(r.text.length).toBeLessThan(900)
   })
 
+  // The elision test above uses a fence far larger than the per-hit cap, so it
+  // only ever exercises the "way too big" end. The dangerous sizes are the ones
+  // between the cap and the cap minus the heading prefix: elision was decided
+  // against `cap` while the clip was to `cap - prefix.length`, so a fence in
+  // that band skipped elision and was then cut mid-block, emitting an opening
+  // fence with no closer. An agent reads that as "everything after this is
+  // code". Sweep the whole band and require the marker count to be 0 (elided)
+  // or 2 (whole), never 1.
+  test('a fence sized anywhere near the per-hit cap is never emitted half-open', async () => {
+    const HEADING = '## Migration transcript aardvark'
+    const fenceOfLength = (n: number) => {
+      const fill = n - '```text\n'.length - '\n```'.length
+      let s = ''
+      while (s.length < fill) s += 'rebalance shard moved keys 4096 in 12ms '
+      return `\`\`\`text\n${s.slice(0, fill)}\n\`\`\``
+    }
+    const bad: string[] = []
+    for (let n = 500; n <= 640; n++) {
+      const stub = makeStubClient({ 'ops/transcript.md': `${HEADING}\n\n${fenceOfLength(n)}` })
+      const t = makeTools(stub, 'user:me')
+      const r = await t.recall('rebalance shard moved keys')
+      const markers = r.text.split('```').length - 1
+      if (markers === 1) bad.push(`${n}:${markers}`)
+    }
+    expect(`half-open fences: ${bad.join(',')}`).toBe('half-open fences: ')
+  })
+
   // The region picker weights a query term by how few of the entry's own blocks
   // carry it, which hands the maximum weight to a term confined to one block.
   // A function word is exactly that shape, so while this layer derived its own
@@ -362,6 +343,33 @@ describe('recall region bounds against the in-memory client stub', () => {
     // ...and never the one that carries only the stopword.
     expect(r.text).not.toContain('platform team')
     expect(r.text).not.toContain('## Ownership')
+  })
+
+  // The mirror of the test above, and the reason the region picker does not
+  // simply reuse the ranker's stoplist. Across entries a function word carries
+  // no topic and is dropped. Within one entry it is often the only thing that
+  // tells two sections apart: "before" and "after" are both stopwords, so with
+  // them removed the two sections here are indistinguishable and the first one
+  // wins by tie-break, answering the opposite of what was asked.
+  test('a temporal function word decides between two otherwise identical sections', async () => {
+    const body = [
+      '## Before you push',
+      '',
+      'Run the formatter and the type check locally.',
+      '',
+      '## After you push',
+      '',
+      'Watch the pipeline and post the run link in the channel.',
+    ].join('\n')
+    const stub = makeStubClient({ 'ops/push-checklist.md': body })
+    const t = makeTools(stub, 'user:me')
+    const r = await t.recall('after I push')
+
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('ops/push-checklist.md')
+    expect(r.text).toContain('post the run link')
+    expect(r.text).not.toContain('formatter')
+    expect(r.text).not.toContain('## Before you push')
   })
 
   // Both shapes that leave `blocksOf` with nothing to return. The hit used to
@@ -415,7 +423,12 @@ describe('recall region bounds against the in-memory client stub', () => {
     const r = await t.recall('rollout deployment sequence', undefined, 20)
     expect(r.isError).toBeUndefined()
     expect(r.text).toContain('notes/rollout-0.md')
-    expect(r.text.length).toBeLessThan(6000)
+    // The documented aggregate bound, not a number loose enough to pass while
+    // the output overruns it. The old `< 6000` did exactly that: the formatter
+    // charged the budget for the regions only, so the lead line, the "\n\n"
+    // joiners and the tail all fell outside the cap and real output measured
+    // 4,158 against a stated 4,000.
+    expect(r.text.length).toBeLessThanOrEqual(4000)
 
     // The bound is only half the contract. Hits the budget could not reach are
     // dropped, and a drop the caller is not told about is indistinguishable
@@ -431,6 +444,28 @@ describe('recall region bounds against the in-memory client stub', () => {
     const shown = r.text.split('### ').length - 1
     expect(`${shown}+${omitted}`).toBe(`${shown}+${20 - shown}`)
     expect(r.text).toContain('memory_list')
+  })
+
+  // The pieces the budget forgot are all proportional to something the caller
+  // controls: one joiner per hit, a lead line carrying the namespace, a tail
+  // carrying a count. Push each of them and check the total still holds.
+  test('the aggregate bound holds across limits, long keys and a long namespace', async () => {
+    const ns = `user:me/${'deployment-operations-'.repeat(6)}notes`
+    const entries: Record<string, string> = {}
+    for (let i = 0; i < 20; i++) {
+      entries[`notes/${'rollout-sequence-'.repeat(3)}${i}.md`] = [
+        `# Rollout note ${i}`,
+        '',
+        'The rollout deployment sequence drains the queue first. '.repeat(40),
+      ].join('\n')
+    }
+    const t = makeTools(makeStubClient(entries), ns)
+    const over: string[] = []
+    for (let limit = 1; limit <= 20; limit++) {
+      const r = await t.recall('rollout deployment sequence', undefined, limit)
+      if (r.text.length > 4000) over.push(`limit ${limit}: ${r.text.length}`)
+    }
+    expect(`over budget: ${over.join(', ')}`).toBe('over budget: ')
   })
 })
 
