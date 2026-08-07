@@ -214,10 +214,13 @@ const RELATIVE_FLOOR = 0.25
  * caller must be able to search for, so no stoplist reaches them and only
  * semantics would.
  *
- * 0.6 sits in the real gap that is left, above the strongest irrelevant query
- * the floor can reach (0.55) and below the weakest must-pass (0.66), with about
+ * 0.6 sits in the real gap that is left, above the strongest irrelevant probe
+ * IN THIS FIXTURE (0.55) and below the weakest must-pass (0.66), with about
  * 9% either side rather than the 6% the pre-stoplist value had. The consequence
  * is stated rather than hidden: 3 of 12 irrelevant probes still return a hit.
+ * Note 0.55 is the strongest irrelevant score this fixture produces, not a
+ * bound on what an irrelevant query can score. The paragraph below is what
+ * happens when that distinction is ignored.
  *
  * RE-CHECKED after the index exclusion below, which drops the entry count these
  * scores are weighed against from 26 to 25 and removes the index from the
@@ -227,6 +230,33 @@ const RELATIVE_FLOOR = 0.25
  * score among all relevant probes is 0.65. 0.6 still separates them, so the
  * value stands unchanged rather than being refitted to a distribution it was
  * not measured against.
+ *
+ * MEASURED AT SCALE 2026-08-07, and the result is worse than "does not
+ * transfer". Against a real 838-entry store (well inside the 2000-entry and
+ * 10MB caps in `src/config.ts`), with entries truncated to the short one-fact
+ * shape the memory guidance prescribes: 60 natural-language questions
+ * retrieved their correct entry 0 times, 48 of 60 correct entries fell below
+ * this floor and were never returned at any depth, and 54 of 60 scored BELOW
+ * the worst off-domain junk. The true target's median score was 0.00 while the
+ * top-ranked (wrong) entry's was 6.33. A positive control rules out a broken
+ * harness: queries built from an entry's own four rarest terms retrieved it at
+ * rank 1, 60 of 60.
+ *
+ * So no value of this constant works at that scale, and raising it would not
+ * help. The gate was never separating relevant from irrelevant; it separated
+ * "matched nothing" from "matched something", and in a 26-entry fixture those
+ * coincide because incidental term overlap is rare. Add entries and the
+ * irrelevant population climbs to meet a target that is still sitting at zero,
+ * because a natural question shares no vocabulary with the note that answers
+ * it. That is the vocabulary-mismatch residual, and it is upstream of anything
+ * this constant can do.
+ *
+ * Do not refit this number in response to the above. Reproduce it first with
+ * `docs/plans/measurements/floor-vs-scale.ts`, and note that that harness
+ * builds its relevant probes from each entry's own rarest terms, which is the
+ * easiest query an entry can receive: it reports a comfortable separation at
+ * every corpus size and is exactly the trap this paragraph exists to warn
+ * about. Only real queries show the inversion.
  */
 const ABSOLUTE_FLOOR = 0.6
 
