@@ -68,9 +68,10 @@ describe('store factory seam', () => {
       if (file !== join(root, 'src/store/index.ts')) {
         if (/\b(setStore|resetStore)\b/.test(src)) offenders.push(file.slice(root.length + 1))
       }
-      // Static imports and dynamic import() alike: bin/memlawb.ts reaches the
-      // server and the MCP entry through import(), so a walk that only follows
-      // `from '...'` would miss the real entrypoint entirely.
+      // Static imports and dynamic import() alike. Following import() adds no
+      // reach today, since bin/memlawb.ts's only dynamic targets are the two
+      // roots below; it is here so the walk does not silently stop covering
+      // them if those roots are ever dropped.
       for (const m of src.matchAll(/(?:from|import)\s*\(?\s*'(\.[^']+)'/g)) {
         await walk(resolve(dirname(file), m[1] as string))
       }
@@ -80,10 +81,11 @@ describe('store factory seam', () => {
     await walk(join(root, 'src/mcp/server.ts'))
     await walk(join(root, 'bin/memlawb.ts'))
 
-    // Positive control: the walk reached the modules it claims to cover. The
-    // floor tracks the real count rather than a guess, so a walk that silently
-    // stopped following imports fails here instead of reporting no offenders.
-    expect(seen.size).toBeGreaterThanOrEqual(20)
+    // Positive control: the walk reached every module it claims to cover. This
+    // is an exact count, not a floor, because a floor is what let an earlier
+    // version of this test lose reach without failing: any module added to or
+    // dropped from the production graph should force a look at this number.
+    expect(seen.size).toBe(25)
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })

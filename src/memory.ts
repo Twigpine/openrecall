@@ -94,9 +94,15 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   await Promise.all(
     Object.entries(m.entries).map(async ([key, meta]) => {
-      const bytes =
-        (await store.get(contentPath(nsSlug, meta.hash))) ??
-        (await store.get(entryPath(nsSlug, sha256Hex(key))))
+      let bytes: Uint8Array | null = null
+      try {
+        bytes = (await store.get(contentPath(nsSlug, meta.hash))) ?? null
+      } catch {
+        // A hash that is not a digest cannot name a blob. Skip this entry the
+        // same way a missing one is skipped: one unreadable entry must not take
+        // the whole namespace's read down with it.
+      }
+      bytes ??= await store.get(entryPath(nsSlug, sha256Hex(key)))
       if (!bytes) return // manifest/blob drift — skip rather than 500
       entries[key] = Buffer.from(bytes).toString('base64')
       entryChecksums[key] = meta.hash
@@ -271,6 +277,16 @@ export async function upsert(
  * Never throws. This runs after the write is durable and collects garbage that
  * is already invisible to every reader, so a store hiccup here must not turn a
  * landed write into a failure, nor skip the caller's quota accounting.
+ *
+ * Single-instance only, like the lock it runs under. The sweep deletes anything
+ * under the namespace's blob prefix that the manifest it just wrote does not
+ * name, which is correct while one process serializes every write to that
+ * namespace and silent data loss the moment two do. It moves behind the same
+ * row-version check as the lock when that lands (see lock.ts and PLAN §7).
+ *
+ * Costs one LIST per mutating write, deliberately: it replaces a delete per
+ * touched key, most of which were no-ops, and it is the only way to see an
+ * orphan no key can name.
  */
 async function reclaim(
   nsSlug: string,
@@ -278,8 +294,8 @@ async function reclaim(
   prev: Record<string, string>,
   touched: Set<string>,
 ): Promise<void> {
-  const store = getStore()
   try {
+    const store = getStore()
     const live = new Set<string>()
     for (const meta of Object.values(m.entries)) live.add(contentPath(nsSlug, meta.hash))
     for (const path of await store.list(blobPrefix(nsSlug))) {
@@ -296,6 +312,10 @@ async function reclaim(
       `${JSON.stringify({
         timestamp: new Date().toISOString(),
         event: 'reclaim_failed',
+        // The slug is already every storage path's own directory name, so it
+        // discloses nothing new, and it is the only field that makes this line
+        // actionable: without it an operator knows collection failed somewhere.
+        nsSlug,
         reason: (err as Error)?.constructor?.name ?? 'unknown',
       })}\n`,
     )

@@ -198,6 +198,26 @@ describe('crash visibility across the commit sequence', () => {
     expect(contentPath('slug', `sha256:${good}`)).toBe(`ns/slug/blobs/${good}`)
   })
 
+  test('a manifest entry with a non-digest hash is skipped, not fatal', async () => {
+    // contentPath throws on a hash that cannot name a blob, which is right on
+    // the write path. On the read path one corrupt entry must not take the
+    // namespace with it, so getData skips it the way it skips a missing blob.
+    const ns = 'user:badhash'
+    const slug = namespaceSlug(ns)
+    await seed(ns, { 'ok.md': b64('fine') })
+    const store = getStore()
+    const raw = await store.get(`ns/${slug}/manifest.json`)
+    const m = JSON.parse(new TextDecoder().decode(raw as Uint8Array))
+    m.entries['bad.md'] = { hash: 'sha256:NOTHEX', size: 4, updatedAt: NOW }
+    await store.put(`ns/${slug}/manifest.json`, new TextEncoder().encode(JSON.stringify(m)))
+
+    const data = await getData(ns, slug)
+    // Control: the healthy entry still reads, so the skip is targeted rather
+    // than the whole view collapsing.
+    expect(Buffer.from(data.content.entries['ok.md'] as string, 'base64').toString()).toBe('fine')
+    expect(data.content.entries['bad.md']).toBeUndefined()
+  })
+
   test('a reclaim failure does not fail a write that already published', async () => {
     // Reclaim collects blobs no reader can see. Failing it must not turn a
     // durable write into an error, and must not skip the caller's response.
