@@ -52,6 +52,12 @@ export type MemoryHashes = {
   lastModified: string
   checksum: string
   entryChecksums: Record<string, string>
+  /**
+   * Server capabilities a client can rely on. Without this a client cannot tell
+   * a server that enforces the write precondition from one that ignores an
+   * unknown body field, so it would report a guarantee it is not getting.
+   */
+  supports: string[]
 }
 
 /** PUT request body. */
@@ -60,6 +66,28 @@ export type UpsertRequest = {
   entries: Record<string, string>
   /** entryKeys to remove (optional). */
   deletions?: string[]
+  /**
+   * entryKey -> the ciphertext hash the caller believes that key holds, or null
+   * for "I believe this key does not exist". Optional: a request without it is
+   * accepted unconditionally so existing clients keep working.
+   */
+  base?: Record<string, string | null>
+}
+
+/**
+ * Thrown when a write's base disagrees with the manifest it would mutate.
+ * Surfaces as HTTP 409; `details.conflicts` maps each disagreeing key to the
+ * hash the manifest actually holds, or null when the key is absent, so a caller
+ * can tell what changed under it without a second round trip.
+ */
+export class StaleBaseError extends Error {
+  readonly code = 'stale_base_version'
+  readonly details: { conflicts: Record<string, string | null> }
+  constructor(conflicts: Record<string, string | null>) {
+    super('write base is out of date')
+    this.name = 'StaleBaseError'
+    this.details = { conflicts }
+  }
 }
 
 export type UpsertResponse = {
@@ -93,6 +121,18 @@ export function parseUpsertRequest(raw: unknown): UpsertRequest {
   for (const [k, v] of Object.entries(entries)) {
     if (typeof v !== 'string') throw new Error(`entry ${JSON.stringify(k)} must be a base64 string`)
   }
+  let base: Record<string, string | null> | undefined
+  if (obj.base !== undefined) {
+    if (typeof obj.base !== 'object' || obj.base === null || Array.isArray(obj.base)) {
+      throw new Error('`base` must be an object map of key -> hash or null')
+    }
+    for (const [k, v] of Object.entries(obj.base)) {
+      if (v !== null && typeof v !== 'string') {
+        throw new Error(`base ${JSON.stringify(k)} must be a hash string or null`)
+      }
+    }
+    base = obj.base as Record<string, string | null>
+  }
   let deletions: string[] | undefined
   if (obj.deletions !== undefined) {
     if (!Array.isArray(obj.deletions) || obj.deletions.some(d => typeof d !== 'string')) {
@@ -100,5 +140,5 @@ export function parseUpsertRequest(raw: unknown): UpsertRequest {
     }
     deletions = obj.deletions as string[]
   }
-  return { entries: entries as Record<string, string>, deletions }
+  return { entries: entries as Record<string, string>, deletions, base }
 }

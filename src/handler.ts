@@ -26,7 +26,7 @@ import {
 import { QuotaError } from './quota.ts'
 import { take } from './ratelimit.ts'
 import { getStore } from './store/index.ts'
-import { parseUpsertRequest } from './types.ts'
+import { parseUpsertRequest, StaleBaseError } from './types.ts'
 
 // Applied to every response. The API serves only JSON and is consumed by
 // programmatic clients, so we lock down sniffing/caching/referrer leakage.
@@ -138,6 +138,9 @@ export async function handleRequest(req: Request): Promise<Response> {
         if (err instanceof QuotaError) {
           return apiError(err.code, err.message, 413, err.details)
         }
+        if (err instanceof StaleBaseError) {
+          return apiError(err.code, err.message, 409, err.details)
+        }
         throw err
       }
     }
@@ -150,14 +153,31 @@ export async function handleRequest(req: Request): Promise<Response> {
       } catch (err) {
         return apiError('invalid_key', (err as Error).message, 400)
       }
-      const result = await upsert(
-        namespace,
-        nsSlug,
-        identity.owner,
-        { entries: {}, deletions: [key] },
-        new Date().toISOString(),
-      )
-      return json(result)
+      // The base rides the query here rather than a body, so it needs its own
+      // shape check: parseUpsertRequest never sees a DELETE.
+      const rawBase = url.searchParams.get('base')
+      if (rawBase !== null && !/^sha256:[0-9a-f]{64}$/.test(rawBase)) {
+        return apiError('bad_request', '`base` must be a sha256:<hex> hash', 400)
+      }
+      const base = rawBase === null ? undefined : { [key]: rawBase }
+      try {
+        const result = await upsert(
+          namespace,
+          nsSlug,
+          identity.owner,
+          { entries: {}, deletions: [key], base },
+          new Date().toISOString(),
+        )
+        return json(result)
+      } catch (err) {
+        if (err instanceof QuotaError) {
+          return apiError(err.code, err.message, 413, err.details)
+        }
+        if (err instanceof StaleBaseError) {
+          return apiError(err.code, err.message, 409, err.details)
+        }
+        throw err
+      }
     }
 
     return apiError('method_not_allowed', `${req.method} not supported`, 405)

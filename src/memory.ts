@@ -25,9 +25,13 @@ import {
   type Manifest,
   type MemoryData,
   type MemoryHashes,
+  StaleBaseError,
   type UpsertRequest,
   type UpsertResponse,
 } from './types.ts'
+
+/** Capabilities the hashes view advertises. See StaleBaseError and R12. */
+const SUPPORTS = ['base-precondition']
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
 async function readManifest(nsSlug: string): Promise<Manifest> {
@@ -67,6 +71,7 @@ export async function getHashes(namespace: string, nsSlug: string): Promise<Memo
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
     entryChecksums,
+    supports: SUPPORTS,
   }
 }
 
@@ -131,6 +136,19 @@ export async function upsert(
     const prev: Record<string, string> = {}
     for (const [k, meta] of Object.entries(m.entries)) prev[k] = meta.hash
     const touched = new Set<string>()
+
+    // Compare the caller's base before any projection, against the manifest this
+    // write would actually mutate. Every disagreeing key is collected so one
+    // round trip tells the caller everything that moved under it.
+    if (req.base) {
+      const conflicts: Record<string, string | null> = {}
+      for (const [key, expected] of Object.entries(req.base)) {
+        const actual = m.entries[key]?.hash ?? null
+        if (actual !== expected) conflicts[key] = actual
+      }
+      if (Object.keys(conflicts).length > 0) throw new StaleBaseError(conflicts)
+    }
+
     const accepted: string[] = []
     const deleted: string[] = []
     const skipped: { key: string; reason: string }[] = []
