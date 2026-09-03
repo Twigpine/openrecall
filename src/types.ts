@@ -9,6 +9,8 @@
  * client shim is a thin adapter rather than a rewrite.
  */
 
+import type { Erasure } from './store/blobstore.ts'
+
 /** Per-namespace manifest, persisted as its own blob. */
 export type Manifest = {
   version: number
@@ -52,6 +54,8 @@ export type MemoryHashes = {
   lastModified: string
   checksum: string
   entryChecksums: Record<string, string>
+  /** Whether this deployment's store actually erases on delete. */
+  erasure: Erasure
   /**
    * Server capabilities a client can rely on. Without this a client cannot tell
    * a server that enforces the write precondition from one that ignores an
@@ -94,6 +98,8 @@ export type UpsertResponse = {
   namespace: string
   version: number
   checksum: string
+  /** Whether this deployment's store actually erases on delete. */
+  erasure: Erasure
   accepted: string[]
   deleted: string[]
   skipped: { key: string; reason: string }[]

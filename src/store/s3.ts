@@ -17,6 +17,8 @@ type S3Settings = {
 }
 
 export class S3BlobStore implements BlobStore {
+  readonly erasure = 'erases' as const
+
   private readonly client: Bun.S3Client
   private readonly bucket: string
 

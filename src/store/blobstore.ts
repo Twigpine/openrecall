@@ -22,7 +22,17 @@ export interface BlobStore {
   delete(path: string): Promise<void>
   /** A short label for logs/health (e.g. "fs:/data", "s3:openrecall"). */
   describe(): string
+  /**
+   * Whether `delete` actually removes the bytes. A store that keeps history
+   * (a git-backed one, say) retains them, and a client that knows can refuse a
+   * scan mode that would let a secret land somewhere it can never be removed
+   * from. Constant per store, so reporting it costs nothing per request.
+   */
+  readonly erasure: Erasure
 }
+
+/** Whether a store's delete is destructive. */
+export type Erasure = 'erases' | 'retains'
 
 /** Build the storage path for a namespace's manifest. */
 export function manifestPath(nsSlug: string): string {

@@ -11,6 +11,8 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { BlobStore } from './blobstore.ts'
 
 export class FsBlobStore implements BlobStore {
+  readonly erasure = 'erases' as const
+
   private readonly root: string
 
   constructor(dataDir: string) {

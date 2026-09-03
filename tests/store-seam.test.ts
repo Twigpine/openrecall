@@ -23,6 +23,7 @@ function stub(): BlobStore {
     put: async () => {},
     delete: async () => {},
     describe: () => 'stub',
+    erasure: 'erases',
   }
 }
 

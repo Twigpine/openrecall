@@ -42,6 +42,7 @@ function faulty(inner: BlobStore, failAt: number) {
         return inner.delete(p)
       },
       describe: () => `faulty(${inner.describe()})`,
+      erasure: inner.erasure,
     } as BlobStore,
   }
 }
