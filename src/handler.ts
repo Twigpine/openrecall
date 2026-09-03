@@ -28,6 +28,9 @@ import { QuotaError } from './quota.ts'
 import { take } from './ratelimit.ts'
 import { parseUpsertRequest, StaleBaseError } from './types.ts'
 
+/** The shape a DELETE `base` query value must take. */
+const BASE_HASH_RE = /^sha256:[0-9a-f]{64}$/
+
 // Applied to every response. The API serves only JSON and is consumed by
 // programmatic clients, so we lock down sniffing/caching/referrer leakage.
 const SECURITY_HEADERS = {
@@ -59,6 +62,18 @@ function parseMemoryPath(pathname: string): { namespace: string } | null {
   const rest = decodeURIComponent(pathname.slice(prefix.length))
   if (!rest) return null
   return { namespace: rest }
+}
+
+/**
+ * Map the two refusals `upsert` can raise. Deliberately not folded into the
+ * outer catch: that would widen these statuses to cover every read path in the
+ * handler, so a future read that threw QuotaError would silently answer 413
+ * instead of 500. Returns null for anything else, which the caller rethrows.
+ */
+function upsertFailure(err: unknown): Response | null {
+  if (err instanceof QuotaError) return apiError(err.code, err.message, 413, err.details)
+  if (err instanceof StaleBaseError) return apiError(err.code, err.message, 409, err.details)
+  return null
 }
 
 /**
@@ -94,8 +109,8 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   }
 
   const parsed = parseMemoryPath(pathname)
-  if (parsed) ctx.route = 'memory'
   if (!parsed) return apiError('not_found', 'unknown route', 404)
+  ctx.route = 'memory'
 
   const identity = await authenticate(req)
   if (!identity) return apiError('unauthorized', 'missing or invalid API key', 401)
@@ -161,12 +176,8 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
         )
         return json(result)
       } catch (err) {
-        if (err instanceof QuotaError) {
-          return apiError(err.code, err.message, 413, err.details)
-        }
-        if (err instanceof StaleBaseError) {
-          return apiError(err.code, err.message, 409, err.details)
-        }
+        const mapped = upsertFailure(err)
+        if (mapped) return mapped
         throw err
       }
     }
@@ -182,7 +193,7 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
       // The base rides the query here rather than a body, so it needs its own
       // shape check: parseUpsertRequest never sees a DELETE.
       const rawBase = url.searchParams.get('base')
-      if (rawBase !== null && !/^sha256:[0-9a-f]{64}$/.test(rawBase)) {
+      if (rawBase !== null && !BASE_HASH_RE.test(rawBase)) {
         return apiError('bad_request', '`base` must be a sha256:<hex> hash', 400)
       }
       const base = rawBase === null ? undefined : { [key]: rawBase }
@@ -196,12 +207,8 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
         )
         return json(result)
       } catch (err) {
-        if (err instanceof QuotaError) {
-          return apiError(err.code, err.message, 413, err.details)
-        }
-        if (err instanceof StaleBaseError) {
-          return apiError(err.code, err.message, 409, err.details)
-        }
+        const mapped = upsertFailure(err)
+        if (mapped) return mapped
         throw err
       }
     }

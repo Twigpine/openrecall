@@ -3,7 +3,9 @@
  *
  * openrecall stores two things per namespace:
  *   - a `manifest` blob: JSON map of entryKey -> { hash, size, updatedAt }
- *   - one `entry` blob per entryKey: the CIPHERTEXT of that memory entry
+ *   - one ciphertext blob per distinct entry ciphertext, named by its own hash
+ *     (see `contentPath`); the manifest maps each entryKey to that hash, and two
+ *     entries holding identical ciphertext share one blob
  *
  * The store only ever sees opaque bytes. It has no idea what an "entry" means
  * and could not decrypt one if it wanted to. Adapters: fs (self-host default),
@@ -40,9 +42,11 @@ export function manifestPath(nsSlug: string): string {
 }
 
 /**
- * Build the storage path for one entry. We hash the entry key so weird-but-
- * valid keys map to a flat, fixed-width filename, and the original key is only
- * recorded inside the (encrypted-at-the-edges) manifest.
+ * Build the pre-content-addressing storage path for one entry, hashing the entry
+ * key so weird-but-valid keys map to a flat, fixed-width filename.
+ *
+ * Retained only so entries written under the old layout stay readable and get
+ * reclaimed when they are next touched. New writes go through `contentPath`.
  */
 export function entryPath(nsSlug: string, entryKeyHash: string): string {
   return `ns/${nsSlug}/entries/${entryKeyHash}`

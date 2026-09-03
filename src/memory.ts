@@ -30,7 +30,11 @@ import {
   type UpsertResponse,
 } from './types.ts'
 
-/** Capabilities the hashes view advertises. See StaleBaseError and R12. */
+/**
+ * Capabilities the hashes view advertises. Without this a client cannot tell a
+ * server that enforces the write precondition from one that ignores an unknown
+ * body field, so it would report a guarantee it is not getting.
+ */
 const SUPPORTS = ['base-precondition']
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
@@ -134,8 +138,7 @@ export async function upsert(
     const m = await readManifest(nsSlug)
     // The projection mutates `m.entries` in place, so capture what the currently
     // visible manifest points at before touching it; cleanup needs the old hashes.
-    const prev: Record<string, string> = {}
-    for (const [k, meta] of Object.entries(m.entries)) prev[k] = meta.hash
+    const prev = checksumsFrom(m)
     const touched = new Set<string>()
 
     // Compare the caller's base before any projection, against the manifest this
@@ -207,7 +210,8 @@ export async function upsert(
       accepted.push(key)
     }
 
-    const mutated = blobWrites.length > 0 || touched.size > 0
+    // Every blobWrites push is paired with a touched.add, so touched alone decides.
+    const mutated = touched.size > 0
     if (mutated) {
       // Project the namespace's final footprint and enforce its byte cap.
       let nsBytes = 0
@@ -234,10 +238,13 @@ export async function upsert(
           // Deterministic ciphertext means another entry may hold this exact
           // blob; only reclaim it when no live entry still names that hash.
           if (old && !live.has(old)) await store.delete(contentPath(nsSlug, old))
-          // Entries written before content addressing live at a key-derived
-          // path the new layout never names, so nothing else would ever remove
-          // them and a delete would silently leave the ciphertext behind.
-          await store.delete(entryPath(nsSlug, sha256Hex(key)))
+          // Entries written before content addressing live at a key-derived path
+          // the new layout never names, so nothing else would ever remove them
+          // and a delete would silently leave the ciphertext behind. Only a key
+          // the pre-write manifest knew can have one, so skip the rest: on s3
+          // this would otherwise be a network round trip per touched key, on
+          // every write, forever, holding both the namespace and owner locks.
+          if (old !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
         }
       }
 

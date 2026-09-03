@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { handleRequest } from '../src/handler.ts'
 import { ALLOWED_FIELDS, setRejectionSink } from '../src/log.ts'
-import { resetRateLimit } from '../src/ratelimit.ts'
+import { _reset } from '../src/ratelimit.ts'
 
 const lines: Record<string, unknown>[] = []
 
@@ -23,7 +23,7 @@ afterEach(() => {
   // The bucket is per owner and in-process, and every test here shares one
   // owner under open auth. Draining it would leak refusals into the suites that
   // share this process.
-  resetRateLimit()
+  _reset()
 })
 
 function capture() {
