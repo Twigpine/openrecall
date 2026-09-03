@@ -42,6 +42,7 @@ describe('startup store probe', () => {
         seen.push(`delete ${p}`)
         return store.delete(p)
       },
+      list: p => store.list(p),
       describe: () => store.describe(),
       erasure: store.erasure,
     })
@@ -62,6 +63,7 @@ describe('startup store probe', () => {
         throw new Error('connect ECONNREFUSED key=AKIAsecret bucket=private-bucket')
       },
       delete: p => inner.delete(p),
+      list: p => inner.list(p),
       describe: () => 's3:private-bucket',
       erasure: 'erases',
     } as BlobStore)

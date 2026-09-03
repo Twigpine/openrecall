@@ -71,7 +71,31 @@ describe('rejection log', () => {
     expect(JSON.stringify([{ ...lines[0], planted: sentinel }])).toContain(sentinel)
   })
 
-  test('an unauthorized caller is logged with its code', async () => {
+  test('a throw from path parsing still returns an envelope and logs one line', async () => {
+    // A malformed percent escape throws in decodeURIComponent, which happens
+    // before respond()'s own try block. Without a guard in handleRequest that
+    // reaches the runtime unhandled: no envelope, no security headers, no line.
+    capture()
+    const res = await handleRequest(new Request('http://x/api/memory/%'))
+    expect(res.status).toBe(500)
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('internal')
+    expect(lines.length).toBe(1)
+    expect(Object.keys(lines[0] as object).sort()).toEqual([...ALLOWED_FIELDS].sort())
+    expect(lines[0]?.code).toBe('internal')
+  })
+
+  test('an unknown route is logged as anonymous on the other route class', async () => {
+    capture()
+    const res = await handleRequest(new Request('http://x/nope'))
+    expect(res.status).toBe(404)
+    expect(lines.length).toBe(1)
+    expect(lines[0]?.owner).toBe('anonymous')
+    expect(lines[0]?.route).toBe('other')
+    expect(lines[0]?.code).toBe('not_found')
+  })
+
+  test('a method-not-allowed caller is logged with its code', async () => {
     capture()
     const res = await handleRequest(
       new Request('http://x/api/memory/user:local', { method: 'POST' }),

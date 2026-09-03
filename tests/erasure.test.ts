@@ -14,6 +14,7 @@ import { getHashes, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
 import { getStore, resetStore, setStore } from '../src/store/index.ts'
+import { S3BlobStore } from '../src/store/s3.ts'
 
 const NOW = '2026-06-24T00:00:00.000Z'
 const b64 = (s: string) => Buffer.from(s).toString('base64')
@@ -39,6 +40,7 @@ describe('erasure advertisement', () => {
       get: p => inner.get(p),
       put: (p, b) => inner.put(p, b),
       delete: p => inner.delete(p),
+      list: p => inner.list(p),
       describe: () => 'retaining',
       erasure: 'retains',
     }
@@ -65,8 +67,20 @@ describe('erasure advertisement', () => {
     expect(incomplete.describe()).toBe('incomplete')
   })
 
-  test('the real drivers both declare erasure', async () => {
+  test('both shipped drivers declare erasure', () => {
     resetStore()
     expect(getStore().erasure).toBe('erases')
+    // Read s3's declaration directly. Going through getStore() only ever
+    // reaches the filesystem driver under the test config, so flipping s3's
+    // value would not be observed -- and s3 is the driver the hosted service
+    // runs, which is exactly where a wrong declaration would matter.
+    const s3 = new S3BlobStore({
+      bucket: 'b',
+      endpoint: '',
+      region: 'auto',
+      accessKeyId: 'k',
+      secretAccessKey: 's',
+    })
+    expect(s3.erasure).toBe('erases')
   })
 })

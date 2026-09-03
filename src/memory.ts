@@ -19,7 +19,7 @@ import { namespaceChecksum, sha256Hex, sha256Prefixed } from './hash.ts'
 import { withLock } from './lock.ts'
 import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
-import { contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
+import { blobPrefix, contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
 import {
   emptyManifest,
   type Manifest,
@@ -223,29 +223,16 @@ export async function upsert(
       }
 
       const commit = async () => {
-        // Blobs first, then the manifest that publishes them, then reclaim what
-        // the new manifest no longer references. A crash before the manifest
-        // write leaves orphans no reader can see; a crash after it leaves stale
-        // extras no reader can see. Either way the visible state is consistent.
+        // Blobs first, then the manifest that publishes them. A crash before
+        // the manifest write leaves orphans no reader can see; a crash after it
+        // leaves stale extras no reader can see. Either way the visible state is
+        // consistent. Reclaim is deliberately NOT here: it runs after the write
+        // is durable, because a failure to collect garbage must not fail, or
+        // roll back, a write that already landed.
         for (const w of blobWrites) await store.put(w.path, w.bytes)
         m.version += 1
         m.lastModified = nowIso
         await writeManifest(nsSlug, m)
-
-        const live = new Set(Object.values(m.entries).map(meta => meta.hash))
-        for (const key of touched) {
-          const old = prev[key]
-          // Deterministic ciphertext means another entry may hold this exact
-          // blob; only reclaim it when no live entry still names that hash.
-          if (old && !live.has(old)) await store.delete(contentPath(nsSlug, old))
-          // Entries written before content addressing live at a key-derived path
-          // the new layout never names, so nothing else would ever remove them
-          // and a delete would silently leave the ciphertext behind. Only a key
-          // the pre-write manifest knew can have one, so skip the rest: on s3
-          // this would otherwise be a network round trip per touched key, on
-          // every write, forever, holding both the namespace and owner locks.
-          if (old !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
-        }
       }
 
       const projected = { entries: Object.keys(m.entries).length, bytes: nsBytes }
@@ -255,6 +242,8 @@ export async function upsert(
       } else {
         await reserveAndCommit(owner, namespace, projected, nowIso, commit)
       }
+
+      await reclaim(nsSlug, m, prev, touched)
     }
 
     return {
@@ -267,6 +256,50 @@ export async function upsert(
       skipped,
     }
   })
+}
+
+/**
+ * Delete ciphertext no visible manifest names.
+ *
+ * Driven by a listing rather than by the keys this request touched, because the
+ * orphans that matter are the ones no key can reach: a write that died before
+ * publishing left blobs the next manifest never mentions, and a delete whose
+ * collection failed removed the key from the manifest, so nothing can name its
+ * hash again. Sweeping the namespace's blob directory against the live hash set
+ * finds both, which is what makes `erasure: 'erases'` true rather than a claim.
+ *
+ * Never throws. This runs after the write is durable and collects garbage that
+ * is already invisible to every reader, so a store hiccup here must not turn a
+ * landed write into a failure, nor skip the caller's quota accounting.
+ */
+async function reclaim(
+  nsSlug: string,
+  m: Manifest,
+  prev: Record<string, string>,
+  touched: Set<string>,
+): Promise<void> {
+  const store = getStore()
+  try {
+    const live = new Set<string>()
+    for (const meta of Object.values(m.entries)) live.add(contentPath(nsSlug, meta.hash))
+    for (const path of await store.list(blobPrefix(nsSlug))) {
+      if (!live.has(path)) await store.delete(path)
+    }
+    // Entries written before content addressing sit at a key-derived path the
+    // sweep above does not cover, and only a key the pre-write manifest knew
+    // can have one.
+    for (const key of touched) {
+      if (prev[key] !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
+    }
+  } catch (err) {
+    process.stderr.write(
+      `${JSON.stringify({
+        timestamp: new Date().toISOString(),
+        event: 'reclaim_failed',
+        reason: (err as Error)?.constructor?.name ?? 'unknown',
+      })}\n`,
+    )
+  }
 }
 
 function decodeBase64(b64: string): Uint8Array | null {

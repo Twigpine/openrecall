@@ -6,7 +6,7 @@
  * mid-write can't leave a half-written manifest.
  */
 
-import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
 import type { BlobStore } from './blobstore.ts'
 
@@ -49,6 +49,17 @@ export class FsBlobStore implements BlobStore {
 
   async delete(path: string): Promise<void> {
     await rm(this.full(path), { force: true })
+  }
+
+  async list(prefix: string): Promise<string[]> {
+    const dir = this.full(prefix)
+    try {
+      const names = await readdir(dir)
+      return names.filter(n => !n.startsWith('.tmp-')).map(n => `${prefix}${n}`)
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException).code === 'ENOENT') return []
+      throw err
+    }
   }
 
   describe(): string {

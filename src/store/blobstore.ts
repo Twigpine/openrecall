@@ -22,6 +22,15 @@ export interface BlobStore {
   put(path: string, bytes: Uint8Array): Promise<void>
   /** Delete an object. No-op if it does not exist. */
   delete(path: string): Promise<void>
+  /**
+   * Every object path under `prefix`. Needed because reclaim has to find blobs
+   * no manifest names: a write that dies before publishing leaves ciphertext
+   * that no later request can reach by key, so a reclaim driven only from the
+   * previous manifest can never see it. Without this the store accumulates
+   * ciphertext that quota cannot count and `erasure: 'erases'` is a false
+   * promise.
+   */
+  list(prefix: string): Promise<string[]>
   /** A short label for logs/health (e.g. "fs:/data", "s3:openrecall"). */
   describe(): string
   /**
@@ -63,5 +72,24 @@ export function entryPath(nsSlug: string, entryKeyHash: string): string {
  * blob, never assume one entry owns it.
  */
 export function contentPath(nsSlug: string, ciphertextHash: string): string {
-  return `ns/${nsSlug}/blobs/${ciphertextHash.replace(/^sha256:/, '')}`
+  return `ns/${nsSlug}/blobs/${bareHash(ciphertextHash)}`
+}
+
+/** The directory every content-addressed blob for a namespace lives under. */
+export function blobPrefix(nsSlug: string): string {
+  return `ns/${nsSlug}/blobs/`
+}
+
+/**
+ * Strip the `sha256:` prefix and prove what remains is a bare hex digest.
+ *
+ * A manifest hash reaches a storage path here, and a manifest is parsed JSON
+ * rather than validated input, so this is the boundary the repo's rule about
+ * validating names before they touch a path applies to. Without the check a
+ * hash carrying path separators escapes the namespace directory.
+ */
+function bareHash(ciphertextHash: string): string {
+  const bare = ciphertextHash.startsWith('sha256:') ? ciphertextHash.slice(7) : ciphertextHash
+  if (!/^[0-9a-f]{64}$/.test(bare)) throw new Error('ciphertext hash is not a sha256 digest')
+  return bare
 }

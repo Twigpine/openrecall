@@ -83,7 +83,17 @@ function upsertFailure(err: unknown): Response | null {
  */
 export async function handleRequest(req: Request): Promise<Response> {
   const ctx: RequestContext = { owner: 'anonymous', route: 'other' }
-  const res = await respond(req, ctx)
+  // respond() parses the path before its own try block, so a malformed percent
+  // escape throws past it. Without this guard that reaches the runtime as an
+  // unhandled error: no envelope, no security headers, and no log line, which
+  // would make the claim above false for a request anyone can send.
+  let res: Response
+  try {
+    res = await respond(req, ctx)
+  } catch (err) {
+    console.error(`[memlawb] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
+    res = apiError('internal', 'internal error', 500)
+  }
   if (res.status >= 400) {
     let code = 'unknown'
     try {

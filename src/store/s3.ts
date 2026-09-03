@@ -60,6 +60,17 @@ export class S3BlobStore implements BlobStore {
     await this.client.delete(path)
   }
 
+  async list(prefix: string): Promise<string[]> {
+    const out: string[] = []
+    let token: string | undefined
+    do {
+      const page = await this.client.list({ prefix, continuationToken: token })
+      for (const o of page.contents ?? []) if (o.key) out.push(o.key)
+      token = page.isTruncated ? page.nextContinuationToken : undefined
+    } while (token)
+    return out
+  }
+
   describe(): string {
     return `s3:${this.bucket}`
   }

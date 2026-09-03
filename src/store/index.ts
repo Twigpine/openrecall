@@ -31,4 +31,4 @@ export function resetStore(): void {
 }
 
 export type { BlobStore } from './blobstore.ts'
-export { contentPath, entryPath, manifestPath } from './blobstore.ts'
+export { blobPrefix, contentPath, entryPath, manifestPath } from './blobstore.ts'

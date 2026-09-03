@@ -22,6 +22,7 @@ function stub(): BlobStore {
     get: async () => SENTINEL,
     put: async () => {},
     delete: async () => {},
+    list: async () => [],
     describe: () => 'stub',
     erasure: 'erases',
   }
@@ -67,16 +68,22 @@ describe('store factory seam', () => {
       if (file !== join(root, 'src/store/index.ts')) {
         if (/\b(setStore|resetStore)\b/.test(src)) offenders.push(file.slice(root.length + 1))
       }
-      for (const m of src.matchAll(/from\s+'(\.[^']+)'/g)) {
+      // Static imports and dynamic import() alike: bin/memlawb.ts reaches the
+      // server and the MCP entry through import(), so a walk that only follows
+      // `from '...'` would miss the real entrypoint entirely.
+      for (const m of src.matchAll(/(?:from|import)\s*\(?\s*'(\.[^']+)'/g)) {
         await walk(resolve(dirname(file), m[1] as string))
       }
     }
 
     await walk(join(root, 'src/index.ts'))
     await walk(join(root, 'src/mcp/server.ts'))
+    await walk(join(root, 'bin/memlawb.ts'))
 
-    // Positive control: the walk actually reached the modules it claims to cover.
-    expect(seen.size).toBeGreaterThan(8)
+    // Positive control: the walk reached the modules it claims to cover. The
+    // floor tracks the real count rather than a guess, so a walk that silently
+    // stopped following imports fails here instead of reporting no offenders.
+    expect(seen.size).toBeGreaterThanOrEqual(20)
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })
