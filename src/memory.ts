@@ -19,7 +19,7 @@ import { namespaceChecksum, sha256Hex, sha256Prefixed } from './hash.ts'
 import { withLock } from './lock.ts'
 import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
-import { entryPath, getStore, manifestPath } from './store/index.ts'
+import { contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
 import {
   emptyManifest,
   type Manifest,
@@ -36,9 +36,12 @@ async function readManifest(nsSlug: string): Promise<Manifest> {
   try {
     return JSON.parse(new TextDecoder().decode(raw)) as Manifest
   } catch {
-    // A corrupt manifest shouldn't brick the namespace; start clean. Entry
-    // blobs are still on disk and a re-push will rebuild the manifest.
-    return emptyManifest()
+    // Absent and unreadable are different. Absent is a new namespace; unreadable
+    // is a namespace whose index we cannot see, and starting clean there would
+    // now be destructive: the commit path reclaims blobs the new manifest does
+    // not reference, so an empty manifest would delete every live entry. Refuse
+    // the write and let an operator look.
+    throw new Error(`unreadable manifest for namespace slug ${nsSlug}`)
   }
 }
 
@@ -81,7 +84,9 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   await Promise.all(
     Object.entries(m.entries).map(async ([key, meta]) => {
-      const bytes = await store.get(entryPath(nsSlug, sha256Hex(key)))
+      const bytes =
+        (await store.get(contentPath(nsSlug, meta.hash))) ??
+        (await store.get(entryPath(nsSlug, sha256Hex(key))))
       if (!bytes) return // manifest/blob drift — skip rather than 500
       entries[key] = Buffer.from(bytes).toString('base64')
       entryChecksums[key] = meta.hash
@@ -121,12 +126,16 @@ export async function upsert(
   return withLock(`ns:${nsSlug}`, async () => {
     const store = getStore()
     const m = await readManifest(nsSlug)
+    // The projection mutates `m.entries` in place, so capture what the currently
+    // visible manifest points at before touching it; cleanup needs the old hashes.
+    const prev: Record<string, string> = {}
+    for (const [k, meta] of Object.entries(m.entries)) prev[k] = meta.hash
+    const touched = new Set<string>()
     const accepted: string[] = []
     const deleted: string[] = []
     const skipped: { key: string; reason: string }[] = []
     // Defer all mutations so we can reject the whole request on a cap breach.
     const blobWrites: { path: string; bytes: Uint8Array }[] = []
-    const blobDeletes: string[] = []
 
     // Deletions first (projected; store.delete deferred to commit).
     for (const key of req.deletions ?? []) {
@@ -137,7 +146,7 @@ export async function upsert(
         continue
       }
       if (m.entries[key]) {
-        blobDeletes.push(entryPath(nsSlug, sha256Hex(key)))
+        touched.add(key)
         delete m.entries[key]
         deleted.push(key)
       }
@@ -173,12 +182,13 @@ export async function upsert(
         accepted.push(key)
         continue
       }
-      blobWrites.push({ path: entryPath(nsSlug, sha256Hex(key)), bytes })
+      blobWrites.push({ path: contentPath(nsSlug, hash), bytes })
+      touched.add(key)
       m.entries[key] = { hash, size: bytes.byteLength, updatedAt: nowIso }
       accepted.push(key)
     }
 
-    const mutated = blobWrites.length > 0 || blobDeletes.length > 0
+    const mutated = blobWrites.length > 0 || touched.size > 0
     if (mutated) {
       // Project the namespace's final footprint and enforce its byte cap.
       let nsBytes = 0
@@ -190,11 +200,26 @@ export async function upsert(
       }
 
       const commit = async () => {
+        // Blobs first, then the manifest that publishes them, then reclaim what
+        // the new manifest no longer references. A crash before the manifest
+        // write leaves orphans no reader can see; a crash after it leaves stale
+        // extras no reader can see. Either way the visible state is consistent.
         for (const w of blobWrites) await store.put(w.path, w.bytes)
-        for (const d of blobDeletes) await store.delete(d)
         m.version += 1
         m.lastModified = nowIso
         await writeManifest(nsSlug, m)
+
+        const live = new Set(Object.values(m.entries).map(meta => meta.hash))
+        for (const key of touched) {
+          const old = prev[key]
+          // Deterministic ciphertext means another entry may hold this exact
+          // blob; only reclaim it when no live entry still names that hash.
+          if (old && !live.has(old)) await store.delete(contentPath(nsSlug, old))
+          // Entries written before content addressing live at a key-derived
+          // path the new layout never names, so nothing else would ever remove
+          // them and a delete would silently leave the ciphertext behind.
+          await store.delete(entryPath(nsSlug, sha256Hex(key)))
+        }
       }
 
       const projected = { entries: Object.keys(m.entries).length, bytes: nsBytes }

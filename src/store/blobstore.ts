@@ -37,3 +37,17 @@ export function manifestPath(nsSlug: string): string {
 export function entryPath(nsSlug: string, entryKeyHash: string): string {
   return `ns/${nsSlug}/entries/${entryKeyHash}`
 }
+
+/**
+ * Build the storage path for one entry's ciphertext, named by that ciphertext's
+ * own hash. Writing to a content-addressed path means an overwrite never mutates
+ * a blob the currently-visible manifest still points at, which is what makes a
+ * crash mid-commit leave the previous state readable and self-consistent.
+ *
+ * Encryption is deterministic, so two entries holding identical ciphertext share
+ * one path. Cleanup must therefore check the live hash set before removing a
+ * blob, never assume one entry owns it.
+ */
+export function contentPath(nsSlug: string, ciphertextHash: string): string {
+  return `ns/${nsSlug}/blobs/${ciphertextHash.replace(/^sha256:/, '')}`
+}
