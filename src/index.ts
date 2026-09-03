@@ -9,6 +9,14 @@
 import { config } from './config.ts'
 import { handleRequest } from './handler.ts'
 import { getStore } from './store/index.ts'
+import { probeStore } from './store/probe.ts'
+
+const probe = await probeStore()
+if (!probe.ok) {
+  // Refuse to serve rather than answer 200 over a store we cannot reach.
+  process.stderr.write(`[memlawb] store probe failed: ${probe.detail}\n`)
+  process.exit(1)
+}
 
 const server = Bun.serve({
   port: config.port,
