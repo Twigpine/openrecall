@@ -16,6 +16,7 @@
 
 import { authenticate, authorizeNamespace } from './auth.ts'
 import { config } from './config.ts'
+import { logRejection } from './log.ts'
 import { getData, getHashes, upsert } from './memory.ts'
 import {
   InvalidNameError,
@@ -25,7 +26,6 @@ import {
 } from './namespace.ts'
 import { QuotaError } from './quota.ts'
 import { take } from './ratelimit.ts'
-import { getStore } from './store/index.ts'
 import { parseUpsertRequest, StaleBaseError } from './types.ts'
 
 // Applied to every response. The API serves only JSON and is consumed by
@@ -61,7 +61,31 @@ function parseMemoryPath(pathname: string): { namespace: string } | null {
   return { namespace: rest }
 }
 
+/**
+ * Log every refusal from one place, after the response is built, so the code
+ * recorded is literally the code the caller received and no future refusal
+ * branch can be added without being covered.
+ */
 export async function handleRequest(req: Request): Promise<Response> {
+  const ctx: RequestContext = { owner: 'anonymous', route: 'other' }
+  const res = await respond(req, ctx)
+  if (res.status >= 400) {
+    let code = 'unknown'
+    try {
+      const body = (await res.clone().json()) as { error?: { code?: string } }
+      if (body.error?.code) code = body.error.code
+    } catch {
+      // A refusal with a non-JSON body still gets a line; the code stays unknown.
+    }
+    logRejection({ owner: ctx.owner, code, status: res.status, route: ctx.route })
+  }
+  return res
+}
+
+/** Per-request facts the rejection log needs, filled in as they become known. */
+type RequestContext = { owner: string; route: string }
+
+async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   const url = new URL(req.url)
   const { pathname } = url
 
@@ -70,10 +94,12 @@ export async function handleRequest(req: Request): Promise<Response> {
   }
 
   const parsed = parseMemoryPath(pathname)
+  if (parsed) ctx.route = 'memory'
   if (!parsed) return apiError('not_found', 'unknown route', 404)
 
   const identity = await authenticate(req)
   if (!identity) return apiError('unauthorized', 'missing or invalid API key', 401)
+  ctx.owner = identity.owner
 
   const rate = take(identity.owner, Date.now())
   if (!rate.ok) {
@@ -182,7 +208,9 @@ export async function handleRequest(req: Request): Promise<Response> {
 
     return apiError('method_not_allowed', `${req.method} not supported`, 405)
   } catch (err) {
-    console.error('[openrecall] handler error', err)
+    // The error's class only. A store error commonly carries an endpoint, a
+    // bucket and an object path, and that path carries a namespace slug.
+    console.error(`[openrecall] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
     return apiError('internal', 'internal error', 500)
   }
 }

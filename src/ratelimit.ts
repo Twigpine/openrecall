@@ -48,3 +48,12 @@ export function take(owner: string, now: number): RateResult {
 export function _reset(): void {
   buckets.clear()
 }
+
+/**
+ * Drop every bucket. Tests only: the buckets are per owner and in-process, and
+ * bun shares one process across test files, so a test that deliberately
+ * exhausts a bucket would otherwise refuse requests in every later suite.
+ */
+export function resetRateLimit(): void {
+  buckets.clear()
+}
