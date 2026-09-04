@@ -32,6 +32,27 @@ function stub(): BlobStore {
 // file's stub into every later suite in the shared process.
 afterEach(() => resetStore())
 
+describe('filesystem listing', () => {
+  test('an absent prefix lists nothing rather than throwing', async () => {
+    resetStore()
+    // reclaim lists a namespace's blob directory on every mutating write,
+    // including the first, when that directory does not exist yet.
+    expect(await getStore().list('ns/definitely-not-here/blobs/')).toEqual([])
+  })
+
+  test('a half-written temp file is not listed as a blob', async () => {
+    resetStore()
+    const store = getStore()
+    const prefix = 'ns/listfixture/blobs/'
+    await store.put(`${prefix}real`, new TextEncoder().encode('x'))
+    await store.put(`${prefix}.tmp-123-1-1`, new TextEncoder().encode('y'))
+    // Control: both objects are really there, so the filter is what removes one
+    // rather than the write having failed.
+    expect(await store.get(`${prefix}.tmp-123-1-1`)).not.toBeNull()
+    expect(await store.list(prefix)).toEqual([`${prefix}real`])
+  })
+})
+
 describe('store factory seam', () => {
   test('setStore installs an instance getStore then returns', async () => {
     setStore(stub())

@@ -40,6 +40,38 @@ export function setRejectionSink(next: Sink): void {
   sink = next
 }
 
+/**
+ * An operational event that is not a request refusal: something the server did
+ * or failed to do on its own. Separate from Rejection because it carries a
+ * namespace slug, which a refusal line deliberately never does -- here the slug
+ * is the whole point, since an operator cannot act on "collection failed
+ * somewhere". A slug is a hash of a namespace, so it identifies a tenant to
+ * anyone who can already read the storage layout, and nothing more.
+ */
+export type OperationalEvent = {
+  timestamp: string
+  event: string
+  nsSlug: string
+  reason: string
+}
+
+type EventSink = ((line: OperationalEvent) => void) | null
+let eventSink: EventSink = null
+
+/** Tests capture events instead of writing them. Passing null restores stderr. */
+export function setEventSink(next: EventSink): void {
+  eventSink = next
+}
+
+export function logEvent(fields: Omit<OperationalEvent, 'timestamp'>): void {
+  const line: OperationalEvent = { timestamp: new Date().toISOString(), ...fields }
+  if (eventSink) {
+    eventSink(line)
+    return
+  }
+  process.stderr.write(`${JSON.stringify(line)}\n`)
+}
+
 export function logRejection(fields: Omit<Rejection, 'timestamp'>): void {
   const line: Rejection = { timestamp: new Date().toISOString(), ...fields }
   if (sink) {

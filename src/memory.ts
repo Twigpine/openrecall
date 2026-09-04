@@ -17,6 +17,7 @@
 import { config } from './config.ts'
 import { namespaceChecksum, sha256Hex, sha256Prefixed } from './hash.ts'
 import { withLock } from './lock.ts'
+import { logEvent } from './log.ts'
 import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
 import { blobPrefix, contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
@@ -313,17 +314,14 @@ async function reclaim(
       if (prev[key] !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
     }
   } catch (err) {
-    process.stderr.write(
-      `${JSON.stringify({
-        timestamp: new Date().toISOString(),
-        event: 'reclaim_failed',
-        // The slug is already every storage path's own directory name, so it
-        // discloses nothing new, and it is the only field that makes this line
-        // actionable: without it an operator knows collection failed somewhere.
-        nsSlug,
-        reason: (err as Error)?.constructor?.name ?? 'unknown',
-      })}\n`,
-    )
+    // The slug is what makes this actionable: without it an operator only knows
+    // collection failed somewhere. It is already every storage path's own
+    // directory name, so it discloses nothing a reader of the store lacks.
+    logEvent({
+      event: 'reclaim_failed',
+      nsSlug,
+      reason: (err as Error)?.constructor?.name ?? 'unknown',
+    })
   }
 }
 

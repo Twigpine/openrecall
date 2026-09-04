@@ -148,6 +148,7 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   }
 
   const parsed = parseMemoryPath(pathname)
+  if (parsed) ctx.route = 'memory'
 
   // Authenticate before refusing anything, so the throttle below can key on the
   // caller when there is one. Every refusal writes a log line, and the unknown
@@ -167,7 +168,6 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   }
 
   if (!parsed) return apiError('not_found', 'unknown route', 404)
-  ctx.route = 'memory'
   if (!identity) return apiError('unauthorized', 'missing or invalid API key', 401)
 
   let namespace: string

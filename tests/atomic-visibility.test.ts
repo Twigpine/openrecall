@@ -13,6 +13,7 @@
 
 import { afterEach, describe, expect, test } from 'bun:test'
 import { sha256Hex, sha256Prefixed } from '../src/hash.ts'
+import { setEventSink } from '../src/log.ts'
 import { getData, getHashes, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
@@ -198,6 +199,50 @@ describe('crash visibility across the commit sequence', () => {
     expect(contentPath('slug', `sha256:${good}`)).toBe(`ns/slug/blobs/${good}`)
   })
 
+  test('re-pushing identical ciphertext writes no blob', async () => {
+    // The server compares the pushed hash against the manifest and accepts
+    // without writing. Without this the store rewrites every entry on every
+    // push, which on s3 is a network round trip per entry per request.
+    const ns = 'user:nooprewrite'
+    const slug = namespaceSlug(ns)
+    await seed(ns, { 'a.md': b64('same') })
+    const real = getStore()
+    const puts: string[] = []
+    setStore({
+      get: p => real.get(p),
+      put: (p, b) => {
+        puts.push(p)
+        return real.put(p, b)
+      },
+      delete: p => real.delete(p),
+      list: p => real.list(p),
+      describe: () => 'counting',
+      erasure: real.erasure,
+    })
+    const r = await upsert(ns, slug, 'local', { entries: { 'a.md': b64('same') } }, NOW)
+    resetStore()
+    expect(r.accepted).toEqual(['a.md'])
+    // No blob and no manifest write: the request mutated nothing at all.
+    expect(puts).toEqual([])
+
+    // Control: changed ciphertext for the same key does write.
+    const puts2: string[] = []
+    setStore({
+      get: p => real.get(p),
+      put: (p, b) => {
+        puts2.push(p)
+        return real.put(p, b)
+      },
+      delete: p => real.delete(p),
+      list: p => real.list(p),
+      describe: () => 'counting',
+      erasure: real.erasure,
+    })
+    await upsert(ns, slug, 'local', { entries: { 'a.md': b64('different') } }, NOW)
+    resetStore()
+    expect(puts2.length).toBeGreaterThan(0)
+  })
+
   test('a manifest entry with a non-digest hash is skipped, not fatal', async () => {
     // contentPath throws on a hash that cannot name a blob, which is right on
     // the write path. On the read path one corrupt entry must not take the
@@ -216,6 +261,40 @@ describe('crash visibility across the commit sequence', () => {
     // than the whole view collapsing.
     expect(Buffer.from(data.content.entries['ok.md'] as string, 'base64').toString()).toBe('fine')
     expect(data.content.entries['bad.md']).toBeUndefined()
+  })
+
+  test('a reclaim failure names the namespace an operator has to go look at', async () => {
+    const events: { event: string; nsSlug: string; reason: string }[] = []
+    setEventSink(l => events.push(l))
+    const ns = 'user:reclaimlog'
+    const slug = namespaceSlug(ns)
+    await seed(ns, { 'a.md': b64('v1') })
+    const real = getStore()
+    setStore({
+      get: p => real.get(p),
+      put: (p, b) => real.put(p, b),
+      delete: async () => {
+        throw new Boom('nope')
+      },
+      list: p => real.list(p),
+      describe: () => 'delete-hostile',
+      erasure: real.erasure,
+    })
+    await upsert(ns, slug, 'local', { entries: { 'a.md': b64('v2') } }, NOW)
+    resetStore()
+    setEventSink(null)
+    expect(events.length).toBe(1)
+    expect(events[0]?.event).toBe('reclaim_failed')
+    // The slug is the field that makes the line actionable at all.
+    expect(events[0]?.nsSlug).toBe(slug)
+    expect(events[0]?.reason).toBe('Boom')
+    // Control: a healthy write emits no event, so the assertion above is about
+    // this failure and not about the sink capturing everything.
+    const quiet: unknown[] = []
+    setEventSink(l => quiet.push(l))
+    await upsert(ns, slug, 'local', { entries: { 'b.md': b64('x') } }, NOW)
+    setEventSink(null)
+    expect(quiet).toEqual([])
   })
 
   test('a reclaim failure does not fail a write that already published', async () => {
