@@ -1,8 +1,8 @@
 /**
- * The store factory's test seam (U1).
+ * The store factory's test seam.
  *
  * `getStore()` memoizes for the life of the process, which is right for the
- * server and impossible for tests: a fault-injecting store (U2's sweep) and a
+ * server and impossible for tests: a fault-injecting store (the crash sweep) and a
  * second driver in one process both need to replace the cached instance and put
  * the real one back. The seam exists for that and nothing else, so the last test
  * here walks the production import graph and fails if anything under src/ that

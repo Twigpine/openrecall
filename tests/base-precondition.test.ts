@@ -1,5 +1,5 @@
 /**
- * The per-entry base precondition (U3, R12, AE7 server half).
+ * The per-entry base precondition, server half.
  *
  * A push carries the ciphertext hash it believes each key currently holds. If
  * the manifest disagrees, the write is refused with 409 rather than applied.

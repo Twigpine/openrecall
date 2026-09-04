@@ -1,5 +1,5 @@
 /**
- * Health is liveness; the store check runs at startup (U6, R15/R24).
+ * Health is liveness; the store check runs at startup.
  *
  * The health route is unauthenticated, so anything it reports is public. It
  * used to echo the store's description, which on a driver whose label carries a

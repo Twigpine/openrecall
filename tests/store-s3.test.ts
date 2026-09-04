@@ -1,5 +1,5 @@
 /**
- * S3BlobStore's listing (U2 fix pass).
+ * S3BlobStore's listing.
  *
  * s3 is the driver the hosted service runs, and reclaim now depends on list()
  * to find blobs no manifest names. A list that silently returned only its first

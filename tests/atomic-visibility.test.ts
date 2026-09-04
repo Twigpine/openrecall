@@ -1,5 +1,5 @@
 /**
- * Crash visibility across the commit sequence (U2, R9, AE4).
+ * Crash visibility across the commit sequence.
  *
  * The property: a reader never sees a manifest naming a blob that is absent,
  * nor a blob whose bytes disagree with the hash the visible manifest records

@@ -1,9 +1,9 @@
 /**
- * The rejection log (U7, R13, AE8).
+ * The rejection log.
  *
  * An operator needs to know which account was refused and why. The risk is that
  * a log line becomes the one place plaintext leaks, so the field set is an
- * allowlist fixed in KTD15 rather than a denylist: the space of things that
+ * allowlist rather than a denylist: the space of things that
  * must not appear is open-ended, and a denylist only catches what someone
  * thought of. A namespace slug is excluded too. It looks opaque but it is a
  * hash of a low-entropy namespace, so it is a stable per-tenant identifier

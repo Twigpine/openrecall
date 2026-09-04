@@ -1,11 +1,11 @@
 /**
- * Erasure advertisement (U5, R22/R27/R28 server half).
+ * Erasure advertisement, server half.
  *
  * Whether a delete actually erases is a property of the store, not of the
  * client, and the client cannot see which driver is configured. So the store
  * declares it and the server reports it where a client already looks: the
  * hashes view and every write response. fs and s3 erase; a store that keeps
- * history (the node driver, later) does not, and a client that knows will
+ * history (a git-backed store) does not, and a client that knows will
  * refuse a scan mode that would let a secret reach a store it can never leave.
  */
 

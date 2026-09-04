@@ -206,14 +206,28 @@ All bodies are ciphertext; the server validates sizes/hashes without decrypting.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET`  | `/health` | liveness + active store |
+| `GET`  | `/health` | liveness |
 | `GET`  | `/api/memory/:ns` | full data (ciphertext entries + checksums) |
 | `GET`  | `/api/memory/:ns?view=hashes` | per-key checksums only (for delta) |
-| `PUT`  | `/api/memory/:ns` | delta upsert `{ entries, deletions? }` |
-| `DELETE` | `/api/memory/:ns?key=<entryKey>` | remove one entry |
+| `PUT`  | `/api/memory/:ns` | delta upsert `{ entries, deletions?, base? }` |
+| `DELETE` | `/api/memory/:ns?key=<entryKey>[&base=sha256:<hex>]` | remove one entry |
 
 A *namespace* (`user:me`, `repo:owner/name`, `agent:intern`) is the unit of
 scoping. Entry keys mirror the memdir layout (`MEMORY.md`, `feedback/x.md`).
+
+The hashes view also reports `supports` (server capabilities a client can rely
+on) and `erasure` (whether this deployment's store actually removes bytes on
+delete); write responses carry `erasure` too.
+
+`base` is an optional precondition: a map of entry key to the ciphertext hash
+the caller believes that key holds, or `null` for "should not exist". A request
+that disagrees with the stored manifest is refused with `409 stale_base_version`
+and a `details.conflicts` map naming what each key actually holds. Omitting
+`base` writes unconditionally, which is what a client that has not adopted it
+still does. This guards the caller's own turn, not the moment between its last
+read and its write, which is why the check is per entry rather than a namespace
+version. A namespace whose manifest cannot be parsed answers
+`503 manifest_unreadable` rather than appearing empty.
 
 ## Configuration
 
