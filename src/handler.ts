@@ -26,10 +26,7 @@ import {
 } from './namespace.ts'
 import { QuotaError } from './quota.ts'
 import { take } from './ratelimit.ts'
-import { parseUpsertRequest, StaleBaseError } from './types.ts'
-
-/** The shape a DELETE `base` query value must take. */
-const BASE_HASH_RE = /^sha256:[0-9a-f]{64}$/
+import { isBaseHash, parseUpsertRequest, StaleBaseError, UnreadableManifestError } from './types.ts'
 
 // Applied to every response. The API serves only JSON and is consumed by
 // programmatic clients, so we lock down sniffing/caching/referrer leakage.
@@ -77,12 +74,23 @@ function upsertFailure(err: unknown): Response | null {
 }
 
 /**
+ * A namespace whose index cannot be parsed answers 503 with its own code rather
+ * than a generic 500, on reads as well as writes. The refusal is right, but
+ * "internal error" tells a caller to retry something no retry can fix, and
+ * leaves an operator unable to tell this apart from any other server fault.
+ */
+function manifestFailure(err: unknown): Response | null {
+  if (err instanceof UnreadableManifestError) return apiError(err.code, err.message, 503)
+  return null
+}
+
+/**
  * Log every refusal from one place, after the response is built, so the code
  * recorded is literally the code the caller received and no future refusal
  * branch can be added without being covered.
  */
 export async function handleRequest(req: Request): Promise<Response> {
-  const ctx: RequestContext = { owner: 'anonymous', route: 'other' }
+  const ctx: RequestContext = { ...DEFAULT_CONTEXT }
   // respond() parses the path before its own try block, so a malformed percent
   // escape throws past it. Without this guard that reaches the runtime as an
   // unhandled error: no envelope, no security headers, and no log line, which
@@ -110,6 +118,27 @@ export async function handleRequest(req: Request): Promise<Response> {
 /** Per-request facts the rejection log needs, filled in as they become known. */
 type RequestContext = { owner: string; route: string }
 
+/**
+ * What a request is assumed to be before anything is known about it. Exported
+ * so the defaults are pinned somewhere: under an open-auth configuration every
+ * caller authenticates, so no test driving the handler can observe them.
+ */
+export const DEFAULT_CONTEXT: Readonly<RequestContext> = Object.freeze({
+  owner: 'anonymous',
+  route: 'other',
+})
+
+/**
+ * Which token bucket a request draws from: its own account when it
+ * authenticated, one shared anonymous bucket when it did not. Keying everything
+ * on the shared bucket would let anonymous abuse throttle real accounts; keying
+ * nothing on it leaves the pre-auth refusal branches, which now write a log
+ * line each, unthrottled entirely.
+ */
+export function bucketKey(identity: { owner: string } | null): string {
+  return identity?.owner ?? 'anonymous'
+}
+
 async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   const url = new URL(req.url)
   const { pathname } = url
@@ -119,19 +148,27 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   }
 
   const parsed = parseMemoryPath(pathname)
-  if (!parsed) return apiError('not_found', 'unknown route', 404)
-  ctx.route = 'memory'
 
+  // Authenticate before refusing anything, so the throttle below can key on the
+  // caller when there is one. Every refusal writes a log line, and the unknown
+  // route and unauthorized branches used to sit ahead of the bucket entirely,
+  // which let an unauthenticated caller turn a trivially cheap request into
+  // unbounded log volume on the machine holding every tenant's ciphertext.
   const identity = await authenticate(req)
-  if (!identity) return apiError('unauthorized', 'missing or invalid API key', 401)
-  ctx.owner = identity.owner
+  ctx.owner = bucketKey(identity)
 
-  const rate = take(identity.owner, Date.now())
+  // One shared bucket for callers who did not authenticate, their own bucket
+  // for those who did, so anonymous abuse cannot throttle a real account.
+  const rate = take(ctx.owner, Date.now())
   if (!rate.ok) {
     return apiError('rate_limited', 'too many requests', 429, undefined, {
       'retry-after': String(rate.retryAfterSec),
     })
   }
+
+  if (!parsed) return apiError('not_found', 'unknown route', 404)
+  ctx.route = 'memory'
+  if (!identity) return apiError('unauthorized', 'missing or invalid API key', 401)
 
   let namespace: string
   try {
@@ -203,7 +240,7 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
       // The base rides the query here rather than a body, so it needs its own
       // shape check: parseUpsertRequest never sees a DELETE.
       const rawBase = url.searchParams.get('base')
-      if (rawBase !== null && !BASE_HASH_RE.test(rawBase)) {
+      if (rawBase !== null && !isBaseHash(rawBase)) {
         return apiError('bad_request', '`base` must be a sha256:<hex> hash', 400)
       }
       const base = rawBase === null ? undefined : { [key]: rawBase }
@@ -225,6 +262,8 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
 
     return apiError('method_not_allowed', `${req.method} not supported`, 405)
   } catch (err) {
+    const manifest = manifestFailure(err)
+    if (manifest) return manifest
     // The error's class only. A store error commonly carries an endpoint, a
     // bucket and an object path, and that path carries a namespace slug.
     console.error(`[openrecall] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)

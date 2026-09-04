@@ -9,7 +9,7 @@
  * the server actually loads reaches for it.
  */
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 import { readFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import type { BlobStore } from '../src/store/blobstore.ts'
@@ -27,6 +27,10 @@ function stub(): BlobStore {
     erasure: 'erases',
   }
 }
+
+// A failing assertion before an inline resetStore() would otherwise leak this
+// file's stub into every later suite in the shared process.
+afterEach(() => resetStore())
 
 describe('store factory seam', () => {
   test('setStore installs an instance getStore then returns', async () => {

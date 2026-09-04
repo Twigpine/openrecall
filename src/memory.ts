@@ -26,6 +26,7 @@ import {
   type MemoryData,
   type MemoryHashes,
   StaleBaseError,
+  UnreadableManifestError,
   type UpsertRequest,
   type UpsertResponse,
 } from './types.ts'
@@ -49,7 +50,7 @@ async function readManifest(nsSlug: string): Promise<Manifest> {
     // now be destructive: the commit path reclaims blobs the new manifest does
     // not reference, so an empty manifest would delete every live entry. Refuse
     // the write and let an operator look.
-    throw new Error(`unreadable manifest for namespace slug ${nsSlug}`)
+    throw new UnreadableManifestError()
   }
 }
 
@@ -115,6 +116,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
     version: m.version,
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
+    erasure: store.erasure,
     content: { entries, entryChecksums, entryUpdatedAt },
   }
 }
@@ -258,7 +260,10 @@ export async function upsert(
       checksum: namespaceChecksum(checksumsFrom(m)),
       erasure: store.erasure,
       accepted,
-      deleted,
+      // A key listed in both deletions and entries is projected as a delete and
+      // then re-added, so reporting it in both arrays tells a client mirroring
+      // `deleted` to drop a file the same response says it stored.
+      deleted: deleted.filter(k => !(k in m.entries)),
       skipped,
     }
   })

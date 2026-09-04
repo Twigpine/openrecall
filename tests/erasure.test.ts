@@ -10,7 +10,7 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { getHashes, upsert } from '../src/memory.ts'
+import { getData, getHashes, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
 import { getStore, resetStore, setStore } from '../src/store/index.ts'
@@ -32,6 +32,10 @@ describe('erasure advertisement', () => {
     expect(h.erasure).toBe('erases')
     const d = await put(ns, { entries: {}, deletions: ['a.md'] })
     expect(d.erasure).toBe('erases')
+    // A client that only ever pulls still needs to know, so the full view
+    // carries it too rather than only the hashes view and write responses.
+    await put(ns, { entries: { 'b.md': b64('x') } })
+    expect((await getData(ns, namespaceSlug(ns))).erasure).toBe('erases')
   })
 
   test('a retaining store reports retaining on both surfaces', async () => {

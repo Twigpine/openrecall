@@ -21,18 +21,35 @@ export const PROBE_PREFIX = 'probe/'
 export type ProbeResult = { ok: boolean; detail?: string }
 
 /**
+ * How long the probe waits before calling the store unreachable. Neither
+ * adapter sets a socket timeout, so without this a hung connect leaves startup
+ * pending forever: the operator never sees the failure line this module exists
+ * to produce, and the deployment's health check has nothing to talk to.
+ */
+const PROBE_TIMEOUT_MS = 5_000
+
+function withDeadline<T>(work: Promise<T>, ms: number): Promise<T> {
+  return Promise.race([
+    work,
+    new Promise<T>((_, reject) =>
+      setTimeout(() => reject(new Error('store probe timed out')), ms).unref?.(),
+    ),
+  ])
+}
+
+/**
  * Write, read back, compare, and remove one object. Returns rather than throws
  * so the caller decides what a failure means. The failure detail is the error's
  * class, never its message: a store error commonly carries an endpoint, a
  * bucket and an object path, and that path carries a namespace slug.
  */
-export async function probeStore(): Promise<ProbeResult> {
+export async function probeStore(timeoutMs = PROBE_TIMEOUT_MS): Promise<ProbeResult> {
   const store = getStore()
   const path = `${PROBE_PREFIX}${randomUUID()}`
   const payload = new TextEncoder().encode(randomUUID())
   try {
-    await store.put(path, payload)
-    const read = await store.get(path)
+    await withDeadline(store.put(path, payload), timeoutMs)
+    const read = await withDeadline(store.get(path), timeoutMs)
     if (!read || Buffer.compare(Buffer.from(read), Buffer.from(payload)) !== 0) {
       return { ok: false, detail: 'store round trip returned different bytes' }
     }
@@ -40,6 +57,6 @@ export async function probeStore(): Promise<ProbeResult> {
   } catch (err) {
     return { ok: false, detail: `store unreachable (${(err as Error).constructor.name})` }
   } finally {
-    await store.delete(path).catch(() => {})
+    await withDeadline(store.delete(path), timeoutMs).catch(() => {})
   }
 }

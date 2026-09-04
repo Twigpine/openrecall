@@ -17,6 +17,7 @@ import { getData, getHashes, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
 import { contentPath, getStore, resetStore, setStore } from '../src/store/index.ts'
+import { UnreadableManifestError } from '../src/types.ts'
 
 const NOW = '2026-06-24T00:00:00.000Z'
 const b64 = (s: string) => Buffer.from(s).toString('base64')
@@ -180,8 +181,7 @@ describe('crash visibility across the commit sequence', () => {
     const err = await upsert(ns, slug, 'local', { entries: { 'b.md': b64('b1') } }, NOW).catch(
       e => e,
     )
-    expect(err).toBeInstanceOf(Error)
-    expect(String((err as Error).message)).toContain('manifest')
+    expect(err).toBeInstanceOf(UnreadableManifestError)
     // Control: the pre-existing blob is still there, so nothing was reclaimed.
     expect(await store.get(path)).toEqual(blobBefore as Uint8Array)
   })

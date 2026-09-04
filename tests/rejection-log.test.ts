@@ -11,7 +11,7 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { handleRequest } from '../src/handler.ts'
+import { bucketKey, DEFAULT_CONTEXT, handleRequest } from '../src/handler.ts'
 import { ALLOWED_FIELDS, setRejectionSink } from '../src/log.ts'
 import { _reset } from '../src/ratelimit.ts'
 
@@ -85,14 +85,38 @@ describe('rejection log', () => {
     expect(lines[0]?.code).toBe('internal')
   })
 
-  test('an unknown route is logged as anonymous on the other route class', async () => {
+  test('an unknown route is logged on the other route class', async () => {
     capture()
     const res = await handleRequest(new Request('http://x/nope'))
     expect(res.status).toBe(404)
     expect(lines.length).toBe(1)
-    expect(lines[0]?.owner).toBe('anonymous')
     expect(lines[0]?.route).toBe('other')
     expect(lines[0]?.code).toBe('not_found')
+    // The owner is 'local' here, not 'anonymous': tests/setup.ts pins
+    // ALLOW_UNAUTHENTICATED process-wide, so authenticate always returns an
+    // identity. The 'anonymous' default is only reachable with auth required,
+    // which this harness cannot express, so it is asserted at unit level below.
+    expect(lines[0]?.owner).toBe('local')
+  })
+
+  test('an authenticated caller draws from its own bucket, not the shared one', () => {
+    // Not drivable through the handler here: the harness authenticates every
+    // caller as the same owner, so a shared bucket and a per-owner one behave
+    // identically. Pin the rule where it is decided.
+    expect(bucketKey({ owner: 'alice' })).toBe('alice')
+    expect(bucketKey({ owner: 'bob' })).toBe('bob')
+    // Control: an unauthenticated caller shares one bucket rather than getting
+    // an unthrottled path.
+    expect(bucketKey(null)).toBe('anonymous')
+  })
+
+  test('the request context defaults to an anonymous caller on the other route', () => {
+    // The defaults above cannot be driven through the handler under this
+    // harness, so pin them where they are set. Control: both differ from the
+    // values the handler overwrites them with.
+    expect(DEFAULT_CONTEXT).toEqual({ owner: 'anonymous', route: 'other' })
+    expect(DEFAULT_CONTEXT.owner).not.toBe('local')
+    expect(DEFAULT_CONTEXT.route).not.toBe('memory')
   })
 
   test('a method-not-allowed caller is logged with its code', async () => {

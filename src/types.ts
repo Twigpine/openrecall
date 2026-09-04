@@ -35,6 +35,8 @@ export function emptyManifest(): Manifest {
 
 /** Full GET response. */
 export type MemoryData = {
+  /** Whether this deployment's store actually erases on delete. */
+  erasure: Erasure
   namespace: string
   version: number
   lastModified: string
@@ -105,6 +107,26 @@ export type UpsertResponse = {
   skipped: { key: string; reason: string }[]
 }
 
+/**
+ * The shape a base hash must take, in one place because both write verbs check
+ * it. When only DELETE checked, the same malformed value produced 400 there and
+ * 409 on PUT: the garbage reached the manifest comparison, never matched, and
+ * reported a conflict. A caller reading "someone wrote under you" retries the
+ * same bad value forever.
+ */
+export function isBaseHash(v: string): boolean {
+  return /^sha256:[0-9a-f]{64}$/.test(v)
+}
+
+/** Thrown when a namespace's manifest cannot be parsed. Surfaces as HTTP 503. */
+export class UnreadableManifestError extends Error {
+  readonly code = 'manifest_unreadable'
+  constructor() {
+    super('namespace index cannot be read')
+    this.name = 'UnreadableManifestError'
+  }
+}
+
 /** Structured error body. */
 export type ApiError = {
   error: { code: string; message: string; details?: Record<string, unknown> }
@@ -133,8 +155,8 @@ export function parseUpsertRequest(raw: unknown): UpsertRequest {
       throw new Error('`base` must be an object map of key -> hash or null')
     }
     for (const [k, v] of Object.entries(obj.base)) {
-      if (v !== null && typeof v !== 'string') {
-        throw new Error(`base ${JSON.stringify(k)} must be a hash string or null`)
+      if (v !== null && (typeof v !== 'string' || !isBaseHash(v))) {
+        throw new Error(`base ${JSON.stringify(k)} must be a sha256:<hex> hash or null`)
       }
     }
     base = obj.base as Record<string, string | null>
