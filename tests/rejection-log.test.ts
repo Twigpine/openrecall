@@ -13,7 +13,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { bucketKey, DEFAULT_CONTEXT, handleRequest } from '../src/handler.ts'
 import { ALLOWED_FIELDS, setRejectionSink } from '../src/log.ts'
-import { _reset } from '../src/ratelimit.ts'
+import { _reset, take } from '../src/ratelimit.ts'
 
 const lines: Record<string, unknown>[] = []
 
@@ -33,15 +33,34 @@ function capture() {
 
 describe('rejection log', () => {
   test('a rate-limited caller produces exactly one line, with only allowed fields', async () => {
+    // The bucket is one in-memory map keyed by owner, and under open auth every
+    // test file in this process shares that owner. Bun schedules those files
+    // independently, so the previous version of this test, which sent requests
+    // until one came back 429, was competing with every other file for tokens
+    // across a 240-request window it did not control. It failed in CI because
+    // the first request was already rate limited, so it saw one line instead of
+    // many. It could not be reproduced locally: with few files the scheduler
+    // does not interleave them the same way.
+    //
+    // Both halves are now driven deliberately, which does not merely make the
+    // race less likely, it removes the loop the race lived in. What remains is
+    // one request immediately after a reset, and if another file emptied the
+    // bucket inside that window this fails loudly on the 404 assertion below
+    // rather than on a count that reads like a logging bug.
+    _reset()
     capture()
-    let last: Response | undefined
-    for (let i = 0; i < 400; i++) {
-      last = await handleRequest(new Request('http://x/api/memory/user:local'))
-      if (last.status === 429) break
-    }
-    expect(last?.status).toBe(429)
-    // Every refusal on the way here is logged too (the namespace does not
-    // exist, so each read is a 404). All of them must obey the allowlist.
+
+    // A refusal that is not the rate limiter, to prove the allowlist holds for
+    // an ordinary line and to have something to compare the 429 against.
+    const missing = await handleRequest(new Request('http://x/api/memory/user:local'))
+    expect(missing.status).toBe(404)
+
+    // Spend the rest of the bucket directly rather than through the server, so
+    // the next request is rate limited no matter what else is running.
+    while (take('local', Date.now()).ok) {}
+    const last = await handleRequest(new Request('http://x/api/memory/user:local'))
+    expect(last.status).toBe(429)
+
     expect(lines.length).toBeGreaterThan(1)
     for (const l of lines) expect(Object.keys(l).sort()).toEqual([...ALLOWED_FIELDS].sort())
     const limited = lines.filter(l => l.code === 'rate_limited')
