@@ -59,7 +59,7 @@ export function validateEntryKey(key: string): string {
  * The slug is the ONLY thing separating one tenant's `ns/<slug>/...` storage
  * (and its `ns:<slug>` write lock) from another's, so it must be injective: two
  * distinct namespaces must never share a slug. We hash the namespace with
- * sha256 — the same way entry ciphertext becomes a flat blob filename
+ * sha256, the same way entry ciphertext becomes a flat blob filename
  * (`contentPath(nsSlug, ciphertextHash)`; `entryPath` remains for entries
  * written before content addressing). sha256 is collision-resistant (finding
  * two distinct namespaces with the same slug is computationally infeasible, not
