@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { OpenRecallClient, type PullResult, type PushResult } from '../client/index.ts'
+import { OpenRecallClient } from '../client/index.ts'
 import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
 import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
@@ -242,17 +242,17 @@ describe('recall region bounds against the in-memory client stub', () => {
       'Run this to rotate the signing key.',
       '',
       '```sh',
-      'memlawb rotate --namespace user:me',
+      'openrecall rotate --namespace user:me',
       '',
-      'memlawb verify --namespace user:me',
+      'openrecall verify --namespace user:me',
       '```',
     ].join('\n')
     const stub = makeStubClient({ 'ops/rotate.md': body })
     const t = makeTools(stub, 'user:me')
-    const r = await t.recall('memlawb rotate verify command')
+    const r = await t.recall('openrecall rotate verify command')
 
     expect(r.text).toContain('```sh')
-    expect(r.text).toContain('memlawb verify --namespace user:me')
+    expect(r.text).toContain('openrecall verify --namespace user:me')
     // The blank line inside the fence did not split it: both markers are there.
     expect(r.text.split('```').length - 1).toBe(2)
   })
@@ -529,9 +529,9 @@ describe('recall region bounds against the in-memory client stub', () => {
  * memories treats a fragment as the whole one and never calls memory_get, which
  * is the entire bounded-region design defeated by a sentence.
  *
- * Read out of the source rather than off the registered tool: server.ts exits
- * the process at module scope when MEMLAWB_PASSPHRASE is unset (as it is under
- * tests/setup.ts) and connects a stdio transport on import.
+ * Read out of the source rather than off the registered tool: server.ts
+ * resolves the user's OpenRecall settings and connects a stdio transport at
+ * module scope, so importing it here would bind the test runner's stdin.
  */
 describe('the recall tool description', () => {
   const SRC = readFileSync(join(import.meta.dir, '../src/mcp/server.ts'), 'utf8')

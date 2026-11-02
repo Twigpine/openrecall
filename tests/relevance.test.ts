@@ -375,7 +375,7 @@ describe('near-cap scale', () => {
   // Ranking runs over everything the caller decrypted, so the cost scales with
   // the namespace, and U3 adds a document-frequency pass over the whole corpus.
   // 2000 entries is the size BASELINE_RANK_MS was measured at. This cannot go
-  // through MemlawbClient or the server: tests/setup.ts pins the caps at 5
+  // through OpenRecallClient or the server: tests/setup.ts pins the caps at 5
   // entries and 5000 bytes, so the push would trip quota long before ranking.
   const corpus = nearCapCorpus(2000)
   const SEEDED = 'queue 1234'

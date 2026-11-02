@@ -19,7 +19,7 @@ export type ToolResult = { text: string; isError?: boolean }
  * The client surface these tools actually use. Declared structurally, and
  * narrowed to the four methods, so a test double is checked against the real
  * client's signatures by the compiler instead of being waved through with an
- * `as unknown as MemlawbClient` cast. Two stubs had already drifted under those
+ * `as unknown as OpenRecallClient` cast. Two stubs had already drifted under those
  * casts (one returning `skipped` where `PushResult` says `unchanged`, and
  * omitting `namespace`), which is exactly the drift a cast hides.
  */

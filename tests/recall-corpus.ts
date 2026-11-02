@@ -10,7 +10,7 @@
  * at rather than a claim about feeling better. The corpus is also the reason the
  * harness ranks by calling `rankMemories` directly: `tests/setup.ts` freezes the
  * server caps at five entries and 5000 bytes per namespace, so pushing this
- * corpus through a MemlawbClient would trip quota long before it ranked
+ * corpus through a OpenRecallClient would trip quota long before it ranked
  * anything. See `src/mcp/relevance.ts` for the ranker and
  * `tests/recall-regression.test.ts` for the assertions.
  *

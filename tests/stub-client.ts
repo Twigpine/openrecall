@@ -1,5 +1,5 @@
 /**
- * The one in-memory stand-in for `MemlawbClient`, in a plain module.
+ * The one in-memory stand-in for `OpenRecallClient`, in a plain module.
  *
  * It lives here rather than inside a test file because importing it from one
  * suite into another drags that suite's side effects along: tests/mcp-tools.test.ts
@@ -12,7 +12,7 @@
  * `{ version, uploaded, skipped, deleted }` — a field the real `PushResult`
  * does not have, in place of `unchanged`, and without `namespace` — while a
  * second, differently-wrong stub lived in tests/recall-regression.test.ts.
- * Both reached `makeTools` through an `as unknown as MemlawbClient` cast, which
+ * Both reached `makeTools` through an `as unknown as OpenRecallClient` cast, which
  * is what let a stub disagree with the client it stands in for. The casts are
  * gone: `makeTools` takes the structural `MemoryClient`, so tsc checks every
  * method here against `client/index.ts`.

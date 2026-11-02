@@ -53,7 +53,7 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
-import { ciphertextHash, MemlawbClient } from '../client/index.ts'
+import { ciphertextHash, OpenRecallClient } from '../client/index.ts'
 import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import {
@@ -90,7 +90,7 @@ const keyPairFor = (query: string) => {
 /**
  * The one stub, imported rather than re-declared. A second hand-rolled stand-in
  * lived here and answered `push` differently from both the real client and the
- * shared stub; each reached `makeTools` behind an `as unknown as MemlawbClient`
+ * shared stub; each reached `makeTools` behind an `as unknown as OpenRecallClient`
  * cast, which is precisely what let them disagree. `makeTools` now takes the
  * structural `MemoryClient`, so this is type-checked. It comes from
  * `tests/stub-client.ts`, a plain module: importing it out of a test file
@@ -880,7 +880,7 @@ function edgesOfSource(raw: string): { specs: string[]; opaque: number } {
 
 /**
  * A bare specifier naming this package resolves back into the repo through the
- * `exports` map, so `@gitlawb/memlawb/crypto` from a server module is a real
+ * `exports` map, so `@twigpine/openrecall/crypto` from a server module is a real
  * edge to `client/crypto.ts` that bun executes. Returns null for a third-party
  * specifier, which has no path into this repo's source.
  */
@@ -1069,7 +1069,7 @@ function reproducibility(program: string): { risks: string[]; out: string } {
     PWD: tmpdir(),
     TZ: 'UTC',
     LANG: 'C',
-    MEMLAWB_CORPUS_PROBE: 'second-run',
+    OPENRECALL_CORPUS_PROBE: 'second-run',
   })
 
   const risks: string[] = []
@@ -1209,6 +1209,14 @@ const EXEC_EXTS = ['.ts', '.tsx', '.mts', '.cts', '.js', '.jsx', '.mjs', '.cjs']
  */
 const INERT_EXTS = ['.json', '.md', '.txt', '.sql', '.yml', '.yaml', '.toml', '.lock']
 
+/**
+ * Operating-system metadata files, matched by exact name. Finder and Explorer
+ * drop these into any directory a developer opens; they are gitignored, never
+ * shipped, and no runtime loads them. Exact names only, and checked after the
+ * symlink test, so a link or module wearing one of these names is still caught.
+ */
+const OS_METADATA = new Set(['.DS_Store', 'Thumbs.db', 'desktop.ini'])
+
 const extOf = (name: string) => {
   const i = name.lastIndexOf('.')
   return i <= 0 ? '' : name.slice(i)
@@ -1254,6 +1262,7 @@ function classifyTree(dir: string): { files: string[]; unclassified: string[] } 
         walk(full)
         continue
       }
+      if (OS_METADATA.has(e.name)) continue
       const ext = extOf(e.name)
       if (EXEC_EXTS.includes(ext)) files.push(realPath(full))
       else if (!INERT_EXTS.includes(ext)) unclassified.push(relative(REPO_ROOT, full))
@@ -1454,7 +1463,7 @@ describe('crypto-blind import boundary', () => {
   // A deny rule over the whole boundary, not an allowlist of known-good module
   // names. An allowlist goes green the day a new src/ module reaches plaintext
   // through src/mcp/tools.ts (which imports client/index.ts) or through a
-  // dynamic import of the kind bin/memlawb.ts already uses, which is precisely
+  // dynamic import of the kind bin/openrecall.ts already uses, which is precisely
   // the regression worth catching. Resolution is transitive for the same reason.
   //
   // Two ways past it have been demonstrated and are closed here rather than
@@ -1462,7 +1471,10 @@ describe('crypto-blind import boundary', () => {
   // and it enumerated loader forms, so `createRequire` and friends were not
   // looked for. Both are now allowlists (extensions, callable globals), which
   // fail closed on the route nobody listed.
-  test('no module under src/ outside src/mcp/ can reach client/ or src/mcp/', () => {
+  // src/cli/ is client-side like src/mcp/: it holds the passphrase, builds the
+  // client, and runs local mode (which imports the server handler, the safe
+  // direction). So it is neither seeded as server code nor reachable from it.
+  test('no module under src/ outside src/mcp/ and src/cli/ can reach client/, src/mcp/ or src/cli/', () => {
     const { files, unclassified } = classifyTree(join(REPO_ROOT, 'src'))
 
     // Fail closed on an extension neither list knows: a new one is either
@@ -1488,11 +1500,12 @@ describe('crypto-blind import boundary', () => {
     expect(tsconfig.compilerOptions?.paths).toBeUndefined()
     expect(PKG.imports).toBeUndefined()
 
-    const isMcp = (abs: string) => relative(REPO_ROOT, abs).startsWith('src/mcp/')
-    const forbidden = (abs: string) => {
+    const isClientSide = (abs: string) => {
       const rel = relative(REPO_ROOT, abs)
-      return rel.startsWith('client/') || rel.startsWith('src/mcp/')
+      return rel.startsWith('src/mcp/') || rel.startsWith('src/cli/')
     }
+    const forbidden = (abs: string) =>
+      relative(REPO_ROOT, abs).startsWith('client/') || isClientSide(abs)
 
     const violations: string[] = []
     const seen = new Set<string>()
@@ -1501,7 +1514,7 @@ describe('crypto-blind import boundary', () => {
     // edge extraction to return nothing leaves seen.size unchanged and a dead
     // walk looks identical to a live one.
     const resolvedEdges: string[] = []
-    const queue = files.filter(f => !isMcp(f))
+    const queue = files.filter(f => !isClientSide(f))
     for (const f of queue) seen.add(f)
     while (queue.length) {
       const current = queue.shift() as string
@@ -1514,7 +1527,7 @@ describe('crypto-blind import boundary', () => {
         violations.push(`${relative(REPO_ROOT, current)} -> ${risk}`)
       for (const spec of edgesOfSource(raw).specs) {
         // Relative first, then this package's own name through `exports`: a bare
-        // `@gitlawb/memlawb/crypto` resolves to client/crypto.ts and bun runs it,
+        // `@twigpine/openrecall/crypto` resolves to client/crypto.ts and bun runs it,
         // so skipping every non-relative specifier left the boundary wide open.
         const lexical = spec.startsWith('.') ? resolve(dirname(current), spec) : resolveSelf(spec)
         if (!lexical) continue
@@ -1684,10 +1697,10 @@ describe('single-origin tool traffic', () => {
 
   const assertNoPlaintext = (cap: Capture) => expect(wireRisks(cap, sentinel, url)).toEqual([])
 
-  // Runnable, not static: server.ts is import-unsafe here (it exits the process
-  // at module scope when MEMLAWB_PASSPHRASE is unset, as it is under
-  // tests/setup.ts, and connects a stdio transport), so the check runs at the
-  // tools/client layer and drives every tool through a stubbed fetch.
+  // Runnable, not static: server.ts is import-unsafe here (it resolves the
+  // user's OpenRecall settings and connects a stdio transport at module scope),
+  // so the check runs at the tools/client layer and drives every tool through a
+  // stubbed fetch.
   //
   // Origins alone were never the requirement. A client that uploaded plaintext
   // to the configured host would satisfy a single-origin check exactly, so the
@@ -1709,7 +1722,7 @@ describe('single-origin tool traffic', () => {
     globalThis.fetch = fn
 
     try {
-      const client = new MemlawbClient({ url, passphrase: 'test-passphrase' })
+      const client = new OpenRecallClient({ url, passphrase: 'test-passphrase' })
       const tools = makeTools(client, NS)
       await tools.save('notes/plain.md', `An ordinary sentence with ${sentinel} inside it.`)
       await tools.recall('anything at all')
@@ -1769,7 +1782,7 @@ describe('single-origin tool traffic', () => {
     let searched = ''
     let listed = ''
     try {
-      const client = new MemlawbClient({ url, passphrase: 'test-passphrase' })
+      const client = new OpenRecallClient({ url, passphrase: 'test-passphrase' })
       const tools = makeTools(client, NS)
       await tools.save(
         'notes/ledger.md',
@@ -1816,7 +1829,7 @@ describe('single-origin tool traffic', () => {
  */
 describe('guard positive controls', () => {
   const tmp = (files: Record<string, string>) => {
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-guard-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-guard-'))
     for (const [name, body] of Object.entries(files)) {
       const full = join(dir, name)
       mkdirSync(dirname(full), { recursive: true })
@@ -1929,6 +1942,30 @@ describe('guard positive controls', () => {
           'vendor.json (symlink)',
         ])
         expect(files.map(f => f.split('/').pop())).toEqual(['real.ts'])
+      } finally {
+        rmSync(dir, { recursive: true, force: true })
+      }
+    })
+
+    test('OS metadata is skipped by exact file name only', () => {
+      const dir = tmp({
+        '.DS_Store': 'finder\n',
+        'Thumbs.db': 'explorer\n',
+        'notes.DS_Store': 'near miss\n',
+        'desktop.ini/inner.ts': 'export const a = 1\n',
+        'links/keep.ts': 'export const b = 1\n',
+      })
+      try {
+        // A link wearing a metadata name: the symlink test runs first, so the
+        // name buys it nothing.
+        symlinkSync(join(REPO_ROOT, 'client/crypto.ts'), join(dir, 'links/.DS_Store'))
+        const { files, unclassified } = classifyTree(dir)
+        expect(unclassified.map(u => u.split('/').pop()).sort()).toEqual([
+          '.DS_Store (symlink)',
+          'notes.DS_Store',
+        ])
+        // A directory wearing one is still walked, so a module inside it counts.
+        expect(files.map(f => f.split('/').pop()).sort()).toEqual(['inner.ts', 'keep.ts'])
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
