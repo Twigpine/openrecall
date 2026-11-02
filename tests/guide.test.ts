@@ -14,7 +14,7 @@ describe('memory guide', () => {
     expect(g).toContain('Save what')
     // Frontmatter delimiters and the name: line must be stripped.
     expect(g.startsWith('---')).toBe(false)
-    expect(g).not.toContain('name: memlawb-memory')
+    expect(g).not.toContain('name: openrecall-memory')
   })
 
   test('short instructions steer recall-first / save-durable', () => {

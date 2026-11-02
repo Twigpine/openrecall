@@ -2,7 +2,7 @@
  * Loads the memory-usage guidance that the MCP server exposes (as the
  * `memory_guide` prompt and a short form in the server `instructions`).
  *
- * The canonical text lives in skills/memlawb-memory/SKILL.md so there's ONE
+ * The canonical text lives in skills/openrecall-memory/SKILL.md so there's ONE
  * source of truth shared by the Claude Code skill and provider-neutral MCP
  * clients. We read that file's body (frontmatter stripped) at startup; if it
  * isn't present (e.g. an unusual package layout), we fall back to a compact
@@ -13,9 +13,9 @@ import { readFileSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const FALLBACK = `# memlawb memory
+const FALLBACK = `# openrecall memory
 
-You have durable, end-to-end-encrypted memory via the memlawb MCP tools.
+You have durable, end-to-end-encrypted memory via the openrecall MCP tools.
 
 - **Recall first.** At the start of a task, call \`memory_recall\` with a
   description of what you're doing before asking the user things they may have
@@ -39,7 +39,7 @@ function stripFrontmatter(md: string): string {
 export function loadMemoryGuide(): string {
   try {
     const here = dirname(fileURLToPath(import.meta.url)) // src/mcp
-    const skillPath = join(here, '..', '..', 'skills', 'memlawb-memory', 'SKILL.md')
+    const skillPath = join(here, '..', '..', 'skills', 'openrecall-memory', 'SKILL.md')
     const body = stripFrontmatter(readFileSync(skillPath, 'utf8')).trim()
     return body.length > 0 ? body : FALLBACK
   } catch {

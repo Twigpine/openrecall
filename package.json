@@ -1,21 +1,23 @@
 {
-  "name": "@gitlawb/memlawb",
+  "name": "@twigpine/openrecall",
   "version": "0.1.0",
-  "description": "Open-source, self-hostable, zero-knowledge agent memory — server, client, CLI, and MCP in one package",
+  "description": "Unified, zero-knowledge memory for every agent and every session — open-source, self-hostable; server, client, CLI, and MCP in one package",
   "type": "module",
   "license": "MIT",
-  "author": "Gitlawb",
-  "homepage": "https://github.com/Gitlawb/memlawb#readme",
+  "author": "Twigpine",
+  "homepage": "https://github.com/Twigpine/openrecall#readme",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Gitlawb/memlawb.git"
+    "url": "git+https://github.com/Twigpine/openrecall.git"
   },
   "bugs": {
-    "url": "https://github.com/Gitlawb/memlawb/issues"
+    "url": "https://github.com/Twigpine/openrecall/issues"
   },
   "keywords": [
     "agent",
     "memory",
+    "unified-memory",
+    "cross-session",
     "ai",
     "mcp",
     "model-context-protocol",
@@ -32,7 +34,7 @@
     "access": "public"
   },
   "bin": {
-    "memlawb": "bin/memlawb.ts"
+    "openrecall": "bin/openrecall.ts"
   },
   "files": [
     "bin",

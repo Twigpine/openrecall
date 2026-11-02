@@ -1,17 +1,17 @@
 ---
-name: memlawb-memory
-description: Durable cross-session memory for the agent, backed by the memlawb MCP tools (memory_save / memory_recall / memory_search / memory_list / memory_delete). Use at the START of a task to recall what you already know about this user and project, and WHENEVER you learn a durable fact (a preference, a project decision, a convention, or feedback on how to work) so it survives into future sessions. Memory is end-to-end encrypted — the server cannot read it.
+name: openrecall-memory
+description: Durable cross-session memory for the agent, backed by the openrecall MCP tools (memory_save / memory_recall / memory_search / memory_list / memory_delete). Use at the START of a task to recall what you already know about this user and project, and WHENEVER you learn a durable fact (a preference, a project decision, a convention, or feedback on how to work) so it survives into future sessions. Memory is end-to-end encrypted — the server cannot read it.
 ---
 
-# memlawb memory
+# openrecall memory
 
-You have long-term memory that persists across sessions through the memlawb MCP
+You have long-term memory that persists across sessions through the openrecall MCP
 tools. Without it you start every session amnesiac; with it you remember the
 user, their projects, their preferences, and how they've asked you to work. Use
 it deliberately.
 
 It is **end-to-end encrypted**: plaintext is encrypted on this machine before it
-leaves, so the memlawb server stores only ciphertext and cannot read what you
+leaves, so the openrecall server stores only ciphertext and cannot read what you
 save. A client-side scanner also blocks anything that looks like a live secret —
 but don't rely on it; never save credentials, tokens, or keys on purpose.
 

@@ -15,7 +15,7 @@ import { sha256Hex } from './hash.ts'
 export class InvalidNameError extends Error {}
 
 // Namespaces: lowercase scope + ':' + segment(s). Conservative allowlist.
-//   user:9f3a...        repo:gitlawb/node        agent:intern
+//   user:9f3a...        repo:twigpine/openrecall        agent:intern
 const NAMESPACE_RE = /^[a-z][a-z0-9_-]{0,31}:[A-Za-z0-9._/-]{1,128}$/
 
 /**

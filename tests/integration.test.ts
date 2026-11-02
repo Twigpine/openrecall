@@ -1,5 +1,5 @@
 /**
- * Full end-to-end: real Bun.serve + real MemlawbClient over HTTP, proving the
+ * Full end-to-end: real Bun.serve + real OpenRecallClient over HTTP, proving the
  * zero-knowledge roundtrip and that what lands on disk is unreadable ciphertext.
  *
  * Env is set before the dynamic imports so config.ts reads the test settings.
@@ -15,11 +15,11 @@ const DATA_DIR = process.env.DATA_DIR!
 
 let server: ReturnType<typeof Bun.serve>
 let base: string
-let MemlawbClient: typeof import('../client/index.ts').MemlawbClient
+let OpenRecallClient: typeof import('../client/index.ts').OpenRecallClient
 
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
-  ;({ MemlawbClient } = await import('../client/index.ts'))
+  ;({ OpenRecallClient } = await import('../client/index.ts'))
   server = Bun.serve({ port: 0, fetch: handleRequest })
   base = `http://localhost:${server.port}`
 })
@@ -27,7 +27,7 @@ beforeAll(async () => {
 afterAll(() => server?.stop(true))
 
 function client(passphrase = 'test-pass') {
-  return new MemlawbClient({ url: base, passphrase })
+  return new OpenRecallClient({ url: base, passphrase })
 }
 
 describe('end-to-end zero-knowledge sync', () => {

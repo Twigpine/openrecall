@@ -1,5 +1,5 @@
 /**
- * MCP memory tools end-to-end: real in-process server + real MemlawbClient, so
+ * MCP memory tools end-to-end: real in-process server + real OpenRecallClient, so
  * every tool call goes through the actual encrypt → HTTP → ciphertext-store →
  * decrypt path. Also re-proves zero-knowledge: nothing the tools store is
  * readable on disk.
@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { MemlawbClient } from '../client/index.ts'
+import { OpenRecallClient } from '../client/index.ts'
 import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
 
@@ -19,7 +19,7 @@ let tools: MemoryTools
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
   server = Bun.serve({ port: 0, fetch: handleRequest })
-  const client = new MemlawbClient({
+  const client = new OpenRecallClient({
     url: `http://localhost:${server.port}`,
     passphrase: 'mcp-pass',
   })

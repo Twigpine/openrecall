@@ -1,22 +1,23 @@
 #!/usr/bin/env bun
 /**
- * memlawb CLI — sync a local memory directory to a memlawb server, end-to-end
- * encrypted. Mirrors the openclaude memdir layout (flat .md files + MEMORY.md).
+ * openrecall CLI — sync a local memory directory to an openrecall server,
+ * end-to-end encrypted. Mirrors the openclaude memdir layout (flat .md files +
+ * MEMORY.md).
  *
  * Usage:
- *   memlawb push <dir> <namespace>     encrypt + upload changed entries
- *   memlawb pull <dir> <namespace>     download + decrypt into <dir>
- *   memlawb serve                      run the server (same as `bun run src/index.ts`)
+ *   openrecall push <dir> <namespace>     encrypt + upload changed entries
+ *   openrecall pull <dir> <namespace>     download + decrypt into <dir>
+ *   openrecall serve                      run the server (same as `bun run src/index.ts`)
  *
  * Env (client commands):
- *   MEMLAWB_URL         default http://localhost:8080
- *   MEMLAWB_API_KEY     bearer token (omit for ALLOW_UNAUTHENTICATED self-host)
- *   MEMLAWB_PASSPHRASE  REQUIRED — your zero-knowledge encryption passphrase
+ *   OPENRECALL_URL         default http://localhost:8080
+ *   OPENRECALL_API_KEY     bearer token (omit for ALLOW_UNAUTHENTICATED self-host)
+ *   OPENRECALL_PASSPHRASE  REQUIRED — your zero-knowledge encryption passphrase
  */
 
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, sep } from 'node:path'
-import { MemlawbClient } from '../client/index.ts'
+import { OpenRecallClient } from '../client/index.ts'
 import type { ScanMode } from '../client/secretscan.ts'
 
 async function walkMd(dir: string): Promise<string[]> {
@@ -28,16 +29,16 @@ async function walkMd(dir: string): Promise<string[]> {
   return out
 }
 
-function makeClient(): MemlawbClient {
-  const passphrase = process.env.MEMLAWB_PASSPHRASE
+function makeClient(): OpenRecallClient {
+  const passphrase = process.env.OPENRECALL_PASSPHRASE
   if (!passphrase) {
-    console.error('error: MEMLAWB_PASSPHRASE is required (your zero-knowledge key).')
+    console.error('error: OPENRECALL_PASSPHRASE is required (your zero-knowledge key).')
     process.exit(1)
   }
-  const scanMode = (process.env.MEMLAWB_SCAN ?? 'block') as ScanMode
-  return new MemlawbClient({
-    url: process.env.MEMLAWB_URL ?? 'http://localhost:8080',
-    apiKey: process.env.MEMLAWB_API_KEY,
+  const scanMode = (process.env.OPENRECALL_SCAN ?? 'block') as ScanMode
+  return new OpenRecallClient({
+    url: process.env.OPENRECALL_URL ?? 'http://localhost:8080',
+    apiKey: process.env.OPENRECALL_API_KEY,
     passphrase,
     scanMode,
   })
@@ -100,10 +101,10 @@ try {
 function usage(): never {
   console.log(
     'usage:\n' +
-      '  memlawb push <dir> <namespace>   encrypt + upload changed entries\n' +
-      '  memlawb pull <dir> <namespace>   download + decrypt into <dir>\n' +
-      '  memlawb mcp                      run the stdio MCP server (memory tools)\n' +
-      '  memlawb serve                    run the memlawb server',
+      '  openrecall push <dir> <namespace>   encrypt + upload changed entries\n' +
+      '  openrecall pull <dir> <namespace>   download + decrypt into <dir>\n' +
+      '  openrecall mcp                      run the stdio MCP server (memory tools)\n' +
+      '  openrecall serve                    run the openrecall server',
   )
   process.exit(1)
 }

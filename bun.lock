@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "memlawb",
+      "name": "openrecall",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.29.0",
       },

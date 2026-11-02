@@ -1,6 +1,6 @@
 # Security Policy
 
-memlawb is security software — a zero-knowledge memory backend. We take reports
+openrecall is security software — a zero-knowledge memory backend. We take reports
 seriously and appreciate responsible disclosure.
 
 ## Reporting a vulnerability
@@ -22,7 +22,7 @@ maintainers and we'll arrange a private path.
 
 ## Supported versions
 
-memlawb is pre-1.0 and ships from `main`. Security fixes land on the latest
+openrecall is pre-1.0 and ships from `main`. Security fixes land on the latest
 `0.x` minor and are released promptly. Older `0.x` lines are not maintained —
 please track the latest release.
 
@@ -33,7 +33,7 @@ please track the latest release.
 
 ## Threat model & scope
 
-memlawb's core guarantee is that **the server is crypto-blind**: clients encrypt
+openrecall's core guarantee is that **the server is crypto-blind**: clients encrypt
 every entry before upload (AES-256-GCM, key derived from a passphrase that never
 leaves the client), so the server stores and serves only ciphertext.
 
@@ -68,4 +68,4 @@ We're especially interested in reports that break these properties:
   should not run multiple instances against shared storage until the Postgres
   index lands.
 
-Thank you for helping keep memlawb and its users safe.
+Thank you for helping keep openrecall and its users safe.

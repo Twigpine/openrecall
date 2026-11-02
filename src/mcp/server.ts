@@ -1,14 +1,14 @@
 /**
- * `memlawb mcp` — a stdio MCP server that gives any MCP-capable agent (Claude
+ * `openrecall mcp` — a stdio MCP server that gives any MCP-capable agent (Claude
  * Code, Cursor, opencode, SDK agents) durable, end-to-end-encrypted memory.
  *
- * It is a thin wrapper over MemlawbClient: the passphrase lives in THIS local
- * process, so encryption/decryption happen here and the remote memlawb server
+ * It is a thin wrapper over OpenRecallClient: the passphrase lives in THIS local
+ * process, so encryption/decryption happen here and the remote openrecall server
  * still only ever sees ciphertext. Tool logic is in ./tools.ts; this file just
  * binds it to the MCP protocol.
  *
- * Config (env): MEMLAWB_URL, MEMLAWB_API_KEY, MEMLAWB_PASSPHRASE (required),
- * MEMLAWB_NAMESPACE (default namespace), MEMLAWB_SCAN (block|warn|off).
+ * Config (env): OPENRECALL_URL, OPENRECALL_API_KEY, OPENRECALL_PASSPHRASE (required),
+ * OPENRECALL_NAMESPACE (default namespace), OPENRECALL_SCAN (block|warn|off).
  *
  * IMPORTANT: stdout is the MCP protocol channel — never write logs there. All
  * diagnostics go to stderr.
@@ -17,7 +17,7 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { MemlawbClient } from '../../client/index.ts'
+import { OpenRecallClient } from '../../client/index.ts'
 import type { ScanMode } from '../../client/secretscan.ts'
 import { loadMemoryGuide, SHORT_INSTRUCTIONS } from './guide.ts'
 import { makeTools, type ToolResult } from './tools.ts'
@@ -28,24 +28,24 @@ function env(name: string): string | undefined {
 }
 
 function die(message: string): never {
-  process.stderr.write(`memlawb mcp: ${message}\n`)
+  process.stderr.write(`openrecall mcp: ${message}\n`)
   process.exit(1)
 }
 
-const passphrase = env('MEMLAWB_PASSPHRASE')
+const passphrase = env('OPENRECALL_PASSPHRASE')
 if (!passphrase) {
   die(
-    'MEMLAWB_PASSPHRASE is required — it is your zero-knowledge key and is never sent to the server.',
+    'OPENRECALL_PASSPHRASE is required — it is your zero-knowledge key and is never sent to the server.',
   )
 }
 
-const url = env('MEMLAWB_URL') ?? 'http://localhost:8080'
-const defaultNamespace = env('MEMLAWB_NAMESPACE') ?? 'user:me'
-const client = new MemlawbClient({
+const url = env('OPENRECALL_URL') ?? 'http://localhost:8080'
+const defaultNamespace = env('OPENRECALL_NAMESPACE') ?? 'user:me'
+const client = new OpenRecallClient({
   url,
-  apiKey: env('MEMLAWB_API_KEY'),
+  apiKey: env('OPENRECALL_API_KEY'),
   passphrase,
-  scanMode: (env('MEMLAWB_SCAN') ?? 'block') as ScanMode,
+  scanMode: (env('OPENRECALL_SCAN') ?? 'block') as ScanMode,
 })
 const tools = makeTools(client, defaultNamespace)
 
@@ -55,7 +55,7 @@ const toMcp = (r: ToolResult) => ({
 })
 
 const server = new McpServer(
-  { name: 'memlawb', version: '0.1.0' },
+  { name: 'openrecall', version: '0.1.0' },
   { instructions: SHORT_INSTRUCTIONS },
 )
 
@@ -64,7 +64,7 @@ const server = new McpServer(
 server.registerPrompt(
   'memory_guide',
   {
-    title: 'How to use memlawb memory',
+    title: 'How to use openrecall memory',
     description:
       'The memory-usage protocol: when to recall, what to save, and how to keep memory tidy. Read this once at the start of a session.',
   },
@@ -145,4 +145,4 @@ server.registerTool(
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
-process.stderr.write(`[memlawb mcp] ready • url=${url} • namespace=${defaultNamespace}\n`)
+process.stderr.write(`[openrecall mcp] ready • url=${url} • namespace=${defaultNamespace}\n`)

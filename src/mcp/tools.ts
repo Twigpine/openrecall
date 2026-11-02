@@ -1,15 +1,15 @@
 /**
- * memlawb memory tools, decoupled from the MCP transport so they can be unit
- * tested directly against a MemlawbClient. server.ts wraps each result into the
+ * openrecall memory tools, decoupled from the MCP transport so they can be unit
+ * tested directly against an OpenRecallClient. server.ts wraps each result into the
  * MCP content shape; everything substantive lives here.
  *
- * All encryption/decryption happens inside the MemlawbClient in THIS process,
+ * All encryption/decryption happens inside the OpenRecallClient in THIS process,
  * which holds the passphrase. The remote server only ever sees ciphertext, so
  * recall/search must run locally on decrypted entries — which is exactly what
  * these tools do.
  */
 
-import type { MemlawbClient } from '../../client/index.ts'
+import type { OpenRecallClient } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { rankMemories } from './relevance.ts'
 
@@ -25,7 +25,7 @@ function snippet(content: string, max = 200): string {
 
 export type MemoryTools = ReturnType<typeof makeTools>
 
-export function makeTools(client: MemlawbClient, defaultNamespace: string) {
+export function makeTools(client: OpenRecallClient, defaultNamespace: string) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
 
   return {

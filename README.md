@@ -1,59 +1,63 @@
 ```
-╭──────────────────────────────────────────────────────────────────────╮
-│  ● ● ●            memlawb — ~/memory                          ⌘ + T    │
-├──────────────────────────────────────────────────────────────────────┤
+╭─────────────────────────────────────────────────────────────────────────────────────────╮
+│  ● ● ●                          openrecall — ~/memory                          ⌘ + T    │
+├─────────────────────────────────────────────────────────────────────────────────────────┤
 
-    ███╗   ███╗ ███████╗ ███╗   ███╗ ██╗      █████╗ ██╗    ██╗ ██████╗
-    ████╗ ████║ ██╔════╝ ████╗ ████║ ██║     ██╔══██╗██║    ██║ ██╔══██╗
-    ██╔████╔██║ █████╗   ██╔████╔██║ ██║     ███████║██║ █╗ ██║ ██████╔╝
-    ██║╚██╔╝██║ ██╔══╝   ██║╚██╔╝██║ ██║     ██╔══██║██║███╗██║ ██╔══██╗
-    ██║ ╚═╝ ██║ ███████╗ ██║ ╚═╝ ██║ ███████╗██║  ██║╚███╔███╔╝ ██████╔╝
-    ╚═╝     ╚═╝ ╚══════╝ ╚═╝     ╚═╝ ╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝  ╚═════╝
+     ██████╗ ██████╗ ███████╗███╗   ██╗██████╗ ███████╗ ██████╗ █████╗ ██╗     ██╗
+    ██╔═══██╗██╔══██╗██╔════╝████╗  ██║██╔══██╗██╔════╝██╔════╝██╔══██╗██║     ██║
+    ██║   ██║██████╔╝█████╗  ██╔██╗ ██║██████╔╝█████╗  ██║     ███████║██║     ██║
+    ██║   ██║██╔═══╝ ██╔══╝  ██║╚██╗██║██╔══██╗██╔══╝  ██║     ██╔══██║██║     ██║
+    ╚██████╔╝██║     ███████╗██║ ╚████║██║  ██║███████╗╚██████╗██║  ██║███████╗███████╗
+     ╚═════╝ ╚═╝     ╚══════╝╚═╝  ╚═══╝╚═╝  ╚═╝╚══════╝ ╚═════╝╚═╝  ╚═╝╚══════╝╚══════╝
 
-      zero-knowledge agent memory · the host cannot read it
+      one memory for every agent and every session · the host cannot read it
 
-    $ memlawb push ./memories user:me
+    $ openrecall push ./memories user:me
       ⠿ scan secrets    ✓  0 leaked
       ⠿ encrypt  12     ✓  aes-256-gcm · key derived locally, never sent
-      ⠿ delta sync   →  memory.gitlawb.com
+      ⠿ delta sync   →  memory.twigpine.com
         ↑ 3 changed   · 9 unchanged   ✓ server saw only ciphertext
     $ ▮
 
-╰──────────────────────────────────────────────────────────────────────╯
+╰─────────────────────────────────────────────────────────────────────────────────────────╯
 ```
 
 <div align="center">
 
-[![CI](https://github.com/Gitlawb/memlawb/actions/workflows/ci.yml/badge.svg)](https://github.com/Gitlawb/memlawb/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@gitlawb/memlawb.svg)](https://www.npmjs.com/package/@gitlawb/memlawb)
+[![CI](https://github.com/Twigpine/openrecall/actions/workflows/ci.yml/badge.svg)](https://github.com/Twigpine/openrecall/actions/workflows/ci.yml)
+[![npm](https://img.shields.io/npm/v/@twigpine/openrecall.svg)](https://www.npmjs.com/package/@twigpine/openrecall)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
 [![Bun](https://img.shields.io/badge/bun-%3E%3D1.2-black?logo=bun)](https://bun.sh)
 
 </div>
 
-**Open-source, self-hostable, zero-knowledge agent memory.**
-The memory layer of the agent stack — give any agent durable memory it can
-carry across sessions, stored on a server that *cannot read it*.
+**One memory for every agent and every session — open-source, self-hostable,
+zero-knowledge.**
+The memory layer of the agent stack — Claude Code, Cursor, opencode, and your
+SDK agents all read and write the same durable memory, carried across sessions
+and stored on a server that *cannot read it*.
 
-> Part of the [Gitlawb](https://gitlawb.com) stack: opengateway (inference) ·
-> node (code) · openclaude (agent) · **memlawb (memory)**.
+> Part of the [Twigpine](https://twigpine.com) stack: opengateway (inference) ·
+> node (code) · openclaude (agent) · **openrecall (memory)**.
 
 ---
 
 ## Why
 
-Agents forget everything between sessions. The existing fix — syncing memory to
-a vendor's cloud — means a third party can read everything your agent learns
-about you and your code. memlawb is the alternative:
+Agents forget everything between sessions, and what one agent learns the next
+one never sees. The existing fix — syncing memory to a vendor's cloud — locks
+that memory to one tool and means a third party can read everything your agents
+learn about you and your code. openrecall is the alternative:
 
+- **Unified.** One namespace, every agent. A built-in **MCP server** gives
+  Claude Code, Cursor, opencode, and SDK agents the same memory tools
+  (`memory_save`/`recall`/`search`/`list`/`delete`) over the same store; a
+  simple sync API any agent can speak is underneath.
 - **Zero-knowledge.** Memory is encrypted on your machine before upload. The
   server stores and serves only ciphertext (AES-256-GCM, key derived from your
   passphrase). We host it but we cannot read it.
 - **Self-hostable.** One binary, pluggable storage (filesystem, S3/Tigris/R2,
   more coming). Run it on our cloud or your own.
-- **Provider-neutral.** A built-in **MCP server** gives Claude Code, Cursor,
-  opencode, and SDK agents memory tools (`memory_save`/`recall`/`search`/
-  `list`/`delete`); a simple sync API any agent can speak is underneath.
 - **Delta sync.** Deterministic encryption means only changed entries upload,
   even though the server never sees plaintext.
 - **Secret-aware.** A client-side scanner refuses to upload entries that look
@@ -67,7 +71,7 @@ agent / CLI / MCP
    ▼  [ client/crypto.ts — encrypt with key derived from your passphrase ]
    │   ciphertext
    ▼
-memlawb server  (crypto-blind — only ever sees ciphertext)
+openrecall server  (crypto-blind — only ever sees ciphertext)
    ▼
 BlobStore: fs | s3 (Tigris/R2/AWS) | ipfs/git (planned)
 ```
@@ -84,11 +88,11 @@ bun install
 ALLOW_UNAUTHENTICATED=true STORE=fs DATA_DIR=./data bun run src/index.ts
 
 # 2. sync a memory directory, end-to-end encrypted
-export MEMLAWB_URL=http://localhost:8080
-export MEMLAWB_PASSPHRASE='your-zero-knowledge-passphrase'   # never sent to the server
+export OPENRECALL_URL=http://localhost:8080
+export OPENRECALL_PASSPHRASE='your-zero-knowledge-passphrase'   # never sent to the server
 
-bun run bin/memlawb.ts push ./my-memories user:me   # encrypt + upload
-bun run bin/memlawb.ts pull ./restored      user:me   # download + decrypt
+bun run bin/openrecall.ts push ./my-memories user:me   # encrypt + upload
+bun run bin/openrecall.ts pull ./restored      user:me   # download + decrypt
 ```
 
 What lands on the server is ciphertext — `grep` your data dir for any plaintext
@@ -101,12 +105,12 @@ and you'll find nothing.
 ## Use as a library
 
 ```ts
-import { MemlawbClient } from '@gitlawb/memlawb'
+import { OpenRecallClient } from '@twigpine/openrecall'
 
-const memory = new MemlawbClient({
-  url: 'https://memory.gitlawb.com',
-  apiKey: process.env.MEMLAWB_API_KEY,
-  passphrase: process.env.MEMLAWB_PASSPHRASE, // stays local
+const memory = new OpenRecallClient({
+  url: 'https://memory.twigpine.com',
+  apiKey: process.env.OPENRECALL_API_KEY,
+  passphrase: process.env.OPENRECALL_PASSPHRASE, // stays local
 })
 
 await memory.push('user:me', { 'MEMORY.md': '# what I know about the user...' })
@@ -115,21 +119,22 @@ const { entries } = await memory.pull('user:me')
 
 ## Use from any agent (MCP)
 
-memlawb ships an MCP server in the same package, so any MCP-capable agent gets
-durable encrypted memory by adding one config block. Add to your client's MCP
-config (Claude Code shown):
+openrecall ships an MCP server in the same package, so any MCP-capable agent
+gets durable encrypted memory by adding one config block — and every agent
+pointed at the same namespace and passphrase shares it. Add to your client's
+MCP config (Claude Code shown):
 
 ```json
 {
   "mcpServers": {
-    "memlawb": {
+    "openrecall": {
       "command": "bunx",
-      "args": ["-y", "@gitlawb/memlawb", "mcp"],
+      "args": ["-y", "@twigpine/openrecall", "mcp"],
       "env": {
-        "MEMLAWB_URL": "https://memory.gitlawb.com",
-        "MEMLAWB_API_KEY": "mk_live_...",
-        "MEMLAWB_PASSPHRASE": "your-zero-knowledge-passphrase",
-        "MEMLAWB_NAMESPACE": "user:me"
+        "OPENRECALL_URL": "https://memory.twigpine.com",
+        "OPENRECALL_API_KEY": "mk_live_...",
+        "OPENRECALL_PASSPHRASE": "your-zero-knowledge-passphrase",
+        "OPENRECALL_NAMESPACE": "user:me"
       }
     }
   }
@@ -147,13 +152,13 @@ in-process — so the remote server still only ever sees ciphertext. Tools:
 | `memory_list()` | list entry keys |
 | `memory_delete(key)` | remove an entry |
 
-For self-host, omit `MEMLAWB_API_KEY` and point `MEMLAWB_URL` at your server.
+For self-host, omit `OPENRECALL_API_KEY` and point `OPENRECALL_URL` at your server.
 
 ### Teaching the agent to use memory
 
 Tools alone don't make an agent use memory well — it needs the *discipline*
 (recall before answering, save only durable facts, don't duplicate). That lives
-in one place, [`skills/memlawb-memory/SKILL.md`](./skills/memlawb-memory/SKILL.md):
+in one place, [`skills/openrecall-memory/SKILL.md`](./skills/openrecall-memory/SKILL.md):
 
 - **Claude Code:** install it as a skill (drop the folder in your skills dir) and
   the agent reads it when memory is relevant.
@@ -184,14 +189,14 @@ size/count limits.
 
 ## Security model
 
-- **Encryption:** AES-256-GCM; key = `scrypt(passphrase, salt=sha256("memlawb:"+namespace))`.
+- **Encryption:** AES-256-GCM; key = `scrypt(passphrase, salt=sha256("openrecall:"+namespace))`.
 - **Integrity:** the entry key is GCM additional-authenticated-data, so a blob
   is bound to its key and can't be swapped or replayed.
 - **Determinism:** synthetic-IV nonce enables delta sync; the only leak is
   whether two entries are byte-identical.
 - **Defense in depth:** a client-side secret scanner runs before encryption and
   (by default) blocks uploads containing live-looking credentials. Override with
-  `MEMLAWB_SCAN=warn|off`.
+  `OPENRECALL_SCAN=warn|off`.
 - **Tenancy:** each API key maps to an owner who controls exactly their own
   `user:<owner>` namespace subtree (strict segment match, no substring escapes);
   per-account quotas and per-owner rate limits are enforced server-side.
@@ -205,7 +210,7 @@ git-backed signed history, sharing/forking, billing).
 
 **Beta.** The crypto-blind server, client crypto, CLI, MCP server, secret
 scanner, per-account quotas, and rate limiting are implemented and tested
-(`bun test` — 50 tests). Hosted free beta at `memory.gitlawb.com`. Next:
+(`bun test` — 50 tests). Hosted free beta at `memory.twigpine.com`. Next:
 self-service console for API keys, the openclaude native drop-in, and the
 Postgres index for horizontal scale (the hosted beta runs a single machine
 deliberately — see [`PLAN.md`](./PLAN.md) §7).
@@ -239,7 +244,7 @@ setup, design principles, Conventional Commits, DCO sign-off) and our
 
 ## Security
 
-memlawb is security software. Please report vulnerabilities privately — **do not
+openrecall is security software. Please report vulnerabilities privately — **do not
 open a public issue.** See [SECURITY.md](./SECURITY.md) for the process and the
 threat model.
 

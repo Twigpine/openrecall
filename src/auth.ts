@@ -49,7 +49,7 @@ async function lookupSupabase(token: string): Promise<string | null> {
   if (hit && hit.expiresAt > now) return hit.value
 
   const url =
-    `${config.auth.supabaseUrl}/rest/v1/memlawb_api_keys` +
+    `${config.auth.supabaseUrl}/rest/v1/openrecall_api_keys` +
     `?select=owner_id&key_hash=eq.${keyHash}&revoked_at=is.null&limit=1`
   let owner: string | null = null
   try {

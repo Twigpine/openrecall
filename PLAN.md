@@ -1,7 +1,7 @@
-# memlawb — Secured, Open-Source Agent Memory
+# openrecall — Secured, Open-Source Agent Memory
 
 > The memory layer of the agent stack. Open-source, self-hostable, **zero-knowledge**.
-> Hosted by Gitlawb at `memory.gitlawb.com`; runnable by anyone, anywhere.
+> Hosted by Twigpine at `memory.twigpine.com`; runnable by anyone, anywhere.
 
 Status: **Planning** (2026-06-24)
 
@@ -22,12 +22,12 @@ Agents forget everything between sessions. openclaude already ships a two-tier m
 read it. There is no self-hostable, provider-neutral, *private* memory backend that any
 agent can use.
 
-**memlawb** fills it: a backend we operate as a hosted service but that anyone can run
+**openrecall** fills it: a backend we operate as a hosted service but that anyone can run
 anywhere, where **memory is end-to-end encrypted so even the host cannot read it.**
 
 ## 2. Core principle: zero-knowledge (resolves the "public storage" risk)
 
-The blocking concern: storing memory in public gitlawb-node repos would expose it.
+The blocking concern: storing memory in public twigpine-node repos would expose it.
 
 Resolution: **encrypt client-side before upload; store only ciphertext.** Then storage
 location publicness is irrelevant — every backend just holds opaque blobs.
@@ -54,7 +54,7 @@ agent (openclaude / Claude Code / Cursor / opencode / SDK)
    └─ Path C  local daemon → mirrors ~/.claude memdir to cloud (tool-agnostic)
         │
         ▼   [ client-side E2E encrypt + secret scan ]
-   memlawb server  (Bun on Fly — opengateway template)
+   openrecall server  (Bun on Fly — opengateway template)
         │   auth (X sign-in / API key)  •  rate limit  •  quota/billing
         ▼
    BlobStore (pluggable)               MetadataIndex (Postgres)
@@ -85,7 +85,7 @@ Bodies are ciphertext; server validates sizes/hashes without decrypting.
 **MCP tools (Path B — universal).**
 `memory_save`, `memory_recall(query)`, `memory_search`, `memory_list`, `memory_delete`.
 Encryption/decryption happen in the MCP server process running locally (holds the key),
-so the remote memlawb server still only sees ciphertext.
+so the remote openrecall server still only sees ciphertext.
 
 ## 5. Security model details
 
@@ -102,24 +102,24 @@ so the remote memlawb server still only sees ciphertext.
 ## 6. Build phases
 
 **Phase 0 — Spec & scaffold (this doc + repo).**
-- Create `Gitlawb/memlawb` OSS repo (MIT, release-please + GHCR — match node).
+- Create `Twigpine/openrecall` OSS repo (MIT, release-please + GHCR — match node).
 - Lock crypto choices, API schema (Zod), namespace/ACL model.
 
 **Phase 1 — Hosted MVP, openclaude drop-in (highest leverage).**
-- memlawb server (Bun/Fly): auth, `/api/memory` sync contract, Postgres index,
+- openrecall server (Bun/Fly): auth, `/api/memory` sync contract, Postgres index,
   Tigris/S3 private BlobStore. Server is crypto-blind (stores ciphertext).
 - openclaude client change: configurable team-memory base URL + a thin E2E-encrypt
   shim around the existing sync push/pull. Secret scan stays.
-- Web console at `memory.gitlawb.com`: sign in, see namespaces (encrypted entry list),
+- Web console at `memory.twigpine.com`: sign in, see namespaces (encrypted entry list),
   manage API keys, quota. Cannot show plaintext (by design) unless key supplied locally.
 
 **Phase 2 — Universal MCP server.**
-- Ship as a `memlawb mcp` subcommand of the single `@gitlawb/memlawb` package (NOT a
+- Ship as a `openrecall mcp` subcommand of the single `@twigpine/openrecall` package (NOT a
   separate `-mcp` package — matches the `gl mcp serve` pattern; the MCP server is a thin
-  stdio wrapper over the already-bundled MemlawbClient). Exposes memory_save / recall /
+  stdio wrapper over the already-bundled OpenRecallClient). Exposes memory_save / recall /
   search / list / delete; works in Claude Code, Cursor, opencode, SDK agents. Local key
   custody; remote stays ciphertext-only.
-- MCP client config: `command: "bunx", args: ["-y", "@gitlawb/memlawb", "mcp"]`.
+- MCP client config: `command: "bunx", args: ["-y", "@twigpine/openrecall", "mcp"]`.
 
 **Phase 3 — Self-host + pluggable storage.**
 - One-command self-host (Docker compose: server + Postgres + minio/fs).

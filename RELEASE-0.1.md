@@ -1,7 +1,7 @@
-# memlawb v0.1 — Initial Release Plan
+# openrecall v0.1 — Initial Release Plan
 
 > Target: **free open beta** of hosted zero-knowledge agent memory at
-> `memory.gitlawb.com`, with an **MCP server** as the primary day-one surface so
+> `memory.twigpine.com`, with an **MCP server** as the primary day-one surface so
 > any MCP-capable agent (Claude Code, Cursor, opencode, SDK) gets durable,
 > end-to-end-encrypted memory by adding one config block.
 >
@@ -17,15 +17,15 @@ Code-complete and tested (`bun test` → 48 pass, `tsc --noEmit` clean):
   isolation tests), per-namespace + per-owner quotas (`src/quota.ts`), per-owner
   token-bucket rate limiting (`src/ratelimit.ts`), runtime body cap + security
   headers, Supabase migration (`migrations/0001_init.sql`).
-- ✅ **M2 MCP server** — `memlawb mcp` (`src/mcp/`): 5 tools over MemlawbClient,
+- ✅ **M2 MCP server** — `openrecall mcp` (`src/mcp/`): 5 tools over OpenRecallClient,
   local relevance ranker, verified end-to-end over real stdio JSON-RPC.
 - ✅ **M3 secret scanner** — `client/secretscan.ts`, wired into push + MCP save,
-  `MEMLAWB_SCAN=block|warn|off`.
+  `OPENRECALL_SCAN=block|warn|off`.
 - ✅ **M5 (partial)** — CI + release workflows (`.github/workflows/`), Docker
   reproducible install, README/`.env.example` updated to shipped behavior.
 - ⏳ **Remaining for launch:** M4 onboarding console (sign-in → issue API key →
-  copy MCP config); deploy to `memory.gitlawb.com`; prod ciphertext-at-rest
-  smoke; create the `Gitlawb/memlawb` repo + first tag. These need accounts/infra
+  copy MCP config); deploy to `memory.twigpine.com`; prod ciphertext-at-rest
+  smoke; create the `Twigpine/openrecall` repo + first tag. These need accounts/infra
   (Supabase, Fly, npm/GHCR tokens), so they're the human-in-the-loop steps.
 
 ---
@@ -41,8 +41,8 @@ Code-complete and tested (`bun test` → 48 pass, `tsc --noEmit` clean):
 | BlobStore trait: `fs` + `s3`/Tigris | ✅ | `src/store/*` |
 | Auth: open / static-keys / Supabase lookup | ✅ | `src/auth.ts` |
 | Client crypto (AES-256-GCM, scrypt, deterministic nonce) | ✅ | `client/crypto.ts` |
-| `MemlawbClient` push/pull/delta | ✅ | `client/index.ts` |
-| CLI `push` / `pull` / `serve` | ✅ | `bin/memlawb.ts` |
+| `OpenRecallClient` push/pull/delta | ✅ | `client/index.ts` |
+| CLI `push` / `pull` / `serve` | ✅ | `bin/openrecall.ts` |
 | Deploy config (Fly + Docker, single machine) | ✅ | `fly.toml`, `Dockerfile` |
 
 The product *works* today for a self-hosting CLI user. v0.1 is about making it
@@ -53,16 +53,16 @@ The product *works* today for a self-hosting CLI user. v0.1 is about making it
 ## 1. Scope — what v0.1 is (and isn't)
 
 ### In scope (the launch bar)
-1. **MCP server** — `memlawb mcp` subcommand exposing memory tools; the headline
+1. **MCP server** — `openrecall mcp` subcommand exposing memory tools; the headline
    feature. Local key custody; remote stays ciphertext-only.
-2. **Hosted multi-tenant beta** at `memory.gitlawb.com` — Supabase-backed API
+2. **Hosted multi-tenant beta** at `memory.twigpine.com` — Supabase-backed API
    keys, real namespace isolation, quotas (count + bytes), abuse limits.
 3. **Self-service onboarding** — minimal web console: X/Supabase sign-in → create
    API key → copy a ready-to-paste MCP config + passphrase guidance.
 4. **Client-side secret scanner** — defense-in-depth, runs before encryption
    (ported from openclaude). README already promises it.
-5. **Single npm package** `@gitlawb/memlawb` published — server, client, CLI, MCP
-   in one (`bunx -y @gitlawb/memlawb mcp`).
+5. **Single npm package** `@twigpine/openrecall` published — server, client, CLI, MCP
+   in one (`bunx -y @twigpine/openrecall mcp`).
 6. **OSS hygiene** — CI (test + typecheck + GHCR image), release-please, docs
    accurate to shipped behavior, MIT license.
 
@@ -84,9 +84,9 @@ staging. **Estimates are rough engineering-days, single dev.**
 
 ### M1 — Hosted multi-tenant hardening (foundation) · ~2–3d
 Make the server safe to expose to strangers before anyone connects.
-- **Supabase schema + migration**: `memlawb_api_keys` table
+- **Supabase schema + migration**: `openrecall_api_keys` table
   (`id`, `owner_id`, `key_hash`, `name`, `created_at`, `last_used_at`,
-  `revoked_at`) + `memlawb_namespaces` for quota accounting
+  `revoked_at`) + `openrecall_namespaces` for quota accounting
   (`owner_id`, `namespace`, `entry_count`, `total_bytes`, `updated_at`).
   Ship as a checked-in SQL migration, not console clicks.
 - **Per-owner quotas** (not just per-namespace): cap namespaces/owner, total
@@ -101,7 +101,7 @@ Make the server safe to expose to strangers before anyone connects.
 - **Health/readiness**: `/health` already exists; add store round-trip check.
 
 ### M2 — MCP server (the headline) · ~3–4d
-`memlawb mcp` stdio subcommand wrapping the already-bundled `MemlawbClient`.
+`openrecall mcp` stdio subcommand wrapping the already-bundled `OpenRecallClient`.
 - **Tools** (thin, plaintext-in/out; encryption stays in-process):
   - `memory_save({ namespace?, key, content })`
   - `memory_recall({ namespace?, query })` — pull + run `findRelevantMemories`
@@ -109,20 +109,20 @@ Make the server safe to expose to strangers before anyone connects.
   - `memory_search({ namespace?, query })` — substring/keyword over decrypted set.
   - `memory_list({ namespace? })` — keys + sizes + timestamps (no content).
   - `memory_delete({ namespace?, key })`.
-- **Config resolution**: `MEMLAWB_URL`, `MEMLAWB_API_KEY`, `MEMLAWB_PASSPHRASE`,
+- **Config resolution**: `OPENRECALL_URL`, `OPENRECALL_API_KEY`, `OPENRECALL_PASSPHRASE`,
   default `namespace` (e.g. `user:<owner>`). Fail loudly + helpfully if passphrase
   missing.
 - **Recall quality**: this is the make-or-break UX. Reuse openclaude's relevance
   scorer; decrypt locally, score, return top-N with file/section context.
 - **Ship the config snippet** users paste (see M4):
-  `{ "command": "bunx", "args": ["-y", "@gitlawb/memlawb", "mcp"], "env": {...} }`.
+  `{ "command": "bunx", "args": ["-y", "@twigpine/openrecall", "mcp"], "env": {...} }`.
 - **Tests**: spin the in-process server (handler.ts) + MCP tools against `fs`
   store end-to-end; assert server only ever holds ciphertext.
 
 ### M3 — Client-side secret scanner · ~1d
-- Port openclaude's gitleaks-style regex scan; run in `MemlawbClient.push` and
+- Port openclaude's gitleaks-style regex scan; run in `OpenRecallClient.push` and
   the MCP `memory_save` path **before** `encryptEntry`.
-- Default: **block + warn** on high-confidence hits; `MEMLAWB_SCAN=warn|block|off`.
+- Default: **block + warn** on high-confidence hits; `OPENRECALL_SCAN=warn|block|off`.
 - Unit tests with known secret fixtures. Update README (remove "planned").
 
 ### M4 — Self-service onboarding console · ~2–3d
@@ -140,8 +140,8 @@ Fly app (or a tiny Next on Vercel hitting Supabase).
 ### M5 — Release engineering & launch · ~1–2d
 - **CI** (GitHub Actions): `bun test` + `tsc --noEmit` on PR; on tag, publish npm
   + build/push GHCR image (match `node` repo's release-please + GHCR pattern).
-- **release-please** for MIT-licensed OSS repo `Gitlawb/memlawb`.
-- **Deploy** `memory.gitlawb.com` (Fly, `STORE=s3` Tigris, Supabase secrets set).
+- **release-please** for MIT-licensed OSS repo `Twigpine/openrecall`.
+- **Deploy** `memory.twigpine.com` (Fly, `STORE=s3` Tigris, Supabase secrets set).
 - **Smoke test in prod**: real API key → MCP save/recall round-trip → confirm
   ciphertext-at-rest via Tigris object inspection.
 - **Docs pass**: README status → "Beta", quickstart for *hosted* path (not just
@@ -164,7 +164,7 @@ Fly app (or a tiny Next on Vercel hitting Supabase).
       (automated test + manual prod check).
 - [ ] Quota + rate limits return structured `413`/`429`; verified.
 - [ ] Secret scanner blocks a planted credential before upload.
-- [ ] CI green; `@gitlawb/memlawb` installs and `bunx ... mcp` runs clean on a
+- [ ] CI green; `@twigpine/openrecall` installs and `bunx ... mcp` runs clean on a
       machine that never saw the repo.
 - [ ] Docs match shipped behavior; passphrase-loss warning is unmissable.
 

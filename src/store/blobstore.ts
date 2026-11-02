@@ -1,7 +1,7 @@
 /**
  * BlobStore — the pluggable persistence interface.
  *
- * memlawb stores two things per namespace:
+ * openrecall stores two things per namespace:
  *   - a `manifest` blob: JSON map of entryKey -> { hash, size, updatedAt }
  *   - one `entry` blob per entryKey: the CIPHERTEXT of that memory entry
  *
@@ -20,7 +20,7 @@ export interface BlobStore {
   put(path: string, bytes: Uint8Array): Promise<void>
   /** Delete an object. No-op if it does not exist. */
   delete(path: string): Promise<void>
-  /** A short label for logs/health (e.g. "fs:/data", "s3:memlawb"). */
+  /** A short label for logs/health (e.g. "fs:/data", "s3:openrecall"). */
   describe(): string
 }
 

@@ -1,12 +1,12 @@
 /**
- * MemlawbClient — the zero-knowledge sync client.
+ * OpenRecallClient — the zero-knowledge sync client.
  *
  * Wraps the crypto + the HTTP sync contract so callers (the openclaude shim,
  * the MCP server, the CLI) work in plaintext and never touch ciphertext or the
  * wire format. Encryption/decryption happen in-process with a key derived from
  * the passphrase, which never leaves the machine.
  *
- *   const client = new MemlawbClient({ url, apiKey, passphrase })
+ *   const client = new OpenRecallClient({ url, apiKey, passphrase })
  *   await client.push('user:me', { 'MEMORY.md': '# index...' })
  *   const { entries } = await client.pull('user:me')
  */
@@ -14,8 +14,8 @@
 import { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'
 import { enforce, type Finding, type ScanMode } from './secretscan.ts'
 
-export type MemlawbClientOptions = {
-  /** Base URL, e.g. https://memory.gitlawb.com (no trailing slash needed). */
+export type OpenRecallClientOptions = {
+  /** Base URL, e.g. https://memory.twigpine.com (no trailing slash needed). */
   url: string
   /** API key (Bearer). Omit only against an ALLOW_UNAUTHENTICATED self-host. */
   apiKey?: string
@@ -45,7 +45,7 @@ export type PushResult = {
   deleted: string[]
 }
 
-export class MemlawbClient {
+export class OpenRecallClient {
   private readonly url: string
   private readonly apiKey?: string
   private readonly passphrase: string
@@ -53,7 +53,7 @@ export class MemlawbClient {
   private readonly onScanWarning?: (findings: Finding[]) => void
   private readonly keyCache = new Map<string, Buffer>()
 
-  constructor(opts: MemlawbClientOptions) {
+  constructor(opts: OpenRecallClientOptions) {
     this.url = opts.url.replace(/\/$/, '')
     this.apiKey = opts.apiKey
     this.passphrase = opts.passphrase
@@ -123,7 +123,7 @@ export class MemlawbClient {
       if (this.onScanWarning) this.onScanWarning(findings)
       else
         console.warn(
-          `[memlawb] ${findings.length} potential secret(s) in pushed memory (scan=warn)`,
+          `[openrecall] ${findings.length} potential secret(s) in pushed memory (scan=warn)`,
         )
     }
 
@@ -190,7 +190,7 @@ async function httpError(res: Response): Promise<Error> {
   } catch {
     detail = await res.text().catch(() => '')
   }
-  return new Error(`memlawb ${res.status} ${res.statusText}: ${detail}`)
+  return new Error(`openrecall ${res.status} ${res.statusText}: ${detail}`)
 }
 
 export { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'

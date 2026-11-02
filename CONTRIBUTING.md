@@ -1,6 +1,6 @@
-# Contributing to memlawb
+# Contributing to openrecall
 
-Thanks for your interest in improving memlawb — open-source, self-hostable,
+Thanks for your interest in improving openrecall — open-source, self-hostable,
 zero-knowledge agent memory. This guide gets you from clone to merged PR.
 
 By participating you agree to our [Code of Conduct](./CODE_OF_CONDUCT.md).
@@ -31,13 +31,13 @@ src/            crypto-blind HTTP server (never sees plaintext)
   ratelimit.ts    per-owner token bucket
   auth.ts         API-key → owner; namespace authorization
   store/          BlobStore: fs | s3 (Tigris/R2/AWS)
-  mcp/            the `memlawb mcp` server (tools, relevance, guide)
+  mcp/            the `openrecall mcp` server (tools, relevance, guide)
 client/         the zero-knowledge client (encrypt → ciphertext)
   crypto.ts       AES-256-GCM + scrypt; deterministic nonce for delta sync
   secretscan.ts   pre-encryption secret scanner
-  index.ts        MemlawbClient (push/pull/delta)
-bin/memlawb.ts  CLI: push | pull | mcp | serve
-skills/         the memlawb-memory agent skill (canonical guidance)
+  index.ts        OpenRecallClient (push/pull/delta)
+bin/            the CLI (openrecall.ts): push | pull | mcp | serve
+skills/         the openrecall-memory agent skill (canonical guidance)
 migrations/     hosted Supabase schema
 tests/          bun:test suites
 ```
@@ -49,12 +49,12 @@ tests/          bun:test suites
 ALLOW_UNAUTHENTICATED=true STORE=fs DATA_DIR=./data bun run src/index.ts
 
 # In another shell: round-trip some memory, end-to-end encrypted
-MEMLAWB_URL=http://localhost:8080 MEMLAWB_PASSPHRASE=dev \
-  bun run bin/memlawb.ts push ./my-memories user:me
+OPENRECALL_URL=http://localhost:8080 OPENRECALL_PASSPHRASE=dev \
+  bun run bin/openrecall.ts push ./my-memories user:me
 
 # Or run the MCP server (stdio)
-MEMLAWB_URL=http://localhost:8080 MEMLAWB_PASSPHRASE=dev \
-  bun run bin/memlawb.ts mcp
+OPENRECALL_URL=http://localhost:8080 OPENRECALL_PASSPHRASE=dev \
+  bun run bin/openrecall.ts mcp
 ```
 
 ## Design principles (please preserve these)
