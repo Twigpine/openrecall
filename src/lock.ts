@@ -16,16 +16,20 @@ export async function withLock<T>(key: string, fn: () => Promise<T>): Promise<T>
   const prev = locks.get(key) ?? Promise.resolve()
   let release!: () => void
   const next = new Promise<void>(r => (release = r))
-  locks.set(
-    key,
-    prev.then(() => next),
-  )
+  const chained = prev.then(() => next)
+  locks.set(key, chained)
   await prev.catch(() => {}) // wait our turn; ignore prior errors
   try {
     return await fn()
   } finally {
     release()
-    // Clean up if we're the tail of the chain to avoid unbounded growth.
-    if (locks.get(key) === next) locks.delete(key)
+    // Clean up if we're the tail of the chain to avoid unbounded growth. The
+    // map holds the chained promise, so the tail check must compare against it.
+    if (locks.get(key) === chained) locks.delete(key)
   }
+}
+
+/** Number of keys currently held in the lock table. For tests/observability. */
+export function activeLockCount(): number {
+  return locks.size
 }
