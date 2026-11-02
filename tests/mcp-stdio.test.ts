@@ -66,6 +66,7 @@ for (const l of launchers) {
         const { tools } = await c.listTools()
         expect(tools.map(t => t.name).sort()).toEqual([
           'memory_delete',
+          'memory_get',
           'memory_list',
           'memory_recall',
           'memory_save',
@@ -101,13 +102,13 @@ for (const l of launchers) {
         expect(list).toContain('prefs.md')
         expect(list).toContain('deploy.md')
 
+        // Assert on the hit itself: a miss message echoes the query back, so a
+        // bare toContain('pnpm') would pass even when nothing was recalled.
         const recalled = text(
-          await agentB.callTool({
-            name: 'memory_recall',
-            arguments: { query: 'package manager pnpm' },
-          }),
+          await agentB.callTool({ name: 'memory_recall', arguments: { query: 'pnpm or npm' } }),
         )
-        expect(recalled).toContain('pnpm')
+        expect(recalled).toContain('### prefs.md')
+        expect(recalled).toContain('User prefers pnpm over npm.')
 
         const dataDir = join(home, 'data')
         const files = readdirSync(dataDir, { recursive: true }) as string[]

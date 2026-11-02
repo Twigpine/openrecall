@@ -59,8 +59,8 @@ learn about you and your code. OpenRecall is the alternative:
 
 - **Unified.** One memory, every agent. A built-in **MCP server** gives Claude
   Code, Zero, OpenClaude, Codex, Cursor, Gemini CLI, opencode, and SDK agents
-  the same memory tools (`memory_save`/`recall`/`search`/`list`/`delete`) over
-  the same store, and `openrecall setup` wires them up for you.
+  the same memory tools (`memory_save`/`recall`/`search`/`get`/`list`/`delete`)
+  over the same store, and `openrecall setup` wires them up for you.
 - **Works offline, no server needed.** Local mode keeps ciphertext in
   `~/.openrecall` and lets every agent on the machine share it safely. Point it
   at a server when you want the same memory on every machine.
@@ -145,8 +145,9 @@ MCP server and the memory skill:
 | Tool | Purpose |
 |---|---|
 | `memory_save(key, content)` | persist a durable fact |
-| `memory_recall(query)` | rank stored memories by relevance (locally) |
+| `memory_recall(query)` | rank stored memories by relevance (locally) and return the matching part of each |
 | `memory_search(query)` | literal keyword/substring search |
+| `memory_get(key)` | read one entry in full |
 | `memory_list()` | list entry keys |
 | `memory_delete(key)` | remove an entry |
 

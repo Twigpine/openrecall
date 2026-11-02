@@ -94,7 +94,7 @@ server.registerTool(
   {
     title: 'Recall relevant memories',
     description:
-      'Return the memories most relevant to a natural-language query, ranked. Call this before answering when prior context might help.',
+      'Search stored memory with a natural-language query. Returns one bounded region per matching entry, ranked: the part of the entry that matches, capped in size, under the entry key, not the entry itself. Any hit marked as a region has more behind it, so call `memory_get` with that key when you need the full entry. If nothing matches you get the number of entries searched and what to do next. Call this before answering when prior context might help.',
     inputSchema: {
       query: z.string().describe('What you want to remember about.'),
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
@@ -115,6 +115,20 @@ server.registerTool(
     },
   },
   async ({ query, namespace }) => run(t => t.search(query, namespace)),
+)
+
+server.registerTool(
+  'memory_get',
+  {
+    title: 'Read one memory entry',
+    description:
+      'Return the full, untruncated body of a single memory entry by key. Use it when recall or search shows an entry you need in full. One key per call; use `memory_list` to find the keys that exist.',
+    inputSchema: {
+      key: z.string().describe('Entry key to read, e.g. "preferences.md" or "project/api.md".'),
+      namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+    },
+  },
+  async ({ key, namespace }) => run(t => t.get(key, namespace)),
 )
 
 server.registerTool(
