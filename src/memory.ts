@@ -10,7 +10,7 @@
  * in-process async lock so two concurrent PUTs can't clobber each other's
  * manifest update (read-modify-write). This is correct for a single instance;
  * the hosted multi-instance deployment will move the manifest to Postgres with
- * a row-level version check (see PLAN §7). The lock is keyed by namespace so
+ * a row-level version check (see ROADMAP.md#scale). The lock is keyed by namespace so
  * unrelated namespaces never contend.
  */
 

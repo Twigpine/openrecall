@@ -119,7 +119,7 @@ export async function authenticate(req: Request): Promise<Identity | null> {
  *   - every other owner controls exactly their own `user:<owner>` subtree:
  *     `user:<owner>` itself and `user:<owner>/...` children, nothing else.
  *   - any other namespace (repo:/agent:/another user) requires an explicit ACL
- *     grant. Sharing/ACLs land in a later phase (PLAN §7); until then
+ *     grant. Sharing/ACLs land in a later phase (ROADMAP.md); until then
  *     `hasAclGrant` is a closed door, so cross-tenant access is impossible.
  *
  * The owner segment is compared as a whole path segment (terminated by end-of-
