@@ -18,5 +18,12 @@ jobs:
         run: bunx biome ci
       - name: Type-check
         run: bun run type-check
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      # Build the Node bundle so the MCP stdio tests also exercise what
+      # `npx -y @twigpine/openrecall mcp` runs (dist/openrecall.js under Node).
+      - name: Build
+        run: bun run build
       - name: Test
         run: bun test

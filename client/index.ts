@@ -28,7 +28,15 @@ export type OpenRecallClientOptions = {
   scanMode?: ScanMode
   /** Called with findings in `warn` mode (default logs to console.warn). */
   onScanWarning?: (findings: Finding[]) => void
+  /**
+   * Transport override (default: global `fetch`). Local mode uses this to
+   * serve requests in-process from an encrypted store on disk, with no server.
+   */
+  fetch?: FetchLike
 }
+
+/** The subset of `fetch` the client needs. */
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 export type PullResult = {
   namespace: string
@@ -52,6 +60,7 @@ export class OpenRecallClient {
   private readonly scanMode: ScanMode
   private readonly onScanWarning?: (findings: Finding[]) => void
   private readonly keyCache = new Map<string, Buffer>()
+  private readonly fetch: FetchLike
 
   constructor(opts: OpenRecallClientOptions) {
     this.url = opts.url.replace(/\/$/, '')
@@ -59,6 +68,7 @@ export class OpenRecallClient {
     this.passphrase = opts.passphrase
     this.scanMode = opts.scanMode ?? 'block'
     this.onScanWarning = opts.onScanWarning
+    this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
   }
 
   private key(namespace: string): Buffer {
@@ -83,7 +93,9 @@ export class OpenRecallClient {
 
   /** Fetch per-key ciphertext checksums (no bodies). Empty if namespace is new. */
   async hashes(namespace: string): Promise<Record<string, string>> {
-    const res = await fetch(`${this.endpoint(namespace)}?view=hashes`, { headers: this.headers() })
+    const res = await this.fetch(`${this.endpoint(namespace)}?view=hashes`, {
+      headers: this.headers(),
+    })
     if (res.status === 404) return {}
     if (!res.ok) throw await httpError(res)
     const data = (await res.json()) as { entryChecksums?: Record<string, string> }
@@ -92,7 +104,7 @@ export class OpenRecallClient {
 
   /** Pull and decrypt all entries for a namespace. */
   async pull(namespace: string): Promise<PullResult> {
-    const res = await fetch(this.endpoint(namespace), { headers: this.headers() })
+    const res = await this.fetch(this.endpoint(namespace), { headers: this.headers() })
     if (res.status === 404) return { namespace, version: 0, entries: {} }
     if (!res.ok) throw await httpError(res)
     const data = (await res.json()) as {
@@ -150,7 +162,7 @@ export class OpenRecallClient {
       return { namespace, version: ver, uploaded, unchanged, deleted: [] }
     }
 
-    const res = await fetch(this.endpoint(namespace), {
+    const res = await this.fetch(this.endpoint(namespace), {
       method: 'PUT',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ entries: toUpload, deletions }),
@@ -168,15 +180,20 @@ export class OpenRecallClient {
 
   /** Delete one entry. */
   async delete(namespace: string, entryKey: string): Promise<void> {
-    const res = await fetch(`${this.endpoint(namespace)}?key=${encodeURIComponent(entryKey)}`, {
-      method: 'DELETE',
-      headers: this.headers(),
-    })
+    const res = await this.fetch(
+      `${this.endpoint(namespace)}?key=${encodeURIComponent(entryKey)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers(),
+      },
+    )
     if (!res.ok) throw await httpError(res)
   }
 
   private async version(namespace: string): Promise<number> {
-    const res = await fetch(`${this.endpoint(namespace)}?view=hashes`, { headers: this.headers() })
+    const res = await this.fetch(`${this.endpoint(namespace)}?view=hashes`, {
+      headers: this.headers(),
+    })
     if (res.status === 404) return 0
     if (!res.ok) throw await httpError(res)
     return ((await res.json()) as { version: number }).version

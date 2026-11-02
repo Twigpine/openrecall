@@ -25,27 +25,37 @@
     "end-to-end-encryption",
     "self-hostable",
     "llm",
-    "claude"
+    "claude",
+    "claude-code",
+    "codex",
+    "cursor",
+    "zero",
+    "openclaude"
   ],
   "engines": {
+    "node": ">=20",
     "bun": ">=1.2.0"
   },
   "publishConfig": {
     "access": "public"
   },
   "bin": {
-    "openrecall": "bin/openrecall.ts"
+    "openrecall": "dist/openrecall.js"
   },
   "files": [
+    "dist",
     "bin",
     "client",
     "src",
     "skills",
+    ".claude-plugin",
     "migrations",
     "*.md",
     "LICENSE"
   ],
   "scripts": {
+    "build": "bun run scripts/build.ts",
+    "prepublishOnly": "bun run build",
     "dev": "bun run --watch src/index.ts",
     "start": "bun run src/index.ts",
     "test": "bun test",
@@ -62,10 +72,9 @@
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@types/bun": "^1.1.0",
-    "typescript": "^5.7.0"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0"
+    "typescript": "^5.7.0",
+    "zod": "^4.4.3"
   }
 }
