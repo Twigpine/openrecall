@@ -15,8 +15,8 @@ release, and what comes after. Open an issue or discussion to weigh in.
   collision-resistant namespace slugs, per-namespace and per-account quotas,
   and per-owner rate limits.
 - **MCP server.** `openrecall mcp` exposes `memory_save`, `memory_recall`,
-  `memory_search`, `memory_list` and `memory_delete`, plus the `memory_guide`
-  prompt and server instructions.
+  `memory_search`, `memory_get`, `memory_list` and `memory_delete`, plus the
+  `memory_guide` prompt and server instructions.
 - **Works for any agent.**
   - `openrecall init` creates one owner-only config file.
   - `openrecall setup` connects Claude Code, Zero, OpenClaude, Codex, Cursor,
