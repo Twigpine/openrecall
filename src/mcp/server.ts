@@ -1,14 +1,20 @@
 /**
- * `memlawb mcp` — a stdio MCP server that gives any MCP-capable agent (Claude
- * Code, Cursor, opencode, SDK agents) durable, end-to-end-encrypted memory.
+ * `openrecall mcp` — a stdio MCP server that gives any MCP-capable agent (Claude
+ * Code, Zero, OpenClaude, Codex, Cursor, opencode, Gemini CLI, SDK agents)
+ * durable, end-to-end-encrypted memory.
  *
- * It is a thin wrapper over MemlawbClient: the passphrase lives in THIS local
- * process, so encryption/decryption happen here and the remote memlawb server
- * still only ever sees ciphertext. Tool logic is in ./tools.ts; this file just
- * binds it to the MCP protocol.
+ * It is a thin wrapper over OpenRecallClient: the passphrase lives in THIS local
+ * process, so encryption/decryption happen here and the store (local disk or a
+ * remote openrecall server) only ever sees ciphertext. Tool logic is in
+ * ./tools.ts; this file just binds it to the MCP protocol.
  *
- * Config (env): MEMLAWB_URL, MEMLAWB_API_KEY, MEMLAWB_PASSPHRASE (required),
- * MEMLAWB_NAMESPACE (default namespace), MEMLAWB_SCAN (block|warn|off).
+ * Config: ~/.openrecall/config.json (written by `openrecall init`), overridable
+ * by OPENRECALL_URL, OPENRECALL_API_KEY, OPENRECALL_PASSPHRASE,
+ * OPENRECALL_NAMESPACE, OPENRECALL_SCAN. See src/cli/settings.ts.
+ *
+ * If OpenRecall isn't set up yet, the server still starts and every tool
+ * returns the fix — so the agent can tell the user, instead of the client
+ * showing an opaque "MCP server failed".
  *
  * IMPORTANT: stdout is the MCP protocol channel — never write logs there. All
  * diagnostics go to stderr.
@@ -17,45 +23,38 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { z } from 'zod'
-import { MemlawbClient } from '../../client/index.ts'
-import type { ScanMode } from '../../client/secretscan.ts'
+import pkg from '../../package.json' with { type: 'json' }
+import { describeTarget, makeClient } from '../cli/client.ts'
+import { DEFAULT_NAMESPACE, resolveSettings } from '../cli/settings.ts'
 import { loadMemoryGuide, SHORT_INSTRUCTIONS } from './guide.ts'
-import { makeTools, type ToolResult } from './tools.ts'
+import { type MemoryTools, makeTools, type ToolResult } from './tools.ts'
 
-function env(name: string): string | undefined {
-  const v = process.env[name]
-  return v?.trim() ? v.trim() : undefined
+let tools: MemoryTools | null = null
+let setupError = ''
+let defaultNamespace = DEFAULT_NAMESPACE
+let target = 'unconfigured'
+try {
+  const settings = resolveSettings()
+  defaultNamespace = settings.namespace
+  target = describeTarget(settings)
+  tools = makeTools(await makeClient(settings), defaultNamespace)
+} catch (err) {
+  setupError =
+    `OpenRecall is not set up: ${(err as Error).message}\n` +
+    'Tell the user to run `npx -y @twigpine/openrecall init`, then restart this MCP server.'
+  process.stderr.write(`[openrecall mcp] ${setupError}\n`)
 }
-
-function die(message: string): never {
-  process.stderr.write(`memlawb mcp: ${message}\n`)
-  process.exit(1)
-}
-
-const passphrase = env('MEMLAWB_PASSPHRASE')
-if (!passphrase) {
-  die(
-    'MEMLAWB_PASSPHRASE is required — it is your zero-knowledge key and is never sent to the server.',
-  )
-}
-
-const url = env('MEMLAWB_URL') ?? 'http://localhost:8080'
-const defaultNamespace = env('MEMLAWB_NAMESPACE') ?? 'user:me'
-const client = new MemlawbClient({
-  url,
-  apiKey: env('MEMLAWB_API_KEY'),
-  passphrase,
-  scanMode: (env('MEMLAWB_SCAN') ?? 'block') as ScanMode,
-})
-const tools = makeTools(client, defaultNamespace)
 
 const toMcp = (r: ToolResult) => ({
   content: [{ type: 'text' as const, text: r.text }],
   ...(r.isError ? { isError: true } : {}),
 })
 
+const run = async (fn: (t: MemoryTools) => Promise<ToolResult>) =>
+  toMcp(tools ? await fn(tools) : { text: setupError, isError: true })
+
 const server = new McpServer(
-  { name: 'memlawb', version: '0.1.0' },
+  { name: 'openrecall', version: pkg.version },
   { instructions: SHORT_INSTRUCTIONS },
 )
 
@@ -64,7 +63,7 @@ const server = new McpServer(
 server.registerPrompt(
   'memory_guide',
   {
-    title: 'How to use memlawb memory',
+    title: 'How to use OpenRecall memory',
     description:
       'The memory-usage protocol: when to recall, what to save, and how to keep memory tidy. Read this once at the start of a session.',
   },
@@ -87,7 +86,7 @@ server.registerTool(
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
     },
   },
-  async ({ key, content, namespace }) => toMcp(await tools.save(key, content, namespace)),
+  async ({ key, content, namespace }) => run(t => t.save(key, content, namespace)),
 )
 
 server.registerTool(
@@ -102,7 +101,7 @@ server.registerTool(
       limit: z.number().int().min(1).max(20).optional().describe('Max results (default 5).'),
     },
   },
-  async ({ query, namespace, limit }) => toMcp(await tools.recall(query, namespace, limit)),
+  async ({ query, namespace, limit }) => run(t => t.recall(query, namespace, limit)),
 )
 
 server.registerTool(
@@ -115,7 +114,7 @@ server.registerTool(
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
     },
   },
-  async ({ query, namespace }) => toMcp(await tools.search(query, namespace)),
+  async ({ query, namespace }) => run(t => t.search(query, namespace)),
 )
 
 server.registerTool(
@@ -127,7 +126,7 @@ server.registerTool(
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
     },
   },
-  async ({ namespace }) => toMcp(await tools.list(namespace)),
+  async ({ namespace }) => run(t => t.list(namespace)),
 )
 
 server.registerTool(
@@ -140,9 +139,9 @@ server.registerTool(
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
     },
   },
-  async ({ key, namespace }) => toMcp(await tools.delete(key, namespace)),
+  async ({ key, namespace }) => run(t => t.delete(key, namespace)),
 )
 
 const transport = new StdioServerTransport()
 await server.connect(transport)
-process.stderr.write(`[memlawb mcp] ready • url=${url} • namespace=${defaultNamespace}\n`)
+process.stderr.write(`[openrecall mcp] ready • store=${target} • namespace=${defaultNamespace}\n`)

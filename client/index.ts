@@ -1,12 +1,12 @@
 /**
- * MemlawbClient — the zero-knowledge sync client.
+ * OpenRecallClient — the zero-knowledge sync client.
  *
  * Wraps the crypto + the HTTP sync contract so callers (the openclaude shim,
  * the MCP server, the CLI) work in plaintext and never touch ciphertext or the
  * wire format. Encryption/decryption happen in-process with a key derived from
  * the passphrase, which never leaves the machine.
  *
- *   const client = new MemlawbClient({ url, apiKey, passphrase })
+ *   const client = new OpenRecallClient({ url, apiKey, passphrase })
  *   await client.push('user:me', { 'MEMORY.md': '# index...' })
  *   const { entries } = await client.pull('user:me')
  */
@@ -14,8 +14,8 @@
 import { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'
 import { enforce, type Finding, type ScanMode } from './secretscan.ts'
 
-export type MemlawbClientOptions = {
-  /** Base URL, e.g. https://memory.gitlawb.com (no trailing slash needed). */
+export type OpenRecallClientOptions = {
+  /** Base URL, e.g. https://memory.twigpine.com (no trailing slash needed). */
   url: string
   /** API key (Bearer). Omit only against an ALLOW_UNAUTHENTICATED self-host. */
   apiKey?: string
@@ -28,7 +28,15 @@ export type MemlawbClientOptions = {
   scanMode?: ScanMode
   /** Called with findings in `warn` mode (default logs to console.warn). */
   onScanWarning?: (findings: Finding[]) => void
+  /**
+   * Transport override (default: global `fetch`). Local mode uses this to
+   * serve requests in-process from an encrypted store on disk, with no server.
+   */
+  fetch?: FetchLike
 }
+
+/** The subset of `fetch` the client needs. */
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 export type PullResult = {
   namespace: string
@@ -45,20 +53,22 @@ export type PushResult = {
   deleted: string[]
 }
 
-export class MemlawbClient {
+export class OpenRecallClient {
   private readonly url: string
   private readonly apiKey?: string
   private readonly passphrase: string
   private readonly scanMode: ScanMode
   private readonly onScanWarning?: (findings: Finding[]) => void
   private readonly keyCache = new Map<string, Buffer>()
+  private readonly fetch: FetchLike
 
-  constructor(opts: MemlawbClientOptions) {
+  constructor(opts: OpenRecallClientOptions) {
     this.url = opts.url.replace(/\/$/, '')
     this.apiKey = opts.apiKey
     this.passphrase = opts.passphrase
     this.scanMode = opts.scanMode ?? 'block'
     this.onScanWarning = opts.onScanWarning
+    this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
   }
 
   private key(namespace: string): Buffer {
@@ -83,7 +93,9 @@ export class MemlawbClient {
 
   /** Fetch per-key ciphertext checksums (no bodies). Empty if namespace is new. */
   async hashes(namespace: string): Promise<Record<string, string>> {
-    const res = await fetch(`${this.endpoint(namespace)}?view=hashes`, { headers: this.headers() })
+    const res = await this.fetch(`${this.endpoint(namespace)}?view=hashes`, {
+      headers: this.headers(),
+    })
     if (res.status === 404) return {}
     if (!res.ok) throw await httpError(res)
     const data = (await res.json()) as { entryChecksums?: Record<string, string> }
@@ -92,7 +104,7 @@ export class MemlawbClient {
 
   /** Pull and decrypt all entries for a namespace. */
   async pull(namespace: string): Promise<PullResult> {
-    const res = await fetch(this.endpoint(namespace), { headers: this.headers() })
+    const res = await this.fetch(this.endpoint(namespace), { headers: this.headers() })
     if (res.status === 404) return { namespace, version: 0, entries: {} }
     if (!res.ok) throw await httpError(res)
     const data = (await res.json()) as {
@@ -123,7 +135,7 @@ export class MemlawbClient {
       if (this.onScanWarning) this.onScanWarning(findings)
       else
         console.warn(
-          `[memlawb] ${findings.length} potential secret(s) in pushed memory (scan=warn)`,
+          `[openrecall] ${findings.length} potential secret(s) in pushed memory (scan=warn)`,
         )
     }
 
@@ -150,7 +162,7 @@ export class MemlawbClient {
       return { namespace, version: ver, uploaded, unchanged, deleted: [] }
     }
 
-    const res = await fetch(this.endpoint(namespace), {
+    const res = await this.fetch(this.endpoint(namespace), {
       method: 'PUT',
       headers: this.headers({ 'content-type': 'application/json' }),
       body: JSON.stringify({ entries: toUpload, deletions }),
@@ -168,15 +180,20 @@ export class MemlawbClient {
 
   /** Delete one entry. */
   async delete(namespace: string, entryKey: string): Promise<void> {
-    const res = await fetch(`${this.endpoint(namespace)}?key=${encodeURIComponent(entryKey)}`, {
-      method: 'DELETE',
-      headers: this.headers(),
-    })
+    const res = await this.fetch(
+      `${this.endpoint(namespace)}?key=${encodeURIComponent(entryKey)}`,
+      {
+        method: 'DELETE',
+        headers: this.headers(),
+      },
+    )
     if (!res.ok) throw await httpError(res)
   }
 
   private async version(namespace: string): Promise<number> {
-    const res = await fetch(`${this.endpoint(namespace)}?view=hashes`, { headers: this.headers() })
+    const res = await this.fetch(`${this.endpoint(namespace)}?view=hashes`, {
+      headers: this.headers(),
+    })
     if (res.status === 404) return 0
     if (!res.ok) throw await httpError(res)
     return ((await res.json()) as { version: number }).version
@@ -190,7 +207,7 @@ async function httpError(res: Response): Promise<Error> {
   } catch {
     detail = await res.text().catch(() => '')
   }
-  return new Error(`memlawb ${res.status} ${res.statusText}: ${detail}`)
+  return new Error(`openrecall ${res.status} ${res.statusText}: ${detail}`)
 }
 
 export { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'

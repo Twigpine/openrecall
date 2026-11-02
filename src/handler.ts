@@ -1,5 +1,5 @@
 /**
- * HTTP request handler for the memlawb sync contract. Extracted from index.ts
+ * HTTP request handler for the openrecall sync contract. Extracted from index.ts
  * so it can be unit-tested by calling handleRequest(new Request(...)) directly
  * without binding a socket.
  *
@@ -66,7 +66,7 @@ export async function handleRequest(req: Request): Promise<Response> {
   const { pathname } = url
 
   if (pathname === '/health') {
-    return json({ ok: true, store: getStore().describe(), service: 'memlawb' })
+    return json({ ok: true, store: getStore().describe(), service: 'openrecall' })
   }
 
   const parsed = parseMemoryPath(pathname)
@@ -162,7 +162,7 @@ export async function handleRequest(req: Request): Promise<Response> {
 
     return apiError('method_not_allowed', `${req.method} not supported`, 405)
   } catch (err) {
-    console.error('[memlawb] handler error', err)
+    console.error('[openrecall] handler error', err)
     return apiError('internal', 'internal error', 500)
   }
 }

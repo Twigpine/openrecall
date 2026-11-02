@@ -3,7 +3,7 @@
  * by string key. Correct for a SINGLE server instance; the hosted beta runs one
  * machine (fly.toml `min_machines_running = 1`) deliberately for this reason.
  * Horizontal scale moves these invariants to Postgres row-version checks
- * (PLAN §7); do not scale out before that lands.
+ * (ROADMAP.md#scale); do not scale out before that lands.
  *
  * Shared by the namespace write path (`ns:<slug>`) and the per-owner quota
  * accounting (`owner:<id>`). Always acquire in a consistent order (ns then

@@ -3,14 +3,14 @@
  *
  * Agent memory is a magnet for accidental secrets: an agent summarizing a
  * session can easily write "the API key is sk-..." into a note. Even though
- * memlawb encrypts everything before upload, a leaked passphrase would then
+ * openrecall encrypts everything before upload, a leaked passphrase would then
  * expose those secrets too, and a synced secret is a synced secret. So we scan
  * plaintext HERE, on the client, BEFORE encryption, and (by default) refuse to
  * upload entries that look like they contain live credentials.
  *
  * This is a pragmatic regex pass in the spirit of gitleaks — high-signal
  * patterns, tuned to avoid the worst false positives. It is not a guarantee;
- * it's a seatbelt. Mode is controlled by the caller (MEMLAWB_SCAN): block
+ * it's a seatbelt. Mode is controlled by the caller (OPENRECALL_SCAN): block
  * (default), warn, or off.
  */
 
@@ -119,7 +119,7 @@ export class SecretFoundError extends Error {
     super(
       `refusing to upload: ${findings.length} potential secret(s) detected.\n` +
         findings.map(f => `  ${f.entryKey}:${f.line} — ${f.description} (${f.match})`).join('\n') +
-        `\nReview and remove them, or set MEMLAWB_SCAN=warn to override (NOT recommended).`,
+        `\nReview and remove them, or set OPENRECALL_SCAN=warn to override (NOT recommended).`,
     )
     this.findings = findings
   }

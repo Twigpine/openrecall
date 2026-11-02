@@ -1,12 +1,12 @@
 /**
- * Client-side end-to-end encryption for memlawb.
+ * Client-side end-to-end encryption for openrecall.
  *
  * This is the whole point of the product: memory is encrypted HERE, on the
  * client, before it is ever sent to the server. The server stores and serves
  * only ciphertext and can never read your memory.
  *
  * Crypto choices (native node:crypto — zero dependencies, runs in Bun/Node):
- *   - Key derivation: scrypt(passphrase, salt = sha256("memlawb:" + namespace)).
+ *   - Key derivation: scrypt(passphrase, salt = sha256("openrecall:" + namespace)).
  *       The namespace is the salt so derivation is deterministic and stateless
  *       (no salt file to lose), while still being distinct per namespace.
  *   - Cipher: AES-256-GCM with the entry key as AEAD additional data, so a
@@ -37,7 +37,7 @@ const SCRYPT_PARAMS = { N: SCRYPT_N, r: 8, p: 1, maxmem: 64 * 1024 * 1024 }
 
 /** Derive the 32-byte namespace key from a passphrase. Deterministic. */
 export function deriveKey(passphrase: string, namespace: string): Buffer {
-  const salt = createHash('sha256').update(`memlawb:${namespace}`).digest()
+  const salt = createHash('sha256').update(`openrecall:${namespace}`).digest()
   return scryptSync(passphrase, salt, KEY_LEN, SCRYPT_PARAMS)
 }
 

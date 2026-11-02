@@ -1,6 +1,6 @@
 # Security Policy
 
-memlawb is security software — a zero-knowledge memory backend. We take reports
+OpenRecall is security software — a zero-knowledge memory backend. We take reports
 seriously and appreciate responsible disclosure.
 
 ## Reporting a vulnerability
@@ -22,7 +22,7 @@ maintainers and we'll arrange a private path.
 
 ## Supported versions
 
-memlawb is pre-1.0 and ships from `main`. Security fixes land on the latest
+OpenRecall is pre-1.0 and ships from `main`. Security fixes land on the latest
 `0.x` minor and are released promptly. Older `0.x` lines are not maintained —
 please track the latest release.
 
@@ -33,9 +33,14 @@ please track the latest release.
 
 ## Threat model & scope
 
-memlawb's core guarantee is that **the server is crypto-blind**: clients encrypt
-every entry before upload (AES-256-GCM, key derived from a passphrase that never
-leaves the client), so the server stores and serves only ciphertext.
+OpenRecall's core guarantee is that **the store is crypto-blind**: clients encrypt
+every entry before it is stored (AES-256-GCM, key derived from a passphrase that
+never leaves the client), so a server — or the local store in
+`~/.openrecall/data` — holds only ciphertext.
+
+The passphrase lives in `~/.openrecall/config.json` (created owner-only, 0600)
+or the environment, and is read only by the local CLI / MCP server process.
+Agent configs written by `openrecall setup` never contain it.
 
 **The server can see:** namespace ids, entry keys (paths), ciphertext blobs,
 ciphertext byte sizes and hashes, and timestamps. **The server cannot see:**
@@ -64,8 +69,12 @@ We're especially interested in reports that break these properties:
 - **Metadata is visible to the host** (namespace ids, entry keys, sizes,
   timestamps) — see scope above. A future tier may hash entry keys.
 - **Single-instance hosted beta.** The hosted deployment runs one instance on
-  purpose; in-process locks/limits assume that (see PLAN.md §7). Self-hosters
-  should not run multiple instances against shared storage until the Postgres
-  index lands.
+  purpose; in-process locks/limits assume that (see [ROADMAP.md](./ROADMAP.md#scale)).
+  Self-hosters should not run multiple instances against shared storage until
+  the Postgres index lands.
+- **Local key custody is user-level.** Any process running as your OS user can
+  read `~/.openrecall/config.json`, as with any local credential. OpenRecall
+  protects memory from the host and the network, not from malware on your
+  machine.
 
-Thank you for helping keep memlawb and its users safe.
+Thank you for helping keep OpenRecall and its users safe.

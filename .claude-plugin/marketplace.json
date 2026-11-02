@@ -1,0 +1,17 @@
+{
+  "name": "openrecall",
+  "owner": {
+    "name": "Twigpine",
+    "url": "https://twigpine.com"
+  },
+  "metadata": {
+    "description": "OpenRecall by Twigpine — one end-to-end-encrypted memory for every agent."
+  },
+  "plugins": [
+    {
+      "name": "openrecall",
+      "source": "./",
+      "description": "One end-to-end-encrypted memory shared by every agent and every session."
+    }
+  ]
+}

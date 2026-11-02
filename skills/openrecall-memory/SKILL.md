@@ -1,17 +1,21 @@
 ---
-name: memlawb-memory
-description: Durable cross-session memory for the agent, backed by the memlawb MCP tools (memory_save / memory_recall / memory_search / memory_list / memory_delete). Use at the START of a task to recall what you already know about this user and project, and WHENEVER you learn a durable fact (a preference, a project decision, a convention, or feedback on how to work) so it survives into future sessions. Memory is end-to-end encrypted — the server cannot read it.
+name: openrecall-memory
+description: Long-term memory shared across sessions and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact (a preference, decision, convention, or feedback) to save it. Tools: memory_recall, memory_save, memory_search, memory_list, memory_delete. End-to-end encrypted — the server cannot read it.
 ---
 
-# memlawb memory
+# OpenRecall memory
 
-You have long-term memory that persists across sessions through the memlawb MCP
-tools. Without it you start every session amnesiac; with it you remember the
+You have long-term memory that persists across sessions through the OpenRecall
+MCP tools. Without it you start every session amnesiac; with it you remember the
 user, their projects, their preferences, and how they've asked you to work. Use
 it deliberately.
 
+It is **shared**: the same memory is available to every agent the user has
+connected (Claude Code, Zero, OpenClaude, Codex, Cursor, …), so what you save
+here, the next agent can recall — and vice versa.
+
 It is **end-to-end encrypted**: plaintext is encrypted on this machine before it
-leaves, so the memlawb server stores only ciphertext and cannot read what you
+is stored, so the OpenRecall store holds only ciphertext and cannot read what you
 save. A client-side scanner also blocks anything that looks like a live secret —
 but don't rely on it; never save credentials, tokens, or keys on purpose.
 
@@ -53,6 +57,11 @@ If asked to "remember" something already in the repo, save instead what was
 *non-obvious* about it.
 
 ## How to call the tools
+
+Depending on the agent, the tools may carry a prefix — e.g.
+`mcp__openrecall__memory_recall` or `mcp_openrecall_memory_recall`; they are the
+same tools. If your agent shows MCP tools by name only until you look them up
+(a tool-search step), search for "openrecall" first.
 
 - `memory_save(key, content)` — `key` is a path that mirrors a memory directory
   layout; `content` is markdown. Saving the same `key` overwrites it.

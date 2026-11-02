@@ -1,10 +1,10 @@
 # Default owners for everything in the repo.
-* @Gitlawb/maintainers
+* @Twigpine/maintainers
 
 # Security-sensitive areas warrant extra review.
-/client/crypto.ts      @Gitlawb/maintainers
-/client/secretscan.ts  @Gitlawb/maintainers
-/src/auth.ts           @Gitlawb/maintainers
-/src/quota.ts          @Gitlawb/maintainers
-/src/namespace.ts      @Gitlawb/maintainers
-/SECURITY.md           @Gitlawb/maintainers
+/client/crypto.ts      @Twigpine/maintainers
+/client/secretscan.ts  @Twigpine/maintainers
+/src/auth.ts           @Twigpine/maintainers
+/src/quota.ts          @Twigpine/maintainers
+/src/namespace.ts      @Twigpine/maintainers
+/SECURITY.md           @Twigpine/maintainers
