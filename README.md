@@ -308,6 +308,11 @@ answers a single status would blur: `404 empty` (no such namespace),
 `503 entry_unreadable` (the manifest names the key and the store cannot produce
 its body).
 
+`HEAD` is supported on the read routes: same status and headers, no body.
+Any other method on a known route is a `405` with an `Allow` header, and a
+malformed percent-escape in the path is a `400` `invalid_path` — client input
+never turns into a `500`.
+
 ## Configuration
 
 - **Client** (CLI and MCP server): `~/.openrecall/config.json`, written by
@@ -318,7 +323,9 @@ its body).
   moves the whole directory.
 - **Server:** [`.env.example`](./.env.example) documents `STORE` (`fs` | `s3`),
   `ALLOW_UNAUTHENTICATED`, `STATIC_API_KEYS` or Supabase auth, and the
-  per-namespace and per-account limits.
+  per-namespace and per-account limits. Values are validated at startup: an
+  unknown `STORE` or a malformed number stops the process and names the
+  variable.
 
 ## Status
 
