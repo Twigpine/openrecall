@@ -31,8 +31,6 @@ export type ConfigFile = {
   scan?: ScanMode
 }
 
-export type Source = 'env' | 'config' | 'default'
-
 export type Settings = {
   /** ~/.openrecall, or OPENRECALL_HOME */
   home: string
@@ -45,10 +43,18 @@ export type Settings = {
   scan: ScanMode
   /** Where local mode keeps ciphertext (OPENRECALL_DATA_DIR, default <home>/data). */
   dataDir: string
-  sources: Record<'url' | 'apiKey' | 'passphrase' | 'namespace' | 'scan', Source>
 }
 
 type Env = Record<string, string | undefined>
+
+/** Env vars that override fields of the config file. */
+export const OVERRIDE_VARS = [
+  'OPENRECALL_URL',
+  'OPENRECALL_API_KEY',
+  'OPENRECALL_PASSPHRASE',
+  'OPENRECALL_NAMESPACE',
+  'OPENRECALL_SCAN',
+] as const
 
 function clean(v: string | undefined): string | undefined {
   const t = v?.trim()
@@ -100,37 +106,27 @@ export function resolveSettings(env: Env = process.env): Settings {
   const configPath = join(home, 'config.json')
   const file = readConfigFile(configPath)
 
-  const pick = (envName: string, fileValue: string | undefined, fallback?: string) => {
-    const e = clean(env[envName])
-    if (e !== undefined) return { value: e, source: 'env' as const }
-    const f = clean(fileValue)
-    if (f !== undefined) return { value: f, source: 'config' as const }
-    return { value: fallback, source: 'default' as const }
-  }
-
-  const url = pick('OPENRECALL_URL', file.url, LOCAL_URL)
-  const apiKey = pick('OPENRECALL_API_KEY', file.apiKey)
-  const passphrase = pick('OPENRECALL_PASSPHRASE', file.passphrase)
-  const namespace = pick('OPENRECALL_NAMESPACE', file.namespace, DEFAULT_NAMESPACE)
-  const scan = pick('OPENRECALL_SCAN', file.scan, 'block')
+  const pick = (envName: (typeof OVERRIDE_VARS)[number], fileValue: string | undefined) =>
+    clean(env[envName]) ?? clean(fileValue)
 
   return {
     home,
     configPath,
-    url: validateUrl(url.value as string),
-    apiKey: apiKey.value,
-    passphrase: passphrase.value,
-    namespace: namespace.value as string,
-    scan: validateScan(scan.value as string),
+    url: validateUrl(pick('OPENRECALL_URL', file.url) ?? LOCAL_URL),
+    apiKey: pick('OPENRECALL_API_KEY', file.apiKey),
+    passphrase: pick('OPENRECALL_PASSPHRASE', file.passphrase),
+    namespace: pick('OPENRECALL_NAMESPACE', file.namespace) ?? DEFAULT_NAMESPACE,
+    scan: validateScan(pick('OPENRECALL_SCAN', file.scan) ?? 'block'),
     dataDir: resolve(clean(env.OPENRECALL_DATA_DIR) ?? join(home, 'data')),
-    sources: {
-      url: url.source,
-      apiKey: apiKey.source,
-      passphrase: passphrase.source,
-      namespace: namespace.source,
-      scan: scan.source,
-    },
   }
+}
+
+/**
+ * Names of the OPENRECALL_* variables currently overriding the config file —
+ * names only, never values, so `openrecall status` can print them safely.
+ */
+export function envOverrides(env: Env = process.env): string[] {
+  return OVERRIDE_VARS.filter(name => clean(env[name]) !== undefined)
 }
 
 /** A fresh 256-bit passphrase, base64url (43 chars). */

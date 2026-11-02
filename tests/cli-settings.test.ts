@@ -11,6 +11,7 @@ import { join } from 'node:path'
 import { withDirLock } from '../src/cli/local.ts'
 import {
   configTooOpen,
+  envOverrides,
   generatePassphrase,
   resolveSettings,
   writeConfigFile,
@@ -35,7 +36,6 @@ describe('resolveSettings', () => {
     expect(s.scan).toBe('block')
     expect(s.passphrase).toBeUndefined()
     expect(s.dataDir).toBe(join(home, 'data'))
-    expect(s.sources.url).toBe('default')
   })
 
   test('config file is read; env overrides it', () => {
@@ -48,7 +48,6 @@ describe('resolveSettings', () => {
     const fromFile = resolveSettings({ OPENRECALL_HOME: home })
     expect(fromFile.url).toBe('https://memory.example.com')
     expect(fromFile.passphrase).toBe('from-file')
-    expect(fromFile.sources.passphrase).toBe('config')
 
     const overridden = resolveSettings({
       OPENRECALL_HOME: home,
@@ -57,7 +56,18 @@ describe('resolveSettings', () => {
     })
     expect(overridden.passphrase).toBe('from-env')
     expect(overridden.namespace).toBe('user:bob')
-    expect(overridden.sources.passphrase).toBe('env')
+    expect(overridden.url).toBe('https://memory.example.com') // file value still used
+  })
+
+  test('envOverrides reports which variables are set — names only, never values', () => {
+    const names = envOverrides({
+      OPENRECALL_PASSPHRASE: 'hunter2',
+      OPENRECALL_URL: '  ',
+      OPENRECALL_NAMESPACE: 'user:bob',
+      UNRELATED: 'x',
+    })
+    expect(names).toEqual(['OPENRECALL_PASSPHRASE', 'OPENRECALL_NAMESPACE'])
+    expect(names.join()).not.toContain('hunter2')
   })
 
   test('rejects bad urls and scan modes with actionable errors', () => {

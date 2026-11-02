@@ -23,6 +23,7 @@ import { dirname, join, sep } from 'node:path'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
 import {
   configTooOpen,
+  envOverrides,
   generatePassphrase,
   LOCAL_URL,
   readConfigFile,
@@ -116,11 +117,15 @@ async function cmdStatus() {
   console.log(
     `config     ${s.configPath}${configTooOpen(s.configPath) ? '  ⚠ readable by others — chmod 600' : ''}`,
   )
-  console.log(`store      ${describeTarget(s)}  [${s.sources.url}]`)
-  console.log(`namespace  ${s.namespace}  [${s.sources.namespace}]`)
-  console.log(`passphrase ${s.passphrase ? 'set' : 'MISSING'}  [${s.sources.passphrase}]`)
-  console.log(`api key    ${s.apiKey ? 'set' : 'none'}  [${s.sources.apiKey}]`)
+  console.log(`store      ${describeTarget(s)}`)
+  console.log(`namespace  ${s.namespace}`)
+  // Secrets are reported as present/absent only — never their values.
+  console.log(`passphrase ${s.passphrase ? 'set' : 'MISSING'}`)
+  console.log(`api key    ${s.apiKey ? 'set' : 'none'}`)
   console.log(`scan       ${s.scan}`)
+  const overrides = envOverrides()
+  if (overrides.length)
+    console.log(`env        ${overrides.join(', ')} (overriding the config file)`)
   const client = await makeClient(s)
   const hashes = await client.hashes(s.namespace)
   const n = Object.keys(hashes).length
