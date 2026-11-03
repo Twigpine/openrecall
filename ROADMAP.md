@@ -28,7 +28,7 @@ release, and what comes after. Open an issue or discussion to weigh in.
   `~/.openrecall/data`, shared safely by every agent on the machine through a
   cross-process lock.
 - **Runs without Bun.** The CLI and MCP server ship as a single Node bundle,
-  so `npx -y @twigpine/openrecall mcp` works anywhere Node 20+ does. Only
+  so `npx -y @twigpine/openrecall mcp` works anywhere Node 24+ does. Only
   `openrecall serve` needs Bun.
 
 ## First public release (v0.2)

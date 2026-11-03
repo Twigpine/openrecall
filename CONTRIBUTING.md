@@ -20,7 +20,7 @@ Green on all three is the bar for every PR.
 
 - [Bun](https://bun.sh) `>= 1.2` — the runtime, test runner, and package manager.
   TypeScript runs directly in development; `bun run build` bundles the CLI +
-  MCP server into `dist/openrecall.js` (plain Node 20+) for npm.
+  MCP server into `dist/openrecall.js` (plain Node 24+) for npm.
 - Node `>= 20` to exercise the bundle (`node dist/openrecall.js …`).
 
 ## Project layout

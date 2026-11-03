@@ -20,7 +20,7 @@ jobs:
         run: bun run type-check
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24.22.1'
       # Build the Node bundle so the MCP stdio tests also exercise what
       # `npx -y @twigpine/openrecall mcp` runs (dist/openrecall.js under Node).
       - name: Build

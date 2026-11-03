@@ -46,7 +46,7 @@ jobs:
       # npm
       - uses: actions/setup-node@v5
         with:
-          node-version: '22'
+          node-version: '24.22.1'
           registry-url: 'https://registry.npmjs.org'
       - run: npm publish --access public
         env:

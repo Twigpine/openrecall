@@ -95,7 +95,7 @@ key never leaves the client.
 ## Quick start
 
 ```bash
-npm i -g @twigpine/openrecall   # Node 20+; or prefix commands with npx -y @twigpine/openrecall
+npm i -g @twigpine/openrecall   # Node 24+; or prefix commands with npx -y @twigpine/openrecall
 openrecall init                 # writes ~/.openrecall/config.json (0600) with a fresh passphrase
 openrecall setup                # see which agents are on this machine
 openrecall setup all --write    # register OpenRecall with all of them
