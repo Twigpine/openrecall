@@ -41,6 +41,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -244,9 +245,11 @@ describe('tuning-pair match arity', () => {
   const FM_SOURCE = /function frontmatterDescription\([\s\S]*?\n}/.exec(
     readFileSync(join(REPO_ROOT, 'src/mcp/relevance.ts'), 'utf8'),
   )
-  const FM_LITERALS = [
-    ...(FM_SOURCE?.[0] ?? '').matchAll(/\/((?:\\.|\[[^\]]*\]|[^/\\\n])+)\/([gimsuy]*)/g),
-  ].map(m => new RegExp(m[1], m[2]))
+  // Each branch starts with a distinct token: escape, character class, or other.
+  const FM_LITERAL_RE = /\/((?:\\.|\[[^\]]*\]|[^/\\[\n])+)\/([gimsuy]*)/g
+  const FM_LITERALS = [...(FM_SOURCE?.[0] ?? '').matchAll(FM_LITERAL_RE)].map(
+    m => new RegExp(m[1], m[2]),
+  )
 
   const descriptionOf = (content: string): string => {
     const block = FM_LITERALS[0].exec(content)
@@ -300,6 +303,29 @@ describe('tuning-pair match arity', () => {
     expect(FM_LITERALS.length).toBe(2)
     expect(descriptionOf(CORPUS['project/deploy.md'])).toContain('deploy')
     expect(descriptionOf('no frontmatter here')).toBe('')
+  })
+
+  test('frontmatter literal extraction preserves escapes, character classes and flags', () => {
+    const source = String.raw`const a = /a\/b/i; const b = /[/]/g; const c = /\[\]/m`
+    expect([...source.matchAll(FM_LITERAL_RE)].map(m => [m[1], m[2]])).toEqual([
+      [String.raw`a\/b`, 'i'],
+      ['[/]', 'g'],
+      [String.raw`\[\]`, 'm'],
+    ])
+  })
+
+  test('frontmatter literal extraction rejects repeated bracket classes promptly', () => {
+    // Exercise V8 too: Bun caps backtracking, but Node can hang on this input.
+    // A subprocess deadline stops a regressed matcher from hanging the suite.
+    const source = `/${'[]'.repeat(128)}`
+    const probe = spawnSync(
+      'node',
+      ['--eval', `console.log([...${JSON.stringify(source)}.matchAll(${FM_LITERAL_RE})].length)`],
+      { encoding: 'utf8', timeout: 2_000, killSignal: 'SIGKILL' },
+    )
+    expect(probe.error).toBeUndefined()
+    expect(probe.status).toBe(0)
+    expect(probe.stdout.trim()).toBe('0')
   })
 
   test('each expected entry carries its query terms in the pinned fields', () => {
