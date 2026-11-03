@@ -18,6 +18,10 @@
   <a href="https://www.npmjs.com/package/@twigpine/openrecall"><img src="https://img.shields.io/npm/dm/@twigpine/openrecall?color=40866a" alt="Monthly npm downloads" /></a>
   <a href="SECURITY.md"><img src="https://img.shields.io/badge/storage-end--to--end_encrypted-40866a" alt="Storage is end-to-end encrypted" /></a>
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-40866a" alt="MIT license" /></a>
+  <a href="https://github.com/Twigpine/openrecall/tags"><img src="https://img.shields.io/github/v/tag/Twigpine/openrecall?label=release&color=40866a" alt="Latest release" /></a>
+  <a href="https://github.com/Twigpine/openrecall/discussions"><img src="https://img.shields.io/badge/discussions-open-40866a" alt="GitHub Discussions" /></a>
+  <a href="https://discord.gg/k68zFR6AcB"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://x.com/twigpine"><img src="https://img.shields.io/badge/X-@twigpine-000000?logo=x&logoColor=white" alt="Twigpine on X" /></a>
 </p>
 
 <p align="center">
@@ -118,7 +122,7 @@ MCP server and the memory skill:
 
 ### Memory across projects
 
-Project tools and multi-namespace recall require a version newer than `0.2.0`.
+Project tools and multi-namespace recall need `0.2.1` or later.
 
 Keep standing preferences and general feedback in your configured shared
 namespace. Keep project decisions and references in a separate project scope.
@@ -162,9 +166,6 @@ STORE=fs DATA_DIR=./data openrecall serve
 # on each machine, the same passphrase everywhere (copy it from the first)
 openrecall init --url https://memory.example.com --api-key <key> --namespace user:me
 ```
-
-With releases before the automatic Bun launch, run
-`bunx --bun @twigpine/openrecall serve` instead.
 
 Each API key owns the `user:<owner>` namespace subtree. For many users, use the
 Supabase key table in [`migrations/`](./migrations) instead of static keys.
@@ -271,7 +272,8 @@ appearing empty.
 
 ## Status
 
-**Beta.** `@twigpine/openrecall` is on npm. The crypto-blind server, client
+**Beta.** `@twigpine/openrecall` 0.2.1 is on npm, published from CI with
+provenance. The crypto-blind server, client
 crypto, CLI, local mode, MCP server, agent setup, secret scanner, quotas, and
 rate limiting are implemented and covered by `bun test`, including real MCP
 sessions over stdio under both Bun and Node and an install of the packed
