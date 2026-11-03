@@ -173,7 +173,7 @@ async function cmdPull(dir: string, namespace?: string) {
 function cmdCard(owner: string, url: string | undefined) {
   const card = renderSetupCard('openclaude', {
     owner,
-    url: url ?? process.env.OPENRECALL_URL ?? 'https://memory.gitlawb.com',
+    url: url ?? process.env.OPENRECALL_URL ?? 'https://memory.twigpine.com',
     apiKey: process.env.OPENRECALL_API_KEY ?? '<paste your service key here>',
   })
   console.log(card)

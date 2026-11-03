@@ -75,7 +75,7 @@ To point an agent at a hosted service instead, print the block to paste:
 
 ```bash
 # prints the MCP config block, plus a fresh passphrase shown once
-OPENRECALL_API_KEY=<your key> openrecall card <owner> https://memory.gitlawb.com
+OPENRECALL_API_KEY=<your key> openrecall card <owner> https://memory.twigpine.com
 ```
 
 The passphrase is generated locally and never leaves the machine: it is printed

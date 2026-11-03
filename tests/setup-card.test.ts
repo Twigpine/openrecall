@@ -27,7 +27,7 @@ import { authorizeNamespace } from '../src/auth.ts'
 import { loadMemoryGuide } from '../src/mcp/guide.ts'
 
 const id = (owner: string) => ({ owner })
-const HOSTED = 'https://memory.gitlawb.com'
+const HOSTED = 'https://memory.twigpine.com'
 const KEY = 'mk_live_example'
 
 describe('setup card: namespace authorization (AE6, R19)', () => {
@@ -251,16 +251,16 @@ describe('setup card: passphrase entropy (AE10, R20)', () => {
 
 describe('setup card: URL rule (R23)', () => {
   test('https is accepted', () => {
-    expect(assertServiceUrl('https://memory.gitlawb.com')).toBe('https://memory.gitlawb.com')
+    expect(assertServiceUrl('https://memory.twigpine.com')).toBe('https://memory.twigpine.com')
     expect(renderSetupCard('openclaude', { owner: 'a', url: HOSTED, apiKey: KEY })).toContain(
       HOSTED,
     )
   })
 
   test('http to a non-loopback host is refused', () => {
-    expect(() => assertServiceUrl('http://memory.gitlawb.com')).toThrow(/https/)
+    expect(() => assertServiceUrl('http://memory.twigpine.com')).toThrow(/https/)
     expect(() =>
-      renderSetupCard('openclaude', { owner: 'a', url: 'http://memory.gitlawb.com', apiKey: KEY }),
+      renderSetupCard('openclaude', { owner: 'a', url: 'http://memory.twigpine.com', apiKey: KEY }),
     ).toThrow(/https/)
   })
 
@@ -408,7 +408,7 @@ describe('openrecall card (CLI)', () => {
   })
 
   test('a refused url fails rather than printing a card', () => {
-    const r = runCli(['card', 'alice', 'http://memory.gitlawb.com'])
+    const r = runCli(['card', 'alice', 'http://memory.twigpine.com'])
     expect(r.code).not.toBe(0)
     expect(r.stderr).toContain('https')
     expect(r.stdout).not.toContain('mcpServers')
@@ -429,10 +429,10 @@ describe('openrecall card (CLI)', () => {
 describe('setup card: the URL carries no credentials (R23)', () => {
   test('a userinfo component is refused and the same url without it is accepted', () => {
     for (const [bad, good] of [
-      ['https://key@memory.gitlawb.com', 'https://memory.gitlawb.com'],
-      ['https://user:pw@memory.gitlawb.com', 'https://memory.gitlawb.com'],
-      ['https://:pw@memory.gitlawb.com', 'https://memory.gitlawb.com'],
-      ['https://key@memory.gitlawb.com/path', 'https://memory.gitlawb.com/path'],
+      ['https://key@memory.twigpine.com', 'https://memory.twigpine.com'],
+      ['https://user:pw@memory.twigpine.com', 'https://memory.twigpine.com'],
+      ['https://:pw@memory.twigpine.com', 'https://memory.twigpine.com'],
+      ['https://key@memory.twigpine.com/path', 'https://memory.twigpine.com/path'],
     ]) {
       expect(() => assertServiceUrl(bad)).toThrow(/OPENRECALL_API_KEY/)
       expect(`${good} -> ${assertServiceUrl(good)}`).toBe(`${good} -> ${good}`)
@@ -450,7 +450,7 @@ describe('setup card: the URL carries no credentials (R23)', () => {
     expect(() =>
       renderSetupCard('openclaude', {
         owner: 'alice',
-        url: 'https://key@memory.gitlawb.com',
+        url: 'https://key@memory.twigpine.com',
         apiKey: KEY,
       }),
     ).toThrow(/OPENRECALL_API_KEY/)
@@ -458,10 +458,10 @@ describe('setup card: the URL carries no credentials (R23)', () => {
     expect(
       renderSetupCard('openclaude', {
         owner: 'alice',
-        url: 'https://memory.gitlawb.com',
+        url: 'https://memory.twigpine.com',
         apiKey: KEY,
       }),
-    ).toContain('"OPENRECALL_URL": "https://memory.gitlawb.com"')
+    ).toContain('"OPENRECALL_URL": "https://memory.twigpine.com"')
   })
 })
 
