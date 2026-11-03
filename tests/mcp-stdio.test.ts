@@ -1,0 +1,217 @@
+/**
+ * Drives `openrecall mcp` exactly as an agent does: spawn it, speak MCP over
+ * stdio, call the tools. Runs against the source (Bun) and, when present, the
+ * published Node bundle (dist/openrecall.js — `bun run build` first), so we know
+ * `npx -y @twigpine/openrecall mcp` works without Bun.
+ *
+ * Two server processes share one local store to prove what one agent saves,
+ * another agent recalls.
+ */
+
+import { afterAll, describe, expect, test } from 'bun:test'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Client } from '@modelcontextprotocol/sdk/client/index.js'
+import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+
+const homes: string[] = []
+afterAll(() => {
+  for (const h of homes) rmSync(h, { recursive: true, force: true })
+})
+
+function freshHome(): string {
+  const h = mkdtempSync(join(tmpdir(), 'openrecall-home-'))
+  homes.push(h)
+  return h
+}
+
+type Launcher = { name: string; command: string; args: string[] }
+const launchers: Launcher[] = [
+  { name: 'source (bun)', command: process.execPath, args: ['bin/openrecall.ts'] },
+]
+if (existsSync('dist/openrecall.js')) {
+  launchers.push({ name: 'dist (node)', command: 'node', args: ['dist/openrecall.js'] })
+}
+
+async function connect(l: Launcher, env: Record<string, string>): Promise<Client> {
+  // Strip the test preload's server env so the child resolves its own settings.
+  const base = Object.fromEntries(
+    Object.entries(process.env).filter(
+      ([k, v]) =>
+        v !== undefined && !/^(STORE|DATA_DIR|ALLOW_UNAUTHENTICATED|MAX_|OPENRECALL_)/.test(k),
+    ),
+  ) as Record<string, string>
+  const client = new Client({ name: 'test-agent', version: '0.0.0' })
+  await client.connect(
+    new StdioClientTransport({
+      command: l.command,
+      args: [...l.args, 'mcp'],
+      env: { ...base, ...env },
+      stderr: 'pipe',
+    }),
+  )
+  return client
+}
+
+const text = (r: unknown) =>
+  ((r as { content: { type: string; text: string }[] }).content[0]?.text ?? '') as string
+
+for (const l of launchers) {
+  describe(`openrecall mcp over stdio — ${l.name}`, () => {
+    test('advertises tools, instructions and the memory_guide prompt', async () => {
+      const home = freshHome()
+      const c = await connect(l, { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p' })
+      try {
+        const { tools } = await c.listTools()
+        expect(tools.map(t => t.name).sort()).toEqual([
+          'memory_delete',
+          'memory_get',
+          'memory_list',
+          'memory_project',
+          'memory_projects',
+          'memory_recall',
+          'memory_save',
+          'memory_search',
+        ])
+        expect(c.getInstructions()).toContain('memory_recall')
+        const guide = await c.getPrompt({ name: 'memory_guide' })
+        const msg = guide.messages[0]?.content as { text: string }
+        expect(msg.text).toContain('Recall first')
+        expect(msg.text.startsWith('---')).toBe(false)
+      } finally {
+        await c.close()
+      }
+    }, 30_000)
+
+    test('two agents share one local memory; disk holds only ciphertext', async () => {
+      const home = freshHome()
+      const env = { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'shared-pass' }
+      const [agentA, agentB] = await Promise.all([connect(l, env), connect(l, env)])
+      try {
+        // Concurrent saves from two processes must not lose either write.
+        await Promise.all([
+          agentA.callTool({
+            name: 'memory_save',
+            arguments: { key: 'prefs.md', content: 'User prefers pnpm over npm.' },
+          }),
+          agentB.callTool({
+            name: 'memory_save',
+            arguments: { key: 'deploy.md', content: 'Deploys go through Fly in region sin.' },
+          }),
+        ])
+        const list = text(await agentA.callTool({ name: 'memory_list', arguments: {} }))
+        expect(list).toContain('prefs.md')
+        expect(list).toContain('deploy.md')
+
+        // Assert on the hit itself: a miss message echoes the query back, so a
+        // bare toContain('pnpm') would pass even when nothing was recalled.
+        const recalled = text(
+          await agentB.callTool({ name: 'memory_recall', arguments: { query: 'pnpm or npm' } }),
+        )
+        expect(recalled).toContain('### prefs.md')
+        expect(recalled).toContain('User prefers pnpm over npm.')
+
+        const dataDir = join(home, 'data')
+        const files = readdirSync(dataDir, { recursive: true }) as string[]
+        for (const f of files) {
+          const p = join(dataDir, f)
+          if (!existsSync(p) || !f.includes('entries')) continue
+          try {
+            expect(readFileSync(p, 'utf8')).not.toContain('pnpm')
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'EISDIR') throw err
+          }
+        }
+      } finally {
+        await Promise.all([agentA.close(), agentB.close()])
+      }
+    }, 30_000)
+
+    test('unconfigured: starts anyway and tools explain how to set up', async () => {
+      const c = await connect(l, { OPENRECALL_HOME: freshHome() })
+      try {
+        const r = await c.callTool({ name: 'memory_recall', arguments: { query: 'x' } })
+        expect(r.isError).toBe(true)
+        expect(text(r)).toContain('openrecall init')
+      } finally {
+        await c.close()
+      }
+    }, 30_000)
+
+    test('agents discover projects, recall shared and project facts together, and encrypt the directory', async () => {
+      const home = freshHome()
+      const env = { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'project-probe' }
+      const [agentA, agentB] = await Promise.all([connect(l, env), connect(l, env)])
+      try {
+        const project = 'github.com/twigpine/drawstrike'
+        const opened = text(
+          await agentA.callTool({ name: 'memory_project', arguments: { project } }),
+        )
+        const namespace = opened.match(/^Project namespace: (.+)$/m)?.[1]
+        expect(namespace).toBeDefined()
+        const other = text(
+          await agentB.callTool({
+            name: 'memory_project',
+            arguments: { project: 'github.com/other/drawstrike' },
+          }),
+        ).match(/^Project namespace: (.+)$/m)?.[1]
+        expect(other).toBeDefined()
+        expect(other).not.toBe(namespace)
+        const directory = text(await agentB.callTool({ name: 'memory_projects', arguments: {} }))
+        expect(directory).toContain(project)
+        expect(directory).toContain(namespace!)
+
+        await agentA.callTool({
+          name: 'memory_save',
+          arguments: { key: 'prefs.md', content: 'Release notes must be concise and reviewed.' },
+        })
+        await agentB.callTool({
+          name: 'memory_save',
+          arguments: {
+            key: 'prefs.md',
+            namespace,
+            content: 'Release Drawstrike to the zircon preview cluster.',
+          },
+        })
+        await agentB.callTool({
+          name: 'memory_save',
+          arguments: {
+            key: 'prefs.md',
+            namespace: other,
+            content: 'Release to the forbidden cluster.',
+          },
+        })
+        const result = text(
+          await agentA.callTool({
+            name: 'memory_recall',
+            arguments: { query: 'release', namespaces: ['user:me', namespace] },
+          }),
+        )
+        expect(result).toContain('concise and reviewed')
+        expect(result).toContain('zircon preview cluster')
+        expect(result).not.toContain('forbidden cluster')
+        expect(result).toContain(`### prefs.md (${namespace})`)
+        const shared = text(
+          await agentA.callTool({ name: 'memory_recall', arguments: { query: 'release' } }),
+        )
+        expect(shared).not.toContain('zircon preview cluster')
+        expect(shared).toContain('concise and reviewed')
+
+        const dataDir = join(home, 'data')
+        for (const rel of readdirSync(dataDir, { recursive: true }) as string[]) {
+          try {
+            const stored = readFileSync(join(dataDir, rel), 'utf8')
+            expect(stored).not.toContain(project)
+            expect(stored).not.toContain('zircon preview cluster')
+            expect(stored).not.toContain('concise and reviewed')
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'EISDIR') throw err
+          }
+        }
+      } finally {
+        await Promise.all([agentA.close(), agentB.close()])
+      }
+    }, 30_000)
+  })
+}

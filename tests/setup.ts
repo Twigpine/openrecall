@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.STORE ??= 'fs'
-process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'memlawb-test-'))
+process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'openrecall-test-'))
 process.env.ALLOW_UNAUTHENTICATED ??= 'true'
 // The node driver's pure half needs these present to construct; no node is
 // contacted, and no test in the suite sets STORE=node.

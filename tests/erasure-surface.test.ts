@@ -18,7 +18,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { MemlawbClient } from '../client/index.ts'
+import { OpenRecallClient } from '../client/index.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import { StubClient } from './stub-client.ts'
 
@@ -86,7 +86,7 @@ describe('R28: a non-blocking scan is refused against a retaining store', () => 
   test('scan=warn against a retaining store throws, and sends nothing', async () => {
     const { server, seen, url } = serve('retains')
     try {
-      const c = new MemlawbClient({ url, passphrase: 'p', scanMode: 'warn' })
+      const c = new OpenRecallClient({ url, passphrase: 'p', scanMode: 'warn' })
       await expect(c.push('user:me', { 'k.md': `token ${SECRET}` })).rejects.toThrow(/retain/i)
       // The refusal has to land before anything is written. A throw that still
       // uploaded would be a warning dressed as a refusal.
@@ -101,7 +101,7 @@ describe('R28: a non-blocking scan is refused against a retaining store', () => 
     // retaining stores being unwritable.
     const { server, seen, url } = serve('retains')
     try {
-      const c = new MemlawbClient({ url, passphrase: 'p', scanMode: 'block' })
+      const c = new OpenRecallClient({ url, passphrase: 'p', scanMode: 'block' })
       await c.push('user:me', { 'k.md': 'nothing secret here' })
       expect(seen.some(s => s.startsWith('PUT'))).toBe(true)
     } finally {
@@ -114,7 +114,7 @@ describe('R28: a non-blocking scan is refused against a retaining store', () => 
     // differs, so the refusal above cannot be the scan mode alone.
     const { server, seen, url } = serve('erases')
     try {
-      const c = new MemlawbClient({
+      const c = new OpenRecallClient({
         url,
         passphrase: 'p',
         scanMode: 'warn',

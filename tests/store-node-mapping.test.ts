@@ -28,16 +28,16 @@ import {
 import { PROBE_PREFIX } from '../src/store/probe.ts'
 
 /** Fixed secret the literal vectors below were derived under. */
-const SECRET = 'memlawb-test-store-secret'
+const SECRET = 'openrecall-test-store-secret'
 const HEX64 = /^[0-9a-f]{64}$/
 
 // Vectors derived from the spec (HMAC-SHA256 under the three labels) before the
 // implementation existed. They pin the algorithm, not just the shape.
 const PIN = {
   aliceSlug: 'dabd1db8d35ab13106274f61f1bf977812cce4f477b15014cf38fb796c50a4c4',
-  aliceRepo: '98e326be98480f2aa9f9fec61b1d40c7ac9fdab32cd74eef144d0cd9d8028e76',
-  metaRepo: '23de9226a5fe6b60a445f0003efd08ceae161b46b0b3eea0cacef6771b3809de',
-  aliceMemoryLeaf: 'dbe1a68b2726174c596fb464cb14e456e89b01690ad89435f68babdd44332794',
+  aliceRepo: 'a565eccf068b5049e91a85a026e8bc0d56e68ab15bfb9c66a42f3d37c0e2b443',
+  metaRepo: 'd2583536b74f59ed531f602a64f3ffc99525a91f0482f6f38fe40bf32f25bbda',
+  aliceMemoryLeaf: '86fb05eb17729d51fe80d88a56c7fdafded8e15b409ae6ff6b75fc479367ef7b',
 }
 
 const naming = createNodeNaming(SECRET)
@@ -211,8 +211,11 @@ describe('at-rest wrapping', () => {
 
   // A wrapped object produced from the spec independently of this code, so a
   // format or label change cannot pass by re-wrapping under its own new rules.
+  // Regenerated for the openrecall/ labels and test secret by a separate
+  // implementation of the spec, which first reproduced the previous literals
+  // exactly from the memlawb/ ones.
   const PINNED_BLOB =
-    'AQECAwQFBgcICQoLDMyZli/0L28YeA7n0PHOzaRVU7yUCwlEKnsZmlRgrr+E5p6sEhT21iy6nzSh89OoFjcUIHnY5Vf/Ir8h'
+    'AQECAwQFBgcICQoLDAjGtLZffxq1WUjNJLgrbq63laiMiEjqWeSt0ipccuX2dG3ezyLkk6xYOvbFLeJpr2lYVJ6s5Snwk9lL'
   const PINNED_PLAINTEXT = '{"MEMORY.md":{"hash":"sha256:00","size":1}}'
 
   test('an object opens under its own store path', () => {

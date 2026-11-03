@@ -24,22 +24,22 @@ import { resetStore, setStore } from '../src/store/index.ts'
 import { NodeBlobStore } from '../src/store/node.ts'
 import { createNodeNaming } from '../src/store/node-naming.ts'
 
-const NODE_URL = process.env.MEMLAWB_NODE_TEST_URL?.trim()
-const IDENTITY = process.env.MEMLAWB_NODE_TEST_IDENTITY?.trim()
+const NODE_URL = process.env.OPENRECALL_NODE_TEST_URL?.trim()
+const IDENTITY = process.env.OPENRECALL_NODE_TEST_IDENTITY?.trim()
 const live = Boolean(NODE_URL && IDENTITY)
 if (!live) {
   console.warn(
     '\n!! tests/e2e-node.test.ts: the node-backed e2e did NOT run.\n' +
-      '!! Set MEMLAWB_NODE_TEST_URL and MEMLAWB_NODE_TEST_IDENTITY to run it.\n',
+      '!! Set OPENRECALL_NODE_TEST_URL and OPENRECALL_NODE_TEST_IDENTITY to run it.\n',
   )
 }
-if (process.env.MEMLAWB_NODE_TEST_BIN) {
-  process.env.PATH = `${process.env.MEMLAWB_NODE_TEST_BIN}:${process.env.PATH ?? ''}`
+if (process.env.OPENRECALL_NODE_TEST_BIN) {
+  process.env.PATH = `${process.env.OPENRECALL_NODE_TEST_BIN}:${process.env.PATH ?? ''}`
 }
 
 /** Distinct from the driver suite's secret, so this file owns its own repos and
  *  cannot pass on state another file happened to leave behind. */
-const SECRET = 'memlawb-u19-e2e'
+const SECRET = 'openrecall-u19-e2e'
 const PASSPHRASE = 'correct horse battery staple'
 /** A phrase that exists nowhere but this test, so finding it in a clone is
  *  proof of a plaintext leak rather than a coincidence. */
@@ -49,7 +49,7 @@ const dirs: string[] = []
 let server: ReturnType<typeof Bun.serve>
 let base: string
 let OWNER_DID = ''
-let MemlawbClient: typeof import('../client/index.ts').MemlawbClient
+let OpenRecallClient: typeof import('../client/index.ts').OpenRecallClient
 let makeTools: typeof import('../src/mcp/tools.ts').makeTools
 let preflight: typeof import('../src/mcp/startup.ts').preflight
 
@@ -78,7 +78,7 @@ function run(argv: string[]): Promise<{ code: number; out: string }> {
 
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
-  ;({ MemlawbClient } = await import('../client/index.ts'))
+  ;({ OpenRecallClient } = await import('../client/index.ts'))
   ;({ makeTools } = await import('../src/mcp/tools.ts'))
   ;({ preflight } = await import('../src/mcp/startup.ts'))
   if (live) {
@@ -86,7 +86,7 @@ beforeAll(async () => {
     const did = /did:key:[1-9A-HJ-NP-Za-km-z]+/.exec(who.out)
     if (!did) throw new Error(`could not read the test identity's DID: ${who.out}`)
     OWNER_DID = did[0]
-    const workdir = mkdtempSync(join(tmpdir(), 'memlawb-e2e-node-'))
+    const workdir = mkdtempSync(join(tmpdir(), 'openrecall-e2e-node-'))
     dirs.push(workdir)
     setStore(
       new NodeBlobStore(
@@ -110,7 +110,7 @@ afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true })
 })
 
-const client = (passphrase = PASSPHRASE) => new MemlawbClient({ url: base, passphrase })
+const client = (passphrase = PASSPHRASE) => new OpenRecallClient({ url: base, passphrase })
 
 describe.skipIf(!live)('e2e: the service on node storage', () => {
   const ns = 'user:e2enode'
@@ -121,9 +121,9 @@ describe.skipIf(!live)('e2e: the service on node storage', () => {
     // so a driver that only satisfies the BlobStore contract in isolation can
     // still leave the server refusing to start.
     const res = await preflight({
-      MEMLAWB_URL: base,
-      MEMLAWB_PASSPHRASE: PASSPHRASE,
-      MEMLAWB_NAMESPACE: ns,
+      OPENRECALL_URL: base,
+      OPENRECALL_PASSPHRASE: PASSPHRASE,
+      OPENRECALL_NAMESPACE: ns,
     })
     expect(res.ready).toBe(true)
   }, 300_000)
@@ -146,7 +146,7 @@ describe.skipIf(!live)('e2e: the service on node storage', () => {
     // fail rather than at the client boundary. A fresh clone, so this reads what
     // the node really serves and not a local working copy.
     const repo = createNodeNaming(SECRET).repoName(namespaceSlug(ns))
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-e2e-verify-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-e2e-verify-'))
     dirs.push(dir)
     const cloned = await run([
       'git',

@@ -1,5 +1,5 @@
 /**
- * Startup preflight for `memlawb mcp`.
+ * Startup preflight for `openrecall mcp`.
  *
  * The failure this exists to prevent: a wrong or unexpanded passphrase still
  * lists keys today, because the manifest is cleartext, and still saves. That
@@ -24,7 +24,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { MemlawbClient } from '../client/index.ts'
+import { OpenRecallClient } from '../client/index.ts'
 import { preflight } from '../src/mcp/startup.ts'
 import { getStore, resetStore, setStore } from '../src/store/index.ts'
 
@@ -50,8 +50,8 @@ afterAll(() => server?.stop(true))
 function markerOf(text: string): string {
   const table: [string, RegExp][] = [
     ['misexpansion', /unexpanded variable reference/],
-    ['missing-passphrase', /MEMLAWB_PASSPHRASE is not set/],
-    ['unreachable', /cannot reach the memlawb server/],
+    ['missing-passphrase', /OPENRECALL_PASSPHRASE is not set/],
+    ['unreachable', /cannot reach the openrecall server/],
     ['rejected-key', /rejected the service key/],
     ['unauthorized-namespace', /refused namespace/],
     ['undecryptable', /cannot decrypt the existing entries/],
@@ -60,7 +60,7 @@ function markerOf(text: string): string {
     ['invalid-scan-mode', /which is not a scan mode/],
     ['server-refused', /refused the startup read/],
     ['no-answer', /accepted the connection but did not answer/],
-    ['passphrase-file', /MEMLAWB_PASSPHRASE_FILE points at/],
+    ['passphrase-file', /OPENRECALL_PASSPHRASE_FILE points at/],
     ['retaining-scan', /cannot erase what it stores/],
   ]
   const hits = table.filter(([, re]) => re.test(text)).map(([name]) => name)
@@ -86,10 +86,10 @@ describe('AE16: a non-blocking scan against a store that cannot erase', () => {
     setStore(retaining())
     try {
       const r = await preflight({
-        MEMLAWB_URL: url,
-        MEMLAWB_PASSPHRASE: PASSPHRASE,
-        MEMLAWB_NAMESPACE: 'user:ae16',
-        MEMLAWB_SCAN: 'warn',
+        OPENRECALL_URL: url,
+        OPENRECALL_PASSPHRASE: PASSPHRASE,
+        OPENRECALL_NAMESPACE: 'user:ae16',
+        OPENRECALL_SCAN: 'warn',
       })
       expect(r.ready).toBe(false)
       expect(markerOf((r as { diagnostic: string }).diagnostic)).toBe('retaining-scan')
@@ -102,10 +102,10 @@ describe('AE16: a non-blocking scan against a store that cannot erase', () => {
     setStore(retaining())
     try {
       const r = await preflight({
-        MEMLAWB_URL: url,
-        MEMLAWB_PASSPHRASE: PASSPHRASE,
-        MEMLAWB_NAMESPACE: 'user:ae16',
-        MEMLAWB_SCAN: 'off',
+        OPENRECALL_URL: url,
+        OPENRECALL_PASSPHRASE: PASSPHRASE,
+        OPENRECALL_NAMESPACE: 'user:ae16',
+        OPENRECALL_SCAN: 'off',
       })
       expect(markerOf((r as { diagnostic: string }).diagnostic)).toBe('retaining-scan')
     } finally {
@@ -119,10 +119,10 @@ describe('AE16: a non-blocking scan against a store that cannot erase', () => {
     setStore(retaining())
     try {
       const r = await preflight({
-        MEMLAWB_URL: url,
-        MEMLAWB_PASSPHRASE: PASSPHRASE,
-        MEMLAWB_NAMESPACE: 'user:ae16',
-        MEMLAWB_SCAN: 'block',
+        OPENRECALL_URL: url,
+        OPENRECALL_PASSPHRASE: PASSPHRASE,
+        OPENRECALL_NAMESPACE: 'user:ae16',
+        OPENRECALL_SCAN: 'block',
       })
       expect(r.ready).toBe(true)
     } finally {
@@ -134,10 +134,10 @@ describe('AE16: a non-blocking scan against a store that cannot erase', () => {
     // The other control: same mode, only the store's answer differs, so the
     // refusal above cannot be the scan mode on its own.
     const r = await preflight({
-      MEMLAWB_URL: url,
-      MEMLAWB_PASSPHRASE: PASSPHRASE,
-      MEMLAWB_NAMESPACE: 'user:ae16-erasing',
-      MEMLAWB_SCAN: 'warn',
+      OPENRECALL_URL: url,
+      OPENRECALL_PASSPHRASE: PASSPHRASE,
+      OPENRECALL_NAMESPACE: 'user:ae16-erasing',
+      OPENRECALL_SCAN: 'warn',
     })
     expect(r.ready).toBe(true)
   })
@@ -173,9 +173,9 @@ function stub(status: number, body: unknown) {
 }
 
 const envFor = (over: Record<string, string | undefined>) => ({
-  MEMLAWB_URL: url,
-  MEMLAWB_PASSPHRASE: PASSPHRASE,
-  MEMLAWB_NAMESPACE: 'user:me',
+  OPENRECALL_URL: url,
+  OPENRECALL_PASSPHRASE: PASSPHRASE,
+  OPENRECALL_NAMESPACE: 'user:me',
   ...over,
 })
 
@@ -192,7 +192,7 @@ describe('mcp startup preflight', () => {
     const SECRET = 'zzz-passphrase-must-not-appear-zzz'
     const APIKEY = 'zzz-apikey-must-not-appear-zzz'
     const ns = 'user:pf-secrets'
-    await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'hi' })
+    await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'hi' })
     const denier = stub(401, { error: { code: 'unauthorized' } })
     const forbidder = stub(403, { error: { code: 'forbidden' } })
     // The two paths that interpolate a fully server-controlled string into a
@@ -208,15 +208,19 @@ describe('mcp startup preflight', () => {
     )
 
     const cases: Record<string, string | undefined>[] = [
-      { MEMLAWB_PASSPHRASE: `${UNEXPANDED_PREFIX}${SECRET}`, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_PASSPHRASE: undefined, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_URL: 'http://127.0.0.1:1', MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_URL: denier.url, MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_URL: forbidder.url, MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_NAMESPACE: ns, MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_URL: unmapped.url, MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_URL: pullFails.url, MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
-      { MEMLAWB_SCAN: 'blcok', MEMLAWB_PASSPHRASE: SECRET, MEMLAWB_API_KEY: APIKEY },
+      { OPENRECALL_PASSPHRASE: `${UNEXPANDED_PREFIX}${SECRET}`, OPENRECALL_API_KEY: APIKEY },
+      { OPENRECALL_PASSPHRASE: undefined, OPENRECALL_API_KEY: APIKEY },
+      {
+        OPENRECALL_URL: 'http://127.0.0.1:1',
+        OPENRECALL_PASSPHRASE: SECRET,
+        OPENRECALL_API_KEY: APIKEY,
+      },
+      { OPENRECALL_URL: denier.url, OPENRECALL_PASSPHRASE: SECRET, OPENRECALL_API_KEY: APIKEY },
+      { OPENRECALL_URL: forbidder.url, OPENRECALL_PASSPHRASE: SECRET, OPENRECALL_API_KEY: APIKEY },
+      { OPENRECALL_NAMESPACE: ns, OPENRECALL_PASSPHRASE: SECRET, OPENRECALL_API_KEY: APIKEY },
+      { OPENRECALL_URL: unmapped.url, OPENRECALL_PASSPHRASE: SECRET, OPENRECALL_API_KEY: APIKEY },
+      { OPENRECALL_URL: pullFails.url, OPENRECALL_PASSPHRASE: SECRET, OPENRECALL_API_KEY: APIKEY },
+      { OPENRECALL_SCAN: 'blcok', OPENRECALL_PASSPHRASE: SECRET, OPENRECALL_API_KEY: APIKEY },
     ]
     const seen: string[] = []
     const serverRefusals: string[] = []
@@ -256,15 +260,15 @@ describe('mcp startup preflight', () => {
   })
 
   test('a correct configuration against an empty namespace is ready', async () => {
-    const r = await preflight(envFor({ MEMLAWB_NAMESPACE: 'user:pf-empty' }))
+    const r = await preflight(envFor({ OPENRECALL_NAMESPACE: 'user:pf-empty' }))
     expect(r.ready).toBe(true)
     if (r.ready) expect(r.namespace).toBe('user:pf-empty')
   })
 
   test('a correct configuration against a non-empty namespace is ready', async () => {
     const ns = 'user:pf-ready'
-    await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'hello' })
-    const r = await preflight(envFor({ MEMLAWB_NAMESPACE: ns }))
+    await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'hello' })
+    const r = await preflight(envFor({ OPENRECALL_NAMESPACE: ns }))
     expect(r.ready).toBe(true)
   })
 
@@ -273,7 +277,7 @@ describe('mcp startup preflight', () => {
     try {
       const r = await preflight(
         // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal is the fixture.
-        envFor({ MEMLAWB_URL: s.url, MEMLAWB_PASSPHRASE: '${MEMLAWB_PASSPHRASE}' }),
+        envFor({ OPENRECALL_URL: s.url, OPENRECALL_PASSPHRASE: '${OPENRECALL_PASSPHRASE}' }),
       )
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('misexpansion')
@@ -287,7 +291,7 @@ describe('mcp startup preflight', () => {
 
   test('an unexpanded reference in the API key is refused as misexpansion', async () => {
     // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal is the fixture.
-    const r = await preflight(envFor({ MEMLAWB_API_KEY: '${MEMLAWB_API_KEY}' }))
+    const r = await preflight(envFor({ OPENRECALL_API_KEY: '${OPENRECALL_API_KEY}' }))
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('misexpansion')
   })
@@ -302,7 +306,7 @@ describe('mcp startup preflight', () => {
     const s = stub(200, { version: 1, entryChecksums: {} })
     try {
       const r = await preflight(
-        envFor({ MEMLAWB_URL: s.url, MEMLAWB_PASSPHRASE: `${'$'}MEMLAWB_PASSPHRASE` }),
+        envFor({ OPENRECALL_URL: s.url, OPENRECALL_PASSPHRASE: `${'$'}OPENRECALL_PASSPHRASE` }),
       )
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('misexpansion')
@@ -316,7 +320,7 @@ describe('mcp startup preflight', () => {
   })
 
   test('a bare $VAR reference in the API key is refused as misexpansion', async () => {
-    const r = await preflight(envFor({ MEMLAWB_API_KEY: `${'$'}MEMLAWB_API_KEY` }))
+    const r = await preflight(envFor({ OPENRECALL_API_KEY: `${'$'}OPENRECALL_API_KEY` }))
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('misexpansion')
   })
@@ -330,10 +334,10 @@ describe('mcp startup preflight', () => {
     // (src/namespace.ts NAMESPACE_RE) has no `$` in it at all, so no legal
     // namespace can trip either rule.
     const outcomes: string[] = []
-    for (const ns of [`${'$'}MEMLAWB_NAMESPACE`, `${'$'}{MEMLAWB_NAMESPACE}`]) {
+    for (const ns of [`${'$'}OPENRECALL_NAMESPACE`, `${'$'}{OPENRECALL_NAMESPACE}`]) {
       const s = stub(200, { version: 1, entryChecksums: {} })
       try {
-        const r = await preflight(envFor({ MEMLAWB_URL: s.url, MEMLAWB_NAMESPACE: ns }))
+        const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: ns }))
         outcomes.push(
           `${ns} => ${r.ready ? 'ready' : markerOf(r.diagnostic)} hits:${s.hits.length}`,
         )
@@ -342,8 +346,8 @@ describe('mcp startup preflight', () => {
       }
     }
     expect(outcomes).toEqual([
-      `${'$'}MEMLAWB_NAMESPACE => misexpansion hits:0`,
-      `${'$'}{MEMLAWB_NAMESPACE} => misexpansion hits:0`,
+      `${'$'}OPENRECALL_NAMESPACE => misexpansion hits:0`,
+      `${'$'}{OPENRECALL_NAMESPACE} => misexpansion hits:0`,
     ])
   })
 
@@ -357,7 +361,7 @@ describe('mcp startup preflight', () => {
     const D = '$'
     const legit = [
       `${D}Xk9!vQ2m-Zr4tW`, // password-manager output that happens to start with $
-      `${D}MEMLAWB_PASSPHRASE and more`, // the reference is not the whole value
+      `${D}OPENRECALL_PASSPHRASE and more`, // the reference is not the whole value
       `${D}secret`, // lowercase: not the all-caps shape a launcher config uses
       `${D}MixedCaseName`,
       `pa${D}${D}word`,
@@ -370,7 +374,7 @@ describe('mcp startup preflight', () => {
     const outcomes: string[] = []
     for (const passphrase of legit) {
       const r = await preflight(
-        envFor({ MEMLAWB_NAMESPACE: 'user:pf-dollar', MEMLAWB_PASSPHRASE: passphrase }),
+        envFor({ OPENRECALL_NAMESPACE: 'user:pf-dollar', OPENRECALL_PASSPHRASE: passphrase }),
       )
       outcomes.push(`${passphrase} => ${r.ready ? 'ready' : markerOf(r.diagnostic)}`)
     }
@@ -383,7 +387,7 @@ describe('mcp startup preflight', () => {
     const outcomes: string[] = []
     for (const apiKey of legit) {
       const r = await preflight(
-        envFor({ MEMLAWB_NAMESPACE: 'user:pf-dollar-key', MEMLAWB_API_KEY: apiKey }),
+        envFor({ OPENRECALL_NAMESPACE: 'user:pf-dollar-key', OPENRECALL_API_KEY: apiKey }),
       )
       outcomes.push(`${apiKey} => ${r.ready ? 'ready' : markerOf(r.diagnostic)}`)
     }
@@ -397,9 +401,9 @@ describe('mcp startup preflight', () => {
     // wrong when what is wrong is that they never set the variable, and the
     // path in the message is the template text they would then go looking for.
     const r = await preflight({
-      MEMLAWB_URL: url,
+      OPENRECALL_URL: url,
       // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal is the fixture.
-      MEMLAWB_PASSPHRASE_FILE: '${MEMLAWB_PASSPHRASE_FILE}',
+      OPENRECALL_PASSPHRASE_FILE: '${OPENRECALL_PASSPHRASE_FILE}',
     })
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('misexpansion')
@@ -407,7 +411,10 @@ describe('mcp startup preflight', () => {
     // Control: a real path that simply is not there still reads as a path
     // problem, so this distinguishes the two rather than calling every failure
     // a misexpansion.
-    const real = await preflight({ MEMLAWB_URL: url, MEMLAWB_PASSPHRASE_FILE: '/nope/passphrase' })
+    const real = await preflight({
+      OPENRECALL_URL: url,
+      OPENRECALL_PASSPHRASE_FILE: '/nope/passphrase',
+    })
     expect(markerOf(real.ready ? '' : real.diagnostic)).toBe('passphrase-file')
   })
 
@@ -416,17 +423,17 @@ describe('mcp startup preflight', () => {
     // stdio child it runs, so a passphrase exported for one server is readable
     // by all of them. A path is not: it is useless without read access to the
     // file, and a file can be locked down where an environment cannot.
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-pf-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-pf-'))
     const file = join(dir, 'passphrase')
     writeFileSync(file, `${PASSPHRASE}\n`, { mode: 0o600 })
     try {
       const ns = 'user:pf-from-file'
-      await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
+      await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
 
       const r = await preflight({
-        MEMLAWB_URL: url,
-        MEMLAWB_NAMESPACE: ns,
-        MEMLAWB_PASSPHRASE_FILE: file,
+        OPENRECALL_URL: url,
+        OPENRECALL_NAMESPACE: ns,
+        OPENRECALL_PASSPHRASE_FILE: file,
       })
       expect(r.ready).toBe(true)
 
@@ -439,17 +446,20 @@ describe('mcp startup preflight', () => {
   })
 
   test('a passphrase file that is missing or empty is refused, naming the file', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-pf-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-pf-'))
     const empty = join(dir, 'empty')
     writeFileSync(empty, '   \n')
     try {
-      const gone = await preflight({ MEMLAWB_URL: url, MEMLAWB_PASSPHRASE_FILE: join(dir, 'nope') })
+      const gone = await preflight({
+        OPENRECALL_URL: url,
+        OPENRECALL_PASSPHRASE_FILE: join(dir, 'nope'),
+      })
       expect(gone.ready).toBe(false)
       const goneText = gone.ready ? '' : gone.diagnostic
       expect(markerOf(goneText)).toBe('passphrase-file')
       expect(goneText).toContain('nope')
 
-      const blank = await preflight({ MEMLAWB_URL: url, MEMLAWB_PASSPHRASE_FILE: empty })
+      const blank = await preflight({ OPENRECALL_URL: url, OPENRECALL_PASSPHRASE_FILE: empty })
       expect(blank.ready).toBe(false)
       const blankText = blank.ready ? '' : blank.diagnostic
       expect(markerOf(blankText)).toBe('passphrase-file')
@@ -470,17 +480,17 @@ describe('mcp startup preflight', () => {
     // If both are set the file is the deliberate one: someone who moved the
     // secret out of the environment should not be silently overridden by a
     // leftover export of the old value.
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-pf-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-pf-'))
     const file = join(dir, 'passphrase')
     writeFileSync(file, PASSPHRASE)
     try {
       const ns = 'user:pf-precedence'
-      await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
+      await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
       const r = await preflight({
-        MEMLAWB_URL: url,
-        MEMLAWB_NAMESPACE: ns,
-        MEMLAWB_PASSPHRASE: 'the stale export',
-        MEMLAWB_PASSPHRASE_FILE: file,
+        OPENRECALL_URL: url,
+        OPENRECALL_NAMESPACE: ns,
+        OPENRECALL_PASSPHRASE: 'the stale export',
+        OPENRECALL_PASSPHRASE_FILE: file,
       })
       expect(r.ready).toBe(true)
       if (r.ready) expect(await r.client.entry(ns, 'a.md')).toBe('stored')
@@ -490,18 +500,18 @@ describe('mcp startup preflight', () => {
   })
 
   test('the passphrase read from a file never appears in a diagnostic', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-pf-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-pf-'))
     const file = join(dir, 'passphrase')
     const SECRET = 'zzz-file-passphrase-must-not-appear-zzz'
     writeFileSync(file, SECRET)
     try {
       // A namespace written under a different key, so the read refuses.
       const ns = 'user:pf-leak'
-      await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
+      await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
       const r = await preflight({
-        MEMLAWB_URL: url,
-        MEMLAWB_NAMESPACE: ns,
-        MEMLAWB_PASSPHRASE_FILE: file,
+        OPENRECALL_URL: url,
+        OPENRECALL_NAMESPACE: ns,
+        OPENRECALL_PASSPHRASE_FILE: file,
       })
       expect(r.ready).toBe(false)
       const d = r.ready ? '' : r.diagnostic
@@ -515,7 +525,7 @@ describe('mcp startup preflight', () => {
   })
 
   test('a missing passphrase is refused as missing, not as misexpansion', async () => {
-    const r = await preflight(envFor({ MEMLAWB_PASSPHRASE: '   ' }))
+    const r = await preflight(envFor({ OPENRECALL_PASSPHRASE: '   ' }))
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('missing-passphrase')
   })
@@ -524,7 +534,7 @@ describe('mcp startup preflight', () => {
     const dead = Bun.serve({ port: 0, fetch: () => new Response('') })
     const deadUrl = `http://localhost:${dead.port}`
     dead.stop(true)
-    const r = await preflight(envFor({ MEMLAWB_URL: deadUrl }))
+    const r = await preflight(envFor({ OPENRECALL_URL: deadUrl }))
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('unreachable')
   })
@@ -532,7 +542,7 @@ describe('mcp startup preflight', () => {
   test('a 401 is refused as a rejected key and never as an empty namespace', async () => {
     const s = stub(401, { error: { code: 'unauthorized' } })
     try {
-      const r = await preflight(envFor({ MEMLAWB_URL: s.url, MEMLAWB_API_KEY: 'nope' }))
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_API_KEY: 'nope' }))
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('rejected-key')
       expect(s.hits.length).toBeGreaterThan(0)
@@ -545,7 +555,7 @@ describe('mcp startup preflight', () => {
     const s = stub(403, { error: { code: 'forbidden' } })
     try {
       const r = await preflight(
-        envFor({ MEMLAWB_URL: s.url, MEMLAWB_NAMESPACE: 'user:someone-else' }),
+        envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: 'user:someone-else' }),
       )
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('unauthorized-namespace')
@@ -556,16 +566,16 @@ describe('mcp startup preflight', () => {
 
   test('a wrong passphrase is refused, and the namespace stays readable', async () => {
     const ns = 'user:pf-mixed'
-    const good = new MemlawbClient({ url, passphrase: PASSPHRASE })
+    const good = new OpenRecallClient({ url, passphrase: PASSPHRASE })
     await good.push(ns, { 'note.md': 'the original plaintext' })
 
-    const r = await preflight(envFor({ MEMLAWB_NAMESPACE: ns, MEMLAWB_PASSPHRASE: WRONG }))
+    const r = await preflight(envFor({ OPENRECALL_NAMESPACE: ns, OPENRECALL_PASSPHRASE: WRONG }))
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('undecryptable')
 
     // The half that matters. A preflight that refused AND wrote would pass the
     // assertion above and still produce the mixed-key namespace R25 describes.
-    const back = await new MemlawbClient({ url, passphrase: PASSPHRASE }).pull(ns)
+    const back = await new OpenRecallClient({ url, passphrase: PASSPHRASE }).pull(ns)
     expect(back.entries).toEqual({ 'note.md': 'the original plaintext' })
   })
 
@@ -573,7 +583,7 @@ describe('mcp startup preflight', () => {
     // Nothing exists to authenticate against, so no check can tell a wrong
     // passphrase from a first-run one. Starting is the right answer.
     const r = await preflight(
-      envFor({ MEMLAWB_NAMESPACE: 'user:pf-empty-wrong', MEMLAWB_PASSPHRASE: WRONG }),
+      envFor({ OPENRECALL_NAMESPACE: 'user:pf-empty-wrong', OPENRECALL_PASSPHRASE: WRONG }),
     )
     expect(r.ready).toBe(true)
   })
@@ -590,7 +600,7 @@ describe('mcp startup preflight', () => {
         : json(503, { error: { code: 'entry_unreadable', message: 'blob gone' } }),
     )
     try {
-      const r = await preflight(envFor({ MEMLAWB_URL: s.url, MEMLAWB_PASSPHRASE: WRONG }))
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_PASSPHRASE: WRONG }))
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('unservable')
     } finally {
@@ -606,7 +616,7 @@ describe('mcp startup preflight', () => {
     const ns = 'user:pf-bounded'
     const entries: Record<string, string> = {}
     for (let i = 0; i < 4; i++) entries[`e${i}.md`] = `body ${i}`
-    await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, entries)
+    await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, entries)
 
     const seen: string[] = []
     const s = routeStub(req => {
@@ -615,7 +625,7 @@ describe('mcp startup preflight', () => {
       return fetch(`${url}${u.pathname}${u.search}`)
     })
     try {
-      const r = await preflight(envFor({ MEMLAWB_URL: s.url, MEMLAWB_NAMESPACE: ns }))
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: ns }))
       expect(r.ready).toBe(true)
       // Two bodyless hashes views: one to list the namespace for the proof, one
       // for the precondition advertisement. Never the full read.
@@ -648,7 +658,7 @@ describe('mcp startup preflight', () => {
       return json(503, { error: { code: 'entry_unreadable', message: 'blob gone' } })
     })
     try {
-      const r = await preflight(envFor({ MEMLAWB_URL: s.url }))
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url }))
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('unservable')
       // The load-bearing half: bounded, not twenty.
@@ -678,10 +688,10 @@ describe('mcp startup preflight', () => {
       return fetch(`${url}${u.pathname}${u.search}`)
     })
     try {
-      const real = new MemlawbClient({ url, passphrase: PASSPHRASE })
+      const real = new OpenRecallClient({ url, passphrase: PASSPHRASE })
       await real.push('user:pf-drift-first', { 'b.md': 'readable' })
       const r = await preflight(
-        envFor({ MEMLAWB_URL: s.url, MEMLAWB_NAMESPACE: 'user:pf-drift-first' }),
+        envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: 'user:pf-drift-first' }),
       )
       expect(r.ready).toBe(true)
       expect(r.ready ? r.warnings.some(w => w.includes('a.md')) : false).toBe(true)
@@ -698,7 +708,7 @@ describe('mcp startup preflight', () => {
     const s = Bun.serve({ port: 0, idleTimeout: 0, fetch: () => new Promise(() => {}) })
     try {
       const r = await preflight(
-        envFor({ MEMLAWB_URL: `http://localhost:${s.port}`, MEMLAWB_TIMEOUT_MS: '250' }),
+        envFor({ OPENRECALL_URL: `http://localhost:${s.port}`, OPENRECALL_TIMEOUT_MS: '250' }),
       )
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('no-answer')
@@ -718,10 +728,10 @@ describe('mcp startup preflight', () => {
     const s = stub(200, { version: 1, entryChecksums: {}, supports: [] })
     try {
       const key = await preflight(
-        envFor({ MEMLAWB_URL: s.url, MEMLAWB_API_KEY: `${UNEXPANDED_PREFIX}KEY` }),
+        envFor({ OPENRECALL_URL: s.url, OPENRECALL_API_KEY: `${UNEXPANDED_PREFIX}KEY` }),
       )
       const pass = await preflight(
-        envFor({ MEMLAWB_URL: s.url, MEMLAWB_PASSPHRASE: `${UNEXPANDED_PREFIX}PASS` }),
+        envFor({ OPENRECALL_URL: s.url, OPENRECALL_PASSPHRASE: `${UNEXPANDED_PREFIX}PASS` }),
       )
       expect(key.ready).toBe(false)
       expect(pass.ready).toBe(false)
@@ -736,12 +746,12 @@ describe('mcp startup preflight', () => {
     }
   })
 
-  test('an unrecognized MEMLAWB_SCAN is refused, and the three real modes are not', async () => {
+  test('an unrecognized OPENRECALL_SCAN is refused, and the three real modes are not', async () => {
     // The value used to be cast straight to ScanMode, so `blcok` built a client
     // whose scanner was in no mode at all and quietly stopped blocking live
     // credentials. Nothing downstream would ever have said so.
     const bad = await preflight(
-      envFor({ MEMLAWB_NAMESPACE: 'user:pf-scan', MEMLAWB_SCAN: 'blcok' }),
+      envFor({ OPENRECALL_NAMESPACE: 'user:pf-scan', OPENRECALL_SCAN: 'blcok' }),
     )
     expect(bad.ready).toBe(false)
     expect(markerOf(bad.ready ? '' : bad.diagnostic)).toBe('invalid-scan-mode')
@@ -750,7 +760,9 @@ describe('mcp startup preflight', () => {
     // the assertion above on its own.
     const accepted: string[] = []
     for (const mode of ['block', 'warn', 'off', undefined]) {
-      const r = await preflight(envFor({ MEMLAWB_NAMESPACE: 'user:pf-scan', MEMLAWB_SCAN: mode }))
+      const r = await preflight(
+        envFor({ OPENRECALL_NAMESPACE: 'user:pf-scan', OPENRECALL_SCAN: mode }),
+      )
       accepted.push(`${mode}:${r.ready}`)
     }
     expect(accepted).toEqual(['block:true', 'warn:true', 'off:true', 'undefined:true'])
@@ -762,12 +774,12 @@ describe('mcp startup preflight', () => {
     // mode only an explicit setting can produce, so this fails if the wiring is
     // dropped. AKIA... is the aws-access-key-id rule's shape.
     const leak = { 'k.md': 'AKIAIOSFODNN7EXAMPLE is the key' }
-    const blocking = await preflight(envFor({ MEMLAWB_NAMESPACE: 'user:pf-scan-block' }))
+    const blocking = await preflight(envFor({ OPENRECALL_NAMESPACE: 'user:pf-scan-block' }))
     if (!blocking.ready) throw new Error(blocking.diagnostic)
     await expect(blocking.client.push('user:pf-scan-block', leak)).rejects.toThrow()
 
     const off = await preflight(
-      envFor({ MEMLAWB_NAMESPACE: 'user:pf-scan-off', MEMLAWB_SCAN: 'off' }),
+      envFor({ OPENRECALL_NAMESPACE: 'user:pf-scan-off', OPENRECALL_SCAN: 'off' }),
     )
     if (!off.ready) throw new Error(off.diagnostic)
     await off.client.push('user:pf-scan-off', leak)
@@ -780,7 +792,7 @@ describe('mcp startup preflight', () => {
     // no caller anywhere, so nobody was ever told.
     const s = routeStub(() => json(200, { version: 0, entryChecksums: {}, supports: [] }))
     try {
-      const old = await preflight(envFor({ MEMLAWB_URL: s.url }))
+      const old = await preflight(envFor({ OPENRECALL_URL: s.url }))
       expect(old.ready).toBe(true)
       expect(old.ready ? old.warnings.map(w => w.includes('write precondition')) : []).toEqual([
         true,
@@ -790,7 +802,7 @@ describe('mcp startup preflight', () => {
     }
     // The other state, so this cannot pass by warning unconditionally: the real
     // server advertises the precondition and must draw no warning at all.
-    const current = await preflight(envFor({ MEMLAWB_NAMESPACE: 'user:pf-empty' }))
+    const current = await preflight(envFor({ OPENRECALL_NAMESPACE: 'user:pf-empty' }))
     expect(current.ready ? current.warnings : ['not ready']).toEqual([])
   })
 
@@ -798,14 +810,14 @@ describe('mcp startup preflight', () => {
     // The undecryptable diagnostic names the entry that failed, which is useful
     // and is also text the server chose. Diagnostics land in a launcher's log,
     // where a newline plus an ANSI escape is a forged log line.
-    const nasty = 'a.md\n\u001b[31m[memlawb mcp] ready'
+    const nasty = 'a.md\n\u001b[31m[openrecall mcp] ready'
     const s = routeStub(req =>
       new URL(req.url).search.includes('view=hashes')
         ? json(200, { version: 1, entryChecksums: { [nasty]: 'deadbeef' }, supports: [] })
         : json(200, { version: 1, key: nasty, entry: 'AAAAAAAAAAAAAAAAAAAA' }),
     )
     try {
-      const r = await preflight(envFor({ MEMLAWB_URL: s.url }))
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url }))
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('undecryptable')
       const d = r.ready ? '' : r.diagnostic
       // Positive control first: the key really is in there, so the two absence
@@ -821,17 +833,17 @@ describe('mcp startup preflight', () => {
   test('a malformed read body is refused as a read failure, never as a wrong passphrase', async () => {
     // A truncated body, a socket dropped mid-transfer and a wrong key all
     // arrived here as one bare Error, so all three told the operator to change
-    // MEMLAWB_PASSPHRASE. Following that advice after a transient failure is
+    // OPENRECALL_PASSPHRASE. Following that advice after a transient failure is
     // exactly how the mixed-key namespace this file prevents gets created.
     // `content` missing makes `pull` throw a TypeError, which is not a
-    // MemlawbDecryptError and must not be reported as one.
+    // OpenRecallDecryptError and must not be reported as one.
     const s = routeStub(req =>
       new URL(req.url).search.includes('view=hashes')
         ? json(200, { version: 1, entryChecksums: { 'note.md': 'deadbeef' }, supports: [] })
         : json(200, { version: 1 }),
     )
     try {
-      const r = await preflight(envFor({ MEMLAWB_URL: s.url }))
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url }))
       expect(r.ready).toBe(false)
       expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('read-failed')
       // The specific harm, spelled out: this diagnostic must not send the
@@ -848,7 +860,7 @@ describe('mcp startup preflight', () => {
  * live child, so the caller can assert on stdout and then kill it.
  */
 async function launchUntilReady(env: Record<string, string>, timeoutMs = 20000) {
-  const run = Bun.spawn(['bun', 'run', 'bin/memlawb.ts', 'mcp'], {
+  const run = Bun.spawn(['bun', 'run', 'bin/openrecall.ts', 'mcp'], {
     cwd: new URL('..', import.meta.url).pathname,
     env: { ...process.env, ...env },
     // Kept open on purpose: this is the MCP protocol channel, and a closed
@@ -861,7 +873,7 @@ async function launchUntilReady(env: Record<string, string>, timeoutMs = 20000) 
   const dec = new TextDecoder()
   let err = ''
   const untilReady = (async () => {
-    while (!err.includes('[memlawb mcp] ready')) {
+    while (!err.includes('[openrecall mcp] ready')) {
       const { value, done } = await reader.read()
       if (done) return
       err += dec.decode(value, { stream: true })
@@ -886,11 +898,11 @@ describe('mcp stdio launch', () => {
     expect(await new Response(canary.stdout).text()).toContain('canary')
 
     const { run, err } = await launchUntilReady({
-      MEMLAWB_URL: url,
-      MEMLAWB_NAMESPACE: 'user:pf-launch',
-      MEMLAWB_PASSPHRASE: PASSPHRASE,
+      OPENRECALL_URL: url,
+      OPENRECALL_NAMESPACE: 'user:pf-launch',
+      OPENRECALL_PASSPHRASE: PASSPHRASE,
     })
-    expect(err).toContain('[memlawb mcp] ready')
+    expect(err).toContain('[openrecall mcp] ready')
     // Against the current server there is nothing to warn about, so the
     // warning line must be absent here as well as present in the test below.
     expect(err).not.toContain('write precondition')
@@ -905,12 +917,12 @@ describe('mcp stdio launch', () => {
     const s = routeStub(() => json(200, { version: 0, entryChecksums: {}, supports: [] }))
     try {
       const { run, err } = await launchUntilReady({
-        MEMLAWB_URL: s.url,
-        MEMLAWB_NAMESPACE: 'user:pf-launch-old',
-        MEMLAWB_PASSPHRASE: PASSPHRASE,
+        OPENRECALL_URL: s.url,
+        OPENRECALL_NAMESPACE: 'user:pf-launch-old',
+        OPENRECALL_PASSPHRASE: PASSPHRASE,
       })
       expect(err).toContain('does not enforce the write precondition')
-      expect(err).toContain('[memlawb mcp] ready')
+      expect(err).toContain('[openrecall mcp] ready')
       run.kill()
       expect(await new Response(run.stdout).text()).toBe('')
       await run.exited
@@ -921,7 +933,7 @@ describe('mcp stdio launch', () => {
 
   test('a wrong passphrase exits non-zero with nothing on stdout', async () => {
     const ns = 'user:pf-stdio'
-    await new MemlawbClient({ url, passphrase: PASSPHRASE }).push(ns, { 'x.md': 'body' })
+    await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'x.md': 'body' })
 
     // Prove the capture can see stdout at all. Without this an empty capture
     // and a broken capture are indistinguishable.
@@ -930,13 +942,13 @@ describe('mcp stdio launch', () => {
 
     // Spawned asynchronously on purpose: the child talks to the Bun.serve above,
     // which runs on THIS event loop, so a synchronous spawn deadlocks.
-    const run = Bun.spawn(['bun', 'run', 'bin/memlawb.ts', 'mcp'], {
+    const run = Bun.spawn(['bun', 'run', 'bin/openrecall.ts', 'mcp'], {
       cwd: new URL('..', import.meta.url).pathname,
       env: {
         ...process.env,
-        MEMLAWB_URL: url,
-        MEMLAWB_NAMESPACE: ns,
-        MEMLAWB_PASSPHRASE: WRONG,
+        OPENRECALL_URL: url,
+        OPENRECALL_NAMESPACE: ns,
+        OPENRECALL_PASSPHRASE: WRONG,
       },
       stdin: 'ignore',
       stdout: 'pipe',

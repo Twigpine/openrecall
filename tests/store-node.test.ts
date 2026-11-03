@@ -1,8 +1,8 @@
 /**
  * The node store driver against a real gitlawb node.
  *
- * Everything that needs a node is opt-in: set MEMLAWB_NODE_TEST_URL and
- * MEMLAWB_NODE_TEST_IDENTITY and the live block runs, otherwise it is skipped so
+ * Everything that needs a node is opt-in: set OPENRECALL_NODE_TEST_URL and
+ * OPENRECALL_NODE_TEST_IDENTITY and the live block runs, otherwise it is skipped so
  * CI without a node stays green. A skipped suite proves nothing, so the skip is
  * loud (a banner on stderr) and the live block ends by asserting the node was
  * really reached: every live test drives its traffic through a local TCP proxy
@@ -58,7 +58,7 @@ describe('store factory driver selection', () => {
 
 describe('the subprocess environment', () => {
   test('carries only the node target and the identity path, never the store secret', async () => {
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-node-env-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-node-env-'))
     const dump = join(dir, 'env.txt')
     // A stand-in for gl that records what it was handed and answers "absent",
     // so a read completes without a node.
@@ -109,17 +109,17 @@ describe('the subprocess environment', () => {
 
 // ── Live harness ────────────────────────────────────────────────────────────
 
-const NODE_URL = process.env.MEMLAWB_NODE_TEST_URL?.trim()
-const IDENTITY = process.env.MEMLAWB_NODE_TEST_IDENTITY?.trim()
+const NODE_URL = process.env.OPENRECALL_NODE_TEST_URL?.trim()
+const IDENTITY = process.env.OPENRECALL_NODE_TEST_IDENTITY?.trim()
 const live = Boolean(NODE_URL && IDENTITY)
 if (!live) {
   console.warn(
     '\n!! tests/store-node.test.ts: the node driver suite did NOT run.\n' +
-      '!! Set MEMLAWB_NODE_TEST_URL and MEMLAWB_NODE_TEST_IDENTITY to run it.\n',
+      '!! Set OPENRECALL_NODE_TEST_URL and OPENRECALL_NODE_TEST_IDENTITY to run it.\n',
   )
 }
-if (process.env.MEMLAWB_NODE_TEST_BIN) {
-  process.env.PATH = `${process.env.MEMLAWB_NODE_TEST_BIN}:${process.env.PATH ?? ''}`
+if (process.env.OPENRECALL_NODE_TEST_BIN) {
+  process.env.PATH = `${process.env.OPENRECALL_NODE_TEST_BIN}:${process.env.PATH ?? ''}`
 }
 
 /**
@@ -279,7 +279,7 @@ const IDENTITY_DIR = IDENTITY ? dirname(IDENTITY) : ''
 
 /** Clone one repo fresh into a scratch dir and hand back the path. */
 async function cloneFresh(repo: string): Promise<string> {
-  const dir = mkdtempSync(join(tmpdir(), 'memlawb-node-peek-'))
+  const dir = mkdtempSync(join(tmpdir(), 'openrecall-node-peek-'))
   workdirs.push(dir)
   const env = { GITLAWB_NODE: NODE_URL ?? '', GITLAWB_KEY: IDENTITY ?? '' }
   const c = await run(
@@ -389,7 +389,7 @@ function surfaces(repo: string, path: string): { name: string; url: string }[] {
  *  the node rather than from the driver's own clone is what makes "the push
  *  landed" different from "the driver thinks it landed". */
 async function remoteCommits(repo: string): Promise<number> {
-  const dir = mkdtempSync(join(tmpdir(), 'memlawb-node-count-'))
+  const dir = mkdtempSync(join(tmpdir(), 'openrecall-node-count-'))
   workdirs.push(dir)
   const url = `gitlawb://${OWNER_DID}/${repo}`
   const env = { GITLAWB_NODE: NODE_URL ?? '', GITLAWB_KEY: IDENTITY ?? '' }
@@ -409,11 +409,11 @@ async function repoVisibility(repo: string): Promise<'absent' | 'public' | 'priv
 /** Repo names are keyed, so a fixed secret is what makes a run reuse repos.
  *  The node rate-limits repo creation, so every live test names its repos from
  *  this one secret rather than a fresh one per run. */
-const LIVE_SECRET = 'memlawb-u19-live'
+const LIVE_SECRET = 'openrecall-u19-live'
 /** Two repos that already exist on the node, deliberately public. */
-const PUBLIC_NS_SECRET = 'memlawb-u19-public-control'
+const PUBLIC_NS_SECRET = 'openrecall-u19-public-control'
 const PUBLIC_NS = 'user:ae5public'
-const PUBLIC_META_SECRET = 'memlawb-u19-meta-public-control'
+const PUBLIC_META_SECRET = 'openrecall-u19-meta-public-control'
 
 let proxy: Proxy
 const workdirs: string[] = []
@@ -429,7 +429,7 @@ function secondClone(store: NodeBlobStore, repo: string): string {
 }
 
 function newDriver(secret = LIVE_SECRET): NodeBlobStore {
-  const workdir = mkdtempSync(join(tmpdir(), 'memlawb-node-'))
+  const workdir = mkdtempSync(join(tmpdir(), 'openrecall-node-'))
   workdirs.push(workdir)
   return new NodeBlobStore(
     { secret, identityPath: IDENTITY as string, url: proxy.url, acknowledged: true },
@@ -759,7 +759,7 @@ describe.skipIf(!live)('node driver against a real node', () => {
     // AE11's control, and the reason its other half cannot run here: a repo is
     // owned by a DID, so a rotated identity does not merely lose push rights,
     // it cannot see the repo at all. Rotation on this node means relocation.
-    const dir = mkdtempSync(join(tmpdir(), 'memlawb-node-id2-'))
+    const dir = mkdtempSync(join(tmpdir(), 'openrecall-node-id2-'))
     workdirs.push(dir)
     const made = await run(['gl', 'identity', 'new', '--dir', dir])
     expect(made.code).toBe(0)
@@ -786,7 +786,7 @@ describe.skipIf(!live)('node driver against a real node', () => {
     const slug = namespaceSlug('user:u19a')
     const repo = createNodeNaming(LIVE_SECRET).repoName(slug)
 
-    const other = mkdtempSync(join(tmpdir(), 'memlawb-node-id3-'))
+    const other = mkdtempSync(join(tmpdir(), 'openrecall-node-id3-'))
     workdirs.push(other)
     expect((await run(['gl', 'identity', 'new', '--dir', other])).code).toBe(0)
     const otherKey = join(other, 'identity.pem')
@@ -801,7 +801,7 @@ describe.skipIf(!live)('node driver against a real node', () => {
     // Same store secret, different identity: same repo and same entry leaf.
     const rotated = new NodeBlobStore(
       { secret: LIVE_SECRET, identityPath: otherKey, url: proxy.url, acknowledged: true },
-      { workdir: mkdtempSync(join(tmpdir(), 'memlawb-node-rot-')) },
+      { workdir: mkdtempSync(join(tmpdir(), 'openrecall-node-rot-')) },
     )
     expect(createNodeNaming(LIVE_SECRET).repoName(slug)).toBe(repo)
     const leaf = createNodeNaming(LIVE_SECRET).entryLeaf(slug, sha256Hex('rotate-probe'))

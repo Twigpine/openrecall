@@ -8,7 +8,7 @@ import {
 
 describe('namespace validation', () => {
   test('accepts valid namespaces', () => {
-    for (const ns of ['user:alice', 'repo:gitlawb/node', 'agent:intern', 'user:9f3a-bc']) {
+    for (const ns of ['user:alice', 'repo:twigpine/openrecall', 'agent:intern', 'user:9f3a-bc']) {
       expect(validateNamespace(ns)).toBe(ns)
     }
   })

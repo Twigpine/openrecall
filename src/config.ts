@@ -61,8 +61,8 @@ export const config = {
 
   auth: {
     allowUnauthenticated: envBool('ALLOW_UNAUTHENTICATED', false),
-    supabaseUrl: (process.env.MEMLAWB_SUPABASE_URL ?? '').trim().replace(/\/$/, ''),
-    supabaseSecretKey: (process.env.MEMLAWB_SUPABASE_SECRET_KEY ?? '').trim(),
+    supabaseUrl: (process.env.OPENRECALL_SUPABASE_URL ?? '').trim().replace(/\/$/, ''),
+    supabaseSecretKey: (process.env.OPENRECALL_SUPABASE_SECRET_KEY ?? '').trim(),
     // "owner:key" comma-separated pairs for self-host without Supabase.
     staticApiKeys: (process.env.STATIC_API_KEYS ?? '').trim(),
   },

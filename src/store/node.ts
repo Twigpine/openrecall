@@ -3,13 +3,13 @@
  *
  * The driver's job is not only to move bytes. A public repo on this node is
  * pinned to public IPFS and its slug and owner DID are anchored to Arweave, and
- * neither can be retracted, so every repo memlawb writes must be private and has
+ * neither can be retracted, so every repo openrecall writes must be private and has
  * to be *proved* private rather than assumed. The node's create-repo request
  * defaults to public, so private is a value sent explicitly, and the record is
  * re-read before every push and not only at first use: a repo flipped public
  * mid-process would otherwise publish on the next write (KTD8).
  *
- * Reads come from a local clone, which is authoritative because memlawb is the
+ * Reads come from a local clone, which is authoritative because openrecall is the
  * only writer under its identity and runs one instance. A write stages, commits
  * and pushes; if the push fails the commit stays in the clone, so the next write
  * pushes both and nothing is lost to a node outage.
@@ -57,7 +57,7 @@ type Visibility = 'absent' | 'public' | 'private'
 const INDEX_FILE = 'paths.idx'
 
 /** Author on every commit. Fixed, because commit metadata reaches the node. */
-const COMMIT_AUTHOR = ['-c', 'user.name=memlawb', '-c', 'user.email=memlawb@invalid']
+const COMMIT_AUTHOR = ['-c', 'user.name=openrecall', '-c', 'user.email=openrecall@invalid']
 
 /** Every commit says the same thing: a message could carry a namespace. */
 const COMMIT_MESSAGE = 'update'
@@ -283,7 +283,7 @@ export class NodeBlobStore implements BlobStore {
 
   private async root(): Promise<string> {
     if (this.workdir) return this.workdir
-    this.workdir = this.workdirOption ?? (await mkdtemp(join(tmpdir(), 'memlawb-node-')))
+    this.workdir = this.workdirOption ?? (await mkdtemp(join(tmpdir(), 'openrecall-node-')))
     await mkdir(this.workdir, { recursive: true })
     return this.workdir
   }

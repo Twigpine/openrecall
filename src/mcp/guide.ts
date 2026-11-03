@@ -1,89 +1,45 @@
 /**
- * Loads the memory-usage guidance that the MCP server exposes (as the
- * `memory_guide` prompt and a short form in the server `instructions`).
+ * The memory-usage guidance the MCP server exposes (as the `memory_guide`
+ * prompt and a short form in the server `instructions`), and that `openrecall
+ * setup` installs as a skill for agents that support skills.
  *
- * The canonical text lives in skills/memlawb-memory/SKILL.md so there's ONE
- * source of truth shared by the Claude Code skill and provider-neutral MCP
- * clients. We read that file's body (frontmatter stripped) at startup; if it
- * isn't present (e.g. an unusual package layout), we fall back to a compact
- * inline version so the prompt is never empty.
+ * The canonical text lives in skills/openrecall-memory/SKILL.md so there's ONE
+ * source of truth shared by every agent. It is imported as text, so the
+ * bundler inlines it and the guide works from any install layout (repo
+ * checkout, npm/npx, or the single-file dist build).
  */
 
-import { readFileSync } from 'node:fs'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
+import skillMarkdown from '../../skills/openrecall-memory/SKILL.md' with { type: 'text' }
 
-/**
- * Served only when SKILL.md can't be read. Exported so tests can prove the
- * loaded guide is the FILE and not this: the routing rule lives in both, so
- * every rule assertion would pass on the fallback and a broken path
- * resolution would ship unnoticed without that control. The wording here is
- * deliberately not SKILL.md's, so the markers that control depends on stay
- * absent from this text.
- */
-export const FALLBACK = `# memlawb memory
+/** The SKILL.md file exactly as shipped, frontmatter included. */
+export const SKILL_MARKDOWN: string = skillMarkdown
 
-You have durable, end-to-end-encrypted memory via the memlawb MCP tools.
-
-- **Recall first.** At the start of a task, call \`memory_recall\` with a
-  description of what you're doing before asking the user things they may have
-  already told you. Act on what comes back; don't announce it.
-- **Save what's durable.** When you learn a stable, reusable fact — a user
-  preference, a project decision, a convention, or feedback on how to work —
-  persist it with \`memory_save\`. Skip transient context and anything obvious
-  from the repo. Never save secrets.
-- **Maintain it.** Search before adding to avoid duplicates; update or
-  \`memory_delete\` facts that are wrong or stale; keep a \`MEMORY.md\` index.
-- **Route by what the fact is.** memlawb takes durable facts that must survive
-  across machines, the host agent's local memdir keeps the session log, and
-  repo-shared facts belong in team memory. If a fact fits two, ask who needs
-  it: you on every machine, this session only, or everyone on the repository.
-
-- **Deleting is not always erasing.** Not every deployment can erase what it
-  has stored. memory_delete says so in its response when earlier copies remain,
-  so read it before telling someone their data is gone.
-
-Tools: memory_save(key, content) · memory_recall(query, limit?) ·
-memory_search(query) · memory_list() · memory_delete(key).`
-
-/**
- * Build-time slot for SKILL.md's body. `scripts/build.ts` rewrites this exact
- * literal while bundling the CLI, and fails the build if it cannot find it.
- *
- * The read below walks two directories up from this module, which is correct
- * for src/mcp/ in the repo and wrong for the bundle in dist/. Without the slot
- * the built MCP server would quietly serve FALLBACK instead of the real guide,
- * and no test that only reads source would notice. Empty from source, where
- * the repo layout is intact and the read is the real path.
- */
-const INLINED_GUIDE = ''
+/** Directory name the skill installs under in an agent's skills dir. */
+export const SKILL_NAME = 'openrecall-memory'
 
 function stripFrontmatter(md: string): string {
   const m = /^---\r?\n[\s\S]*?\r?\n---\r?\n/.exec(md)
   return m ? md.slice(m[0].length).trimStart() : md
 }
 
-/** The full memory-usage guide (SKILL.md body, or the inline fallback). */
+/** The full memory-usage guide: the SKILL.md body without its frontmatter. */
 export function loadMemoryGuide(): string {
-  if (INLINED_GUIDE.length > 0) return INLINED_GUIDE
-  try {
-    const here = dirname(fileURLToPath(import.meta.url)) // src/mcp
-    const skillPath = join(here, '..', '..', 'skills', 'memlawb-memory', 'SKILL.md')
-    const body = stripFrontmatter(readFileSync(skillPath, 'utf8')).trim()
-    return body.length > 0 ? body : FALLBACK
-  } catch {
-    return FALLBACK
-  }
+  return stripFrontmatter(SKILL_MARKDOWN).trim()
 }
 
 /** One-paragraph version embedded in the MCP server `instructions`. */
 export const SHORT_INSTRUCTIONS =
-  'You have durable, end-to-end-encrypted memory via these tools. At the start ' +
-  'of a task, call memory_recall to retrieve what you already know about this ' +
+  'You have durable, end-to-end-encrypted memory via these tools. For a project task, ' +
+  'call memory_projects to find its existing ID, then memory_project with a stable ' +
+  'ID such as github.com/owner/repo. Recall from the returned shared and project ' +
+  'namespaces together using memory_recall(namespaces: [...]). Save project facts ' +
+  'in the project namespace and user preferences in the shared namespace; opening ' +
+  'a project does not change tool defaults. At the start of any task, call memory_recall ' +
+  'to retrieve what you already know about this ' +
   'user and project before asking them to repeat it. When you learn a stable ' +
   'fact (a preference, a project decision, a convention, or feedback on how to ' +
   'work), persist it with memory_save; skip transient context and never save ' +
-  'secrets. Route by what the fact is: memlawb takes durable facts that must ' +
+  'secrets. Route by what the fact is: openrecall takes durable facts that must ' +
   "survive across machines, the host agent's local memdir keeps the session " +
   'log, and repo-shared facts belong in team memory. If a fact fits two, ask ' +
   'who needs it: you on every machine, this session only, or everyone on the ' +

@@ -53,7 +53,7 @@ async function seed(ns: string, entries: Record<string, string>) {
   return upsert(ns, namespaceSlug(ns), 'local', { entries }, NOW)
 }
 
-describe('single-entry read — happy path', () => {
+describe('single-entry read: happy path', () => {
   test('returns one entry the real client crypto can decrypt', async () => {
     const ns = 'user:entry-happy'
     const plaintext = 'the user prefers terse answers'
@@ -110,7 +110,7 @@ describe('single-entry read — happy path', () => {
   })
 })
 
-describe('single-entry read — refusals stay distinguishable', () => {
+describe('single-entry read: refusals stay distinguishable', () => {
   test('a namespace that does not exist answers 404 empty', async () => {
     const { status, body } = await read('user:entry-nothing-here', 'view=entry&key=a.md')
     expect(status).toBe(404)
@@ -154,7 +154,7 @@ describe('single-entry read — refusals stay distinguishable', () => {
   })
 })
 
-describe('single-entry read — the key is attacker-controlled', () => {
+describe('single-entry read: the key is attacker-controlled', () => {
   const traversal = [
     'a/../../etc/passwd', // passes the charset, caught by the ".." rule
     '../secret.md', // caught by the leading-character rule
@@ -191,7 +191,7 @@ describe('single-entry read — the key is attacker-controlled', () => {
   })
 })
 
-describe('single-entry read — storage reality', () => {
+describe('single-entry read: storage reality', () => {
   test('manifest/blob drift answers 503 entry_unreadable, never a silent empty', async () => {
     const ns = 'user:entry-drift'
     const nsSlug = namespaceSlug(ns)
@@ -238,7 +238,7 @@ describe('single-entry read — storage reality', () => {
  * everything) with config frozen at import. So: a child process with static
  * keys, driving the same handler.
  */
-describe('single-entry read — authorization', () => {
+describe('single-entry read: authorization', () => {
   const SCRIPT = `
     const { handleRequest } = await import(process.cwd() + '/src/handler.ts')
     const { upsert } = await import(process.cwd() + '/src/memory.ts')
@@ -270,7 +270,7 @@ describe('single-entry read — authorization', () => {
       env: {
         ...process.env,
         STORE: 'fs',
-        DATA_DIR: mkdtempSync(join(tmpdir(), 'memlawb-entry-auth-')),
+        DATA_DIR: mkdtempSync(join(tmpdir(), 'openrecall-entry-auth-')),
         ALLOW_UNAUTHENTICATED: 'false',
         STATIC_API_KEYS: 'alice:tok-alice,bob:tok-bob',
       },

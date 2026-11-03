@@ -1,7 +1,7 @@
 /**
  * Node store driver: store path -> node repo plus in-repo path.
  *
- * memlawb addresses everything by a flat store path; the node addresses things
+ * openrecall addresses everything by a flat store path; the node addresses things
  * by repo and path within it. KTD6 fixes the shape of that translation: one
  * private repo per namespace, so a repo is the unit that can be created,
  * verified private and (if it ever came to it) deleted per tenant, and one

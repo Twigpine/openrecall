@@ -1,146 +1,45 @@
 /**
- * Bundles memlawb for Node into dist/.
+ * Build what the npm package ships, in two parts.
  *
- * The repo runs .ts directly under Bun and needs no build, but a published
- * package does: Node refuses to strip types for anything under node_modules
- * (ERR_UNSUPPORTED_NODE_MODULES_TYPE_STRIPPING), with no flag to re-enable it,
- * so an `exports` map pointing at .ts can never resolve for a Node consumer.
- * This script emits the JavaScript that map points at. Declarations come from
- * `tsc --emitDeclarationOnly` (tsconfig.build.json), because Bun's bundler
- * does not emit them.
+ * 1. The CLI + MCP server as one Node-compatible file, dist/openrecall.js, so
+ *    agents can launch it with plain `npx -y @twigpine/openrecall mcp` — no
+ *    Bun required. Dependencies (MCP SDK, zod) and SKILL.md are inlined.
+ *    `serve` uses Bun APIs (Bun.serve / Bun.S3Client); under Node, the CLI
+ *    launches the same installed bundle with Bun from PATH.
  *
- * Two things here are load-bearing beyond "run the bundler":
- *
- *   - The CLI output gets a Node shebang. npm's bin shim executes the target's
- *     shebang and one bin name carries one shebang, so `#!/usr/bin/env bun`
- *     makes the installed CLI a hard error on any machine without Bun.
- *   - src/mcp/guide.ts resolves SKILL.md relative to its own file. dist/ sits
- *     at a different depth, so the bundle would silently fall back to the
- *     inline text. We read the guide here, from source, where the walk is
- *     correct, and inline it into the bundle.
+ * 2. The client as a library, dist/client/, for agents that import
+ *    `@twigpine/openrecall` rather than spawn the MCP server: plain ESM plus
+ *    declarations, which is what the package `exports` point at. Emitted by
+ *    tsc rather than bundled so each built file is exactly one source
+ *    (tsconfig.client.json); a bundle per entry point would give the root
+ *    and `./secretscan` their own copies of SecretFoundError.
  */
 
-import { rm } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
-import { fileURLToPath } from 'node:url'
-import type { BunPlugin } from 'bun'
-import { inlineGuide, inlineVersion, resolvedGuide } from './guide-inline.ts'
+import { chmod, readFile, rm, writeFile } from 'node:fs/promises'
 
-const root = join(dirname(fileURLToPath(import.meta.url)), '..')
-const outdir = join(root, 'dist')
-
-function check(result: Awaited<ReturnType<typeof Bun.build>>, what: string) {
-  if (!result.success) {
-    for (const log of result.logs) console.error(log)
-    throw new Error(`build: ${what} failed`)
-  }
-}
-
-const guide = resolvedGuide()
-const pkgVersion = (
-  JSON.parse(await Bun.file(join(root, 'package.json')).text()) as { version: string }
-).version
-
-await rm(outdir, { recursive: true, force: true })
-
-// The three client entries the exports map names. Split so `.` and `./crypto`
-// carry their own copy of what they need.
-//
-// Splitting is deliberately off. It saved one copy of the crypto module across
-// `.` and `./crypto`, but `client/index.ts` re-exports crypto while
-// `client/crypto.ts` is also its own entry, and that overlap made the shared
-// chunk emit `ciphertextHash` twice on the CI runner: Node then refuses the
-// file outright with "Duplicate export". It did not reproduce locally on the
-// same Bun version, which is the argument for not chasing it: a few KB of
-// duplication is worth more than an artifact whose validity depends on which
-// machine built it.
-check(
-  await Bun.build({
-    entrypoints: ['client/index.ts', 'client/crypto.ts', 'client/secretscan.ts'].map(p =>
-      join(root, p),
-    ),
-    outdir,
-    target: 'node',
-    format: 'esm',
-    splitting: false,
-    naming: { entry: '[name].js' },
-  }),
-  'client bundle',
-)
-
-check(
-  await Bun.build({
-    entrypoints: [join(root, 'bin/memlawb.ts')],
-    outdir,
-    target: 'node',
-    format: 'esm',
-    // Split so the lazy `import()`s in bin/memlawb.ts stay lazy: bundled into
-    // one file, the MCP server and the HTTP server would load on every push.
-    splitting: true,
-    naming: { entry: 'memlawb.js' },
-    external: ['@modelcontextprotocol/sdk'],
-    plugins: [inlineGuide(guide), inlineVersion(pkgVersion)],
-  }),
-  'cli bundle',
-)
-
-/**
- * `memlawb serve` boots src/index.ts, which calls Bun.serve (and Bun.S3Client
- * for the s3 store). Under Node that is a bare `ReferenceError: Bun is not
- * defined` from inside a bundle, which tells the user nothing. Name the
- * requirement instead. Guarded on the runtime, so it never fires under Bun,
- * and only on the built artifact, so running from source is untouched.
- */
-const NODE_PREAMBLE = `#!/usr/bin/env node
-if (typeof Bun === 'undefined' && process.argv[2] === 'serve') {
-  console.error(
-    'error: \`memlawb serve\` requires the Bun runtime; this is the Node build.\\n' +
-      '       Install Bun (https://bun.sh) and run \`bunx @gitlawb/memlawb serve\`,\\n' +
-      '       or use the container image. The client commands (push, pull, setup,\\n' +
-      '       mcp) run fine on Node.',
-  )
+await rm('dist', { recursive: true, force: true })
+const result = await Bun.build({
+  entrypoints: ['bin/openrecall.ts'],
+  outdir: 'dist',
+  naming: 'openrecall.js',
+  target: 'node',
+  format: 'esm',
+})
+if (!result.success) {
+  for (const log of result.logs) console.error(log)
   process.exit(1)
 }
-`
 
-const cli = join(outdir, 'memlawb.js')
-const built = await Bun.file(cli).text()
-await Bun.write(cli, NODE_PREAMBLE + built.replace(/^#!.*\r?\n/, ''))
-await Bun.$`chmod +x ${cli}`.quiet()
+const out = 'dist/openrecall.js'
+const code = (await readFile(out, 'utf8')).replace(/^#!.*\n/, '')
+await writeFile(out, `#!/usr/bin/env node\n${code}`)
+await chmod(out, 0o755)
+const kb = Math.round(Buffer.byteLength(code) / 1024)
+console.log(`built ${out} (${kb} KB)`)
 
-// Every emitted entry has to actually load under Node. The bundler can produce
-// a file that is valid to it and a syntax error to Node (a duplicate export is
-// the one this caught), and a build that ships that is worse than one that
-// fails: the tarball, the checksums and every in-repo gate all stay green.
-for (const entry of ['index.js', 'crypto.js', 'secretscan.js']) {
-  const probe = Bun.spawnSync([
-    'node',
-    '--input-type=module',
-    '-e',
-    `import('${join(outdir, entry)}')`,
-  ])
-  if (probe.exitCode !== 0) {
-    console.error(probe.stderr.toString())
-    throw new Error(`build: dist/${entry} does not load under Node`)
-  }
-}
-
-// The bin needs running, not importing, and it was the entry the check above
-// did not cover: a JSON import survived bundling as a chunk Node refuses to load
-// as JSON, so `memlawb --version` was broken in the Node build while Bun and the
-// compiled binary were both fine. `--version` is the cheapest command that
-// still touches module startup.
-const binProbe = Bun.spawnSync(['node', join(outdir, 'memlawb.js'), '--version'])
-if (binProbe.exitCode !== 0 || !binProbe.stdout.toString().trim()) {
-  console.error(binProbe.stderr.toString())
-  throw new Error('build: dist/memlawb.js does not run under Node')
-}
-
-const tsc = Bun.spawnSync(['bunx', 'tsc', '-p', 'tsconfig.build.json'], {
-  cwd: root,
+const tsc = Bun.spawnSync(['bunx', 'tsc', '-p', 'tsconfig.client.json'], {
   stdout: 'inherit',
   stderr: 'inherit',
 })
-if (tsc.exitCode !== 0) throw new Error('build: declaration emit failed')
-
-console.log(`built ${outdir}`)
+if (tsc.exitCode !== 0) process.exit(tsc.exitCode)
+console.log('built dist/client/{index,crypto,secretscan}.{js,d.ts}')

@@ -4,7 +4,7 @@
 # that driver, not build tools, and they are absent from a bun-alpine base. A
 # driver that discovers that at the first save has already accepted the write.
 #
-# Pinned by version rather than fetched latest, because memlawb builds none of
+# Pinned by version rather than fetched latest, because openrecall builds none of
 # these and the signing helper is the last component that should move without
 # someone choosing to move it. npm verifies the integrity of both hops: the
 # wrapper's postinstall copies the binaries out of a platform package that

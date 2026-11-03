@@ -1,7 +1,7 @@
 /**
  * Node store driver: naming and at-rest wrapping.
  *
- * The gitlawb node is a storage location memlawb does not control the read
+ * The gitlawb node is a storage location openrecall does not control the read
  * surface of: whoever runs it can list repos, and the node publishes some of
  * what it holds. Entry blobs are already client-encrypted, so content is safe
  * there by construction. Names and metadata are not, and that is what this
@@ -36,9 +36,9 @@
 import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto'
 
 /** Domain-separation labels. Changing one re-paths or orphans stored data. */
-const REPO_LABEL = 'memlawb/node/repo-name/v1'
-const WRAP_LABEL = 'memlawb/node/wrap-key/v1'
-const LEAF_LABEL = 'memlawb/node/entry-leaf/v1'
+const REPO_LABEL = 'openrecall/node/repo-name/v1'
+const WRAP_LABEL = 'openrecall/node/wrap-key/v1'
+const LEAF_LABEL = 'openrecall/node/entry-leaf/v1'
 
 /**
  * The scope the shared meta repo is named under. Namespace scopes are sha256

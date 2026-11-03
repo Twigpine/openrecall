@@ -4,7 +4,7 @@
  *
  * STORE=node shells out: writes go through `git push` over the gitlawb remote
  * helper, so git, gl and git-remote-gitlawb are runtime dependencies of that
- * driver. memlawb builds none of them. Nothing in the Bun test suite can see
+ * driver. openrecall builds none of them. Nothing in the Bun test suite can see
  * them, because the suite never runs inside the image, so this script is the
  * test for that half of the packaging.
  *
@@ -26,7 +26,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 
 const ROOT = resolve(import.meta.dir, '..')
-const IMAGE = process.argv[2] ?? 'memlawb:test'
+const IMAGE = process.argv[2] ?? 'openrecall:test'
 
 let failures = 0
 function check(name: string, ok: boolean, detail = '') {

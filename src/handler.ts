@@ -1,5 +1,5 @@
 /**
- * HTTP request handler for the memlawb sync contract. Extracted from index.ts
+ * HTTP request handler for the openrecall sync contract. Extracted from index.ts
  * so it can be unit-tested by calling handleRequest(new Request(...)) directly
  * without binding a socket.
  *
@@ -112,7 +112,7 @@ export async function handleRequest(req: Request): Promise<Response> {
   try {
     res = await respond(req, ctx)
   } catch (err) {
-    console.error(`[memlawb] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
+    console.error(`[openrecall] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
     res = apiError('internal', 'internal error', 500)
   }
   if (res.status >= 400) {
@@ -157,7 +157,7 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
   const { pathname } = url
 
   if (pathname === '/health') {
-    return json({ ok: true, service: 'memlawb' })
+    return json({ ok: true, service: 'openrecall' })
   }
 
   const parsed = parseMemoryPath(pathname)
@@ -306,7 +306,7 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
     if (manifest) return manifest
     // The error's class only. A store error commonly carries an endpoint, a
     // bucket and an object path, and that path carries a namespace slug.
-    console.error(`[memlawb] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
+    console.error(`[openrecall] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
     return apiError('internal', 'internal error', 500)
   }
 }

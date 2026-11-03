@@ -1,5 +1,5 @@
 /**
- * A stand-in for MemlawbClient, for tool tests that need a specific server
+ * A stand-in for OpenRecallClient, for tool tests that need a specific server
  * refusal on demand.
  *
  * The denial matrix cannot be driven through the real harness: auth mode, quota
@@ -9,14 +9,14 @@
  *
  * It is only worth anything if it stays honest about the real contract, so it
  * implements the same structural `MemoryClient` the tools take, and the
- * assignment below fails type-check the moment MemlawbClient stops satisfying
+ * assignment below fails type-check the moment OpenRecallClient stops satisfying
  * that type.
  */
 
 import {
   type Erasure,
-  type MemlawbClient,
-  MemlawbHttpError,
+  type OpenRecallClient,
+  OpenRecallHttpError,
   type PullResult,
   type PushResult,
 } from '../client/index.ts'
@@ -73,7 +73,7 @@ export class StubClient implements MemoryClient {
 
   async pull(namespace: string): Promise<PullResult> {
     this.raise()
-    return { namespace, version: this.version, entries: { ...this.entries } }
+    return { namespace, version: this.version, entries: { ...this.entries }, updatedAt: {} }
   }
 
   async hashes(_namespace: string): Promise<Record<string, string>> {
@@ -95,9 +95,9 @@ export function httpError(
   status: number,
   code: string,
   details?: Record<string, unknown>,
-): MemlawbHttpError {
+): OpenRecallHttpError {
   const body = JSON.stringify({ error: { code, message: code, ...(details ? { details } : {}) } })
-  return new MemlawbHttpError(`memlawb ${status}: ${body}`, status, code, details)
+  return new OpenRecallHttpError(`openrecall ${status}: ${body}`, status, code, details)
 }
 
 /**
@@ -106,4 +106,70 @@ export function httpError(
  * type-check error rather than a stub that silently tests a contract nobody
  * ships.
  */
-export const clientSatisfiesMemoryClient: MemoryClient = null as unknown as MemlawbClient
+export const clientSatisfiesMemoryClient: MemoryClient = null as unknown as OpenRecallClient
+
+/**
+ * The one in-memory stand-in for `OpenRecallClient`, in a plain module.
+ *
+ * It lives here rather than inside a test file because importing it from one
+ * suite into another drags that suite's side effects along: tests/mcp-tools.test.ts
+ * boots a real Bun.serve in a `beforeAll`, so a file that only wanted the stub
+ * was starting an HTTP server and registering another suite's cases as a
+ * condition of getting it. This module imports nothing from `bun:test` and does
+ * nothing at import time.
+ *
+ * There is one of these on purpose. It used to answer `push` with
+ * `{ version, uploaded, skipped, deleted }` — a field the real `PushResult`
+ * does not have, in place of `unchanged`, and without `namespace` — while a
+ * second, differently-wrong stub lived in tests/recall-regression.test.ts.
+ * Both reached `makeTools` through an `as unknown as OpenRecallClient` cast, which
+ * is what let a stub disagree with the client it stands in for. The casts are
+ * gone: `makeTools` takes the structural `MemoryClient`, so tsc checks every
+ * method here against `client/index.ts`.
+ *
+ * It exists at all because the real-server harness cannot host the cap-boundary
+ * and failure-injection cases: tests/setup.ts pins MAX_ENTRIES_PER_NAMESPACE=5
+ * and MAX_NAMESPACE_BYTES=5000, so a 250KB save trips the server's quota gates
+ * before the tool under test is ever exercised. `pullError` injects a
+ * client-layer failure.
+ */
+
+export function makeStubClient(entries: Record<string, string> = {}) {
+  const store = { ...entries }
+  let pullError: Error | undefined
+  return {
+    setPullError(e: Error | undefined) {
+      pullError = e
+    },
+    async pull(namespace: string): Promise<PullResult> {
+      if (pullError) throw pullError
+      // Empty, as the real client returns for a server that sends no
+      // timestamps. Nothing the tools do reads it yet.
+      // Version 0 for a namespace nobody has written, as on the real server: an
+      // empty body at a version past zero is how the tools recognize lost data.
+      return {
+        namespace,
+        version: Object.keys(store).length ? 1 : 0,
+        entries: { ...store },
+        updatedAt: {},
+      }
+    },
+    async push(namespace: string, next: Record<string, string>): Promise<PushResult> {
+      Object.assign(store, next)
+      return {
+        namespace,
+        version: 1,
+        uploaded: Object.keys(next),
+        unchanged: [],
+        deleted: [],
+      }
+    },
+    async hashes(_namespace: string): Promise<Record<string, string>> {
+      return Object.fromEntries(Object.keys(store).map(k => [k, 'stub-hash']))
+    },
+    async delete(_namespace: string, key: string): Promise<Erasure | null> {
+      delete store[key]
+      return null
+    },
+  }
+}
