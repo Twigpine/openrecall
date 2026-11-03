@@ -1,6 +1,6 @@
 {
   "name": "@twigpine/openrecall",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "Unified, zero-knowledge memory for every agent and every session — open-source, self-hostable; server, client, CLI, and MCP in one package",
   "type": "module",
   "license": "MIT",

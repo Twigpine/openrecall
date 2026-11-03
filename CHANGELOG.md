@@ -5,6 +5,18 @@ automatically by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/) — edit commit
 messages, not this file.
 
+## [0.2.1](https://github.com/Twigpine/openrecall/compare/v0.2.0...v0.2.1) (2026-11-03)
+
+
+### Features
+
+* **mcp:** organize shared and project memory and refresh branding ([#22](https://github.com/Twigpine/openrecall/issues/22)) ([ea900fa](https://github.com/Twigpine/openrecall/commit/ea900faf3e78e6cef4be3c672f241c96cd5f1118))
+
+
+### Bug Fixes
+
+* **cli:** launch the installed Bun runtime for serve ([#21](https://github.com/Twigpine/openrecall/issues/21)) ([9c741e1](https://github.com/Twigpine/openrecall/commit/9c741e1f9a8e7c0a8183d20d0467d534ff8f8745))
+
 ## [0.2.0](https://github.com/Twigpine/openrecall/compare/v0.1.0...v0.2.0) (2026-11-03)
 
 

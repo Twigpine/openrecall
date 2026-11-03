@@ -1,6 +1,6 @@
 {
   "name": "openrecall",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "One end-to-end-encrypted memory shared by every agent and every session. Adds the OpenRecall MCP memory tools and the memory skill.",
   "author": {
     "name": "Twigpine",
