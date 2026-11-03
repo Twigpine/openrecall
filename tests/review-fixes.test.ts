@@ -82,7 +82,9 @@ describe('key names that exist on Object.prototype', () => {
     const c = client()
     await c.push(ns, { 'a.md': 'x' })
     await c.hashes(ns)
-    await expect(c.delete(ns, 'constructor')).resolves.toBeUndefined()
+    // Resolving at all is the assertion: a prototype hit would send a bogus base
+    // and the server would refuse the delete as stale.
+    await c.delete(ns, 'constructor')
   })
 })
 
