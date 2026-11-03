@@ -29,8 +29,13 @@ export function loadMemoryGuide(): string {
 
 /** One-paragraph version embedded in the MCP server `instructions`. */
 export const SHORT_INSTRUCTIONS =
-  'You have durable, end-to-end-encrypted memory via these tools. At the start ' +
-  'of a task, call memory_recall to retrieve what you already know about this ' +
+  'You have durable, end-to-end-encrypted memory via these tools. For a project task, ' +
+  'call memory_projects to find its existing ID, then memory_project with a stable ' +
+  'ID such as github.com/owner/repo. Recall from the returned shared and project ' +
+  'namespaces together using memory_recall(namespaces: [...]). Save project facts ' +
+  'in the project namespace and user preferences in the shared namespace; opening ' +
+  'a project does not change tool defaults. At the start of any task, call memory_recall ' +
+  'to retrieve what you already know about this ' +
   'user and project before asking them to repeat it. When you learn a stable ' +
   'fact (a preference, a project decision, a convention, or feedback on how to ' +
   'work), persist it with memory_save; skip transient context and never save ' +

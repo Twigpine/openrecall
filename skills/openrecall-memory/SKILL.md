@@ -1,6 +1,6 @@
 ---
 name: openrecall-memory
-description: Long-term memory shared across sessions and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact (a preference, decision, convention, or feedback) to save it. Tools: memory_recall, memory_save, memory_search, memory_get, memory_list, memory_delete. End-to-end encrypted — the server cannot read it.
+description: Long-term memory shared across projects, sessions, and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact to save it. Tools: memory_project, memory_projects, memory_recall, memory_save, memory_search, memory_get, memory_list, memory_delete. End-to-end encrypted — the server cannot read it.
 ---
 
 # OpenRecall memory
@@ -20,6 +20,35 @@ save. A client-side scanner also blocks anything that looks like a live secret �
 but don't rely on it; never save credentials, tokens, or keys on purpose.
 
 ## Recall first
+
+For a project task, establish its scope before recalling:
+
+1. Call `memory_projects` to find the project's existing ID. Reuse it rather
+   than creating an alias. For a new repository, use `host/owner/repo`, for
+   example `github.com/twigpine/openrecall`. IDs are case-insensitive; never
+   use an absolute local path, credentials, branch name, or a bare repository
+   name shared by different owners. For a non-repository project, agree on a
+   stable ID with the user.
+2. Call `memory_project(project)` to register or reopen it. This returns a
+   **project namespace** and the **shared namespace**. The encrypted directory
+   makes the same scope discoverable on other agents and machines using the
+   same store, passphrase, and configured shared namespace.
+3. Call `memory_recall(query, namespaces: [shared, project])`. It ranks both
+   scopes together within one result limit and size cap. Each hit names its
+   namespace; include that namespace in follow-up `memory_get` calls. Other
+   projects are searched only when you explicitly include their namespaces.
+
+Opening a project **does not change tool defaults**. Pass the namespace
+explicitly when saving, listing, searching, reading, or deleting. Store project
+decisions, architecture, references, and project-specific feedback in the
+project namespace. Keep user preferences and feedback that applies everywhere
+in the shared namespace. Before comparing projects, discover their scopes with
+`memory_projects` and include only the requested projects in `namespaces`.
+
+Existing entries stay in their original namespace. Continue recalling the
+shared namespace to find them; move a fact deliberately by reading it, saving
+it in the correct project scope, verifying that save, and only then deleting
+the old copy. Never bulk-move or delete existing memory just to adopt scopes.
 
 At the start of a task — before asking the user something they may have already
 told you — recall:
@@ -87,6 +116,15 @@ same tools. If your agent shows MCP tools by name only until you look them up
 - `memory_save(key, content)` — `key` is a path that mirrors a memory directory
   layout; `content` is markdown. Saving the same `key` overwrites it.
 - `memory_recall(query, limit?)` — relevance-ranked entries for a query.
+- `memory_recall(query, namespaces: [shared, project], limit?)` — one ranked,
+  bounded result across up to eight explicit namespaces. Use `namespace` or
+  `namespaces`, never both.
+- `memory_project(project)` — register or reopen a stable project ID and get
+  its project and shared namespaces. The directory is encrypted; the project
+  name is not put in its namespace or entry key.
+- `memory_projects(limit?, offset?)` — discover registered project IDs and
+  namespaces without reading their memory contents. The default page is 20
+  projects; follow the returned offset to see more.
 - `memory_search(query)` — literal substring/keyword search.
 - `memory_get(key)` — the full, untruncated body of one entry. Use it when
   recall or search surfaces an entry you need to read in full.
@@ -131,7 +169,8 @@ Why: <why it matters — for feedback/project>
 
 ## Namespaces (when scoping matters)
 
-Each tool optionally takes a `namespace`; it defaults to the one this MCP server
-is configured with (typically `user:<you>`). Use a different namespace only to
-separate distinct scopes — e.g. a per-project space (`user:<you>/acme`) — and be
-consistent so recall later finds it.
+The six memory read/write tools optionally take a `namespace`; it defaults to
+the one this MCP server is configured with (typically `user:<you>`). The project
+tools use that configured namespace as the shared root. Use the namespace
+returned by `memory_project` consistently across agents; do not invent a new
+scope for every task or branch.

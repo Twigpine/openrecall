@@ -16,7 +16,8 @@
  * back empty rather than with whatever scored highest among the noise.
  */
 
-export type ScoredEntry = { key: string; score: number; content: string }
+export type MemoryEntry = { key: string; content: string; namespace?: string }
+export type ScoredEntry = MemoryEntry & { score: number }
 
 /**
  * The namespace-root index, skipped as ranking input.
@@ -338,11 +339,24 @@ export function rankMemoriesDetailed(
   entries: Record<string, string>,
   limit = 5,
 ): RankedResult {
+  return rankEntriesDetailed(
+    query,
+    Object.entries(entries).map(([key, content]) => ({ key, content })),
+    limit,
+  )
+}
+
+/** Rank a combined corpus without confusing identical keys from distinct namespaces. */
+export function rankEntriesDetailed(
+  query: string,
+  entries: MemoryEntry[],
+  limit = 5,
+): RankedResult {
   // The index is removed here, before anything counts entries or terms, so
   // every number downstream (the searched count, the document frequencies, the
   // entry total they are weighed against) is computed over the same population
   // the caller can actually be answered from.
-  const candidates = Object.entries(entries).filter(([key]) => key !== INDEX_KEY)
+  const candidates = entries.filter(({ key }) => key !== INDEX_KEY)
   const searched = candidates.length
   const qTerms = new Set(tokenize(query))
   if (qTerms.size === 0)
@@ -351,13 +365,13 @@ export function rankMemoriesDetailed(
   // One tokenizing pass, reused by the document-frequency pass and the scoring
   // pass, so rarity weighting costs an extra walk over the term sets rather than
   // an extra tokenization of every entry.
-  const docs = candidates.map(([key, content]) => {
+  const docs = candidates.map(({ key, content, namespace }) => {
     const keyTokens = new Set(tokenize(key))
     const descTokens = new Set(tokenize(frontmatterDescription(content)))
     const bodyTf = new Map<string, number>()
     for (const t of tokenize(content)) bodyTf.set(t, (bodyTf.get(t) ?? 0) + 1)
     const all = new Set([...keyTokens, ...descTokens, ...bodyTf.keys()])
-    return { key, content, keyTokens, descTokens, bodyTf, all }
+    return { key, content, namespace, keyTokens, descTokens, bodyTf, all }
   })
 
   const df = documentFrequency(
@@ -386,10 +400,20 @@ export function rankMemoriesDetailed(
     // matches stay rankable and the floors below decide what is returned. An
     // entry covering nothing scores zero and never clears the floor anyway.
     score *= covered / qTerms.size
-    scored.push({ key: d.key, score, content: d.content })
+    scored.push({
+      key: d.key,
+      score,
+      content: d.content,
+      ...(d.namespace === undefined ? {} : { namespace: d.namespace }),
+    })
   }
 
-  scored.sort((a, b) => b.score - a.score || a.key.localeCompare(b.key))
+  scored.sort(
+    (a, b) =>
+      b.score - a.score ||
+      a.key.localeCompare(b.key) ||
+      (a.namespace ?? '').localeCompare(b.namespace ?? ''),
+  )
 
   const top = scored[0]?.score ?? 0
   if (top < ABSOLUTE_FLOOR)

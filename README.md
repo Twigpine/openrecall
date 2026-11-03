@@ -39,7 +39,7 @@ memory to one tool and lets a third party read everything your agents learn
 about you and your code.
 
 - **One memory, every agent.** A built-in MCP server gives every agent the same
-  six memory tools over the same store, and `openrecall setup` connects the
+  memory tools over the same store, and `openrecall setup` connects the
   agents on your machine for you.
 - **Private by construction.** Memory is encrypted with a key derived from your
   passphrase before it leaves the process. A server stores and serves
@@ -114,6 +114,30 @@ MCP server and the memory skill:
 | `memory_get(key)` | read one entry in full |
 | `memory_list()` | list entry keys |
 | `memory_delete(key)` | remove an entry |
+| `memory_project(project)` | register or reopen a stable project memory scope |
+| `memory_projects(limit?, offset?)` | discover projects in the encrypted directory |
+
+### Memory across projects
+
+Keep standing preferences and general feedback in your configured shared
+namespace. Keep project decisions and references in a separate project scope.
+The agent can discover and reuse those scopes:
+
+1. `memory_projects()` lists known project IDs and their namespaces (20 per
+   page; use `offset` for more).
+2. `memory_project(project: "github.com/twigpine/openrecall")` registers or
+   reopens that ID and returns its project namespace and the shared namespace.
+   Use the same `host/owner/repo` ID across agents and machines; IDs are
+   case-insensitive and ignore a trailing `.git`.
+3. `memory_recall` accepts `namespaces: [shared, project]` to rank both scopes
+   together with one result limit and size cap. Every hit names its source
+   namespace. Include only the projects relevant to the task.
+
+Pass the returned namespace explicitly to `memory_save`, `memory_get`,
+`memory_list`, `memory_search`, and `memory_delete`. Opening a project does not
+change defaults or move existing memories. Existing shared memories remain
+available, and callers that use a single `namespace` keep their current behavior.
+Project IDs live in the encrypted directory; their namespaces use hashed IDs.
 
 Tools alone do not make an agent use memory well; it also needs the discipline
 to recall before answering, save only durable facts, and never duplicate. That

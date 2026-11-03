@@ -11,7 +11,8 @@
 
 import type { OpenRecallClient } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
-import { rankMemoriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
+import { validateNamespace } from '../namespace.ts'
+import { rankEntriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
 
 export type ToolResult = { text: string; isError?: boolean }
 
@@ -271,18 +272,45 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
     },
 
     /** Rank stored memories by relevance to a natural-language query. */
-    async recall(query: string, namespace?: string, limit = 5): Promise<ToolResult> {
-      const ns = nsOf(namespace)
+    async recall(
+      query: string,
+      namespace?: string,
+      limit = 5,
+      namespaces?: string[],
+    ): Promise<ToolResult> {
       try {
-        const { entries } = await client.pull(ns)
-        if (Object.keys(entries).length === 0) return ok(`(no memory stored in ${ns} yet)`)
+        if (namespaces && namespace !== undefined)
+          throw new Error('use either namespace or namespaces, not both')
+        if (namespaces && (namespaces.length === 0 || namespaces.length > 8))
+          throw new Error('namespaces must contain between 1 and 8 namespaces')
+        const sources = namespaces
+          ? [...new Set(namespaces.map(ns => validateNamespace(ns.trim())))]
+          : [nsOf(namespace)]
+        const ns = sources.join(', ')
+        const corpora = await Promise.all(
+          sources.map(async source => {
+            try {
+              const { entries } = await client.pull(source)
+              return Object.entries(entries).map(([key, content]) => ({
+                key,
+                content,
+                ...(namespaces ? { namespace: source } : {}),
+              }))
+            } catch (err) {
+              if (!namespaces) throw err
+              throw new Error(`could not read ${source}: ${(err as Error).message}`)
+            }
+          }),
+        )
+        const entries = corpora.flat()
+        if (entries.length === 0) return ok(`(no memory stored in ${ns} yet)`)
         const {
           results: ranked,
           searched,
           belowFloor,
           trimmedByLimit,
           reason,
-        } = rankMemoriesDetailed(query, entries, limit)
+        } = rankEntriesDetailed(query, entries, limit)
         if (ranked.length === 0 && searched === 0) {
           // Entries exist but none of them is a ranking candidate, which today
           // means the namespace holds nothing but its MEMORY.md index. "0
@@ -362,8 +390,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           tailFor(ranked.length + trimmedByLimit, REASON_BOTH).length
         let omitted = 0
         for (const r of ranked) {
-          const header = `### ${r.key}\n`
-          const pointer = `\n(region only; call memory_get with key "${r.key}" for the full entry)`
+          const header = `### ${r.key}${namespaces ? ` (${r.namespace})` : ''}\n`
+          const pointer =
+            `\n(region only; call memory_get with key "${r.key}"` +
+            `${namespaces ? ` and namespace "${r.namespace}"` : ''} for the full entry)`
           const joiner = parts.length ? '\n\n'.length : 0
           const allowed = Math.min(PER_HIT_CHARS, budget - joiner - header.length - pointer.length)
           if (allowed < MIN_REGION_CHARS) {

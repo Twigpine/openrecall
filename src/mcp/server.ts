@@ -27,9 +27,11 @@ import pkg from '../../package.json' with { type: 'json' }
 import { describeTarget, makeClient } from '../cli/client.ts'
 import { DEFAULT_NAMESPACE, resolveSettings } from '../cli/settings.ts'
 import { loadMemoryGuide, SHORT_INSTRUCTIONS } from './guide.ts'
+import { makeProjects } from './projects.ts'
 import { type MemoryTools, makeTools, type ToolResult } from './tools.ts'
 
 let tools: MemoryTools | null = null
+let projects: ReturnType<typeof makeProjects> | null = null
 let setupError = ''
 let defaultNamespace = DEFAULT_NAMESPACE
 let target = 'unconfigured'
@@ -37,7 +39,9 @@ try {
   const settings = resolveSettings()
   defaultNamespace = settings.namespace
   target = describeTarget(settings)
-  tools = makeTools(await makeClient(settings), defaultNamespace)
+  const client = await makeClient(settings)
+  tools = makeTools(client, defaultNamespace)
+  projects = makeProjects(client, defaultNamespace)
 } catch (err) {
   setupError =
     `OpenRecall is not set up: ${(err as Error).message}\n` +
@@ -98,10 +102,54 @@ server.registerTool(
     inputSchema: {
       query: z.string().describe('What you want to remember about.'),
       namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+      namespaces: z
+        .array(z.string())
+        .min(1)
+        .max(8)
+        .optional()
+        .describe(
+          'Search these namespaces together, for example the shared and project namespaces from memory_project. Use instead of namespace. Other projects are only searched when explicitly included.',
+        ),
       limit: z.number().int().min(1).max(20).optional().describe('Max results (default 5).'),
     },
   },
-  async ({ query, namespace, limit }) => run(t => t.recall(query, namespace, limit)),
+  async ({ query, namespace, limit, namespaces }) =>
+    run(t => t.recall(query, namespace, limit, namespaces)),
+)
+
+server.registerTool(
+  'memory_project',
+  {
+    title: 'Open a project memory scope',
+    description:
+      'Register or reopen a project in the encrypted project directory. Returns stable project and shared namespaces for organizing subsequent tool calls; does not change defaults or move existing entries. Call this at the start of a project task.',
+    inputSchema: {
+      project: z
+        .string()
+        .min(1)
+        .max(140)
+        .describe(
+          'Stable project ID, e.g. github.com/twigpine/openrecall. Use the same case-insensitive ID on every machine and agent, including the host and owner for repositories. Never supply a local path or credentials.',
+        ),
+    },
+  },
+  async ({ project }) =>
+    toMcp(projects ? await projects.open(project) : { text: setupError, isError: true }),
+)
+
+server.registerTool(
+  'memory_projects',
+  {
+    title: 'List known projects',
+    description:
+      'List the encrypted project directory with project IDs and their namespaces. Reads directory metadata, not the memories of other projects. Use before registering a project under another name.',
+    inputSchema: {
+      limit: z.number().int().min(1).max(50).optional().describe('Page size (default 20).'),
+      offset: z.number().int().min(0).optional().describe('Number of sorted projects to skip.'),
+    },
+  },
+  async ({ limit, offset }) =>
+    toMcp(projects ? await projects.list(limit, offset) : { text: setupError, isError: true }),
 )
 
 server.registerTool(
