@@ -119,11 +119,17 @@ const prefixes = [
     const slug = namespaceSlug(ns)
     return [blobPrefix(slug), entryPath(slug, '')]
   }),
-  ...args.owners.map(o => `owners/${o}/`),
 ]
 
-/** Objects that are single paths rather than a listable prefix. */
-const singles = args.namespaces.map(ns => manifestPath(namespaceSlug(ns)))
+/**
+ * Objects that are single paths rather than a listable prefix: each manifest,
+ * and each owner's usage record. An owner's directory cannot be listed, because
+ * only usage.json under owners/<hash>/ is mappable to a repo.
+ */
+const singles = [
+  ...args.namespaces.map(ns => manifestPath(namespaceSlug(ns))),
+  ...args.owners.map(o => `owners/${o}/usage.json`),
+]
 
 let moved = 0
 let bytes = 0
@@ -152,15 +158,26 @@ async function move(path: string): Promise<void> {
   console.log(`  moved ${path} (${body.length} bytes, byte-identical)`)
 }
 
-for (const path of singles) {
-  console.log(`\n${path}`)
-  await move(path)
+/** One object failing is recorded and the run continues to the summary. */
+async function tryMove(path: string): Promise<void> {
+  try {
+    await move(path)
+  } catch (err) {
+    failures.push(`${path}: ${(err as Error).message}`)
+  }
 }
 
+// Blobs first, manifests last: a manifest names its blobs, so a run that stops
+// partway leaves unreferenced blobs, never a manifest pointing at nothing.
 for (const prefix of prefixes) {
   const paths = await old.list(prefix)
   console.log(`\n${prefix}  (${paths.length} object${paths.length === 1 ? '' : 's'})`)
-  for (const path of paths) await move(path)
+  for (const path of paths) await tryMove(path)
+}
+
+for (const path of singles) {
+  console.log(`\n${path}`)
+  await tryMove(path)
 }
 
 console.log(

@@ -1415,21 +1415,20 @@ const VETTED_BUN_MEMBERS = new Set(['serve', 'S3Client'])
  * nothing at all. Pinning the set means the walker only ignores specifiers
  * somebody vouched for, instead of ignoring every one it cannot follow.
  */
-const VETTED_BARE_SPECIFIERS = new Set([
-  'node:crypto',
-  'node:fs/promises',
-  'node:path',
-  // The node storage driver (src/store/node.ts) and nothing else under src/.
-  // child_process is the one that can start arbitrary programs, so the reason it
-  // is here: the driver runs `git` and `gl` by bare name with an argument array
-  // (no shell) and an allowlisted environment rather than an inherited one, so
-  // the store secret never reaches a child. The node's git remote helper is the
-  // only way to reach a gitlawb node. node:fs (existsSync) and node:os (tmpdir)
-  // only locate its scratch clone.
-  'node:child_process',
-  'node:fs',
-  'node:os',
-])
+const VETTED_BARE_SPECIFIERS = new Set(['node:crypto', 'node:fs/promises', 'node:path'])
+
+/**
+ * Specifiers vetted for ONE file, not for src/ at large. The node storage
+ * driver (src/store/node.ts) runs `git` and `gl` by bare name with an argument
+ * array (no shell) and an allowlisted environment rather than an inherited one,
+ * so the store secret never reaches a child; the node's git remote helper is the
+ * only way to reach a gitlawb node. child_process is the one that can start
+ * arbitrary programs, which is why it is not in the general set. node:fs
+ * (existsSync) and node:os (tmpdir) only locate its scratch clone.
+ */
+const FILE_VETTED_SPECIFIERS: Record<string, string[]> = {
+  'src/store/node.ts': ['node:child_process', 'node:fs', 'node:os'],
+}
 
 /**
  * Everything in one module's source that touches the module system, or the
@@ -1458,7 +1457,7 @@ const VETTED_BARE_SPECIFIERS = new Set([
  * reason: remove every statically resolved import form, and any surviving
  * token is an edge nobody can follow.
  */
-function moduleRisks(raw: string): string[] {
+function moduleRisks(raw: string, file = ''): string[] {
   const code = stripToCode(raw)
   let residue = stripComments(raw)
   for (const re of ACCOUNTED_LOADS) residue = residue.replace(re, ' ')
@@ -1485,7 +1484,12 @@ function moduleRisks(raw: string): string[] {
     if (!VETTED_BUN_MEMBERS.has(m[1])) out.push(`uses unvetted \`Bun.${m[1]}\``)
 
   for (const spec of specs)
-    if (!spec.startsWith('.') && !resolveSelf(spec) && !VETTED_BARE_SPECIFIERS.has(spec))
+    if (
+      !spec.startsWith('.') &&
+      !resolveSelf(spec) &&
+      !VETTED_BARE_SPECIFIERS.has(spec) &&
+      !(FILE_VETTED_SPECIFIERS[file] ?? []).includes(spec)
+    )
       out.push(`imports unvetted bare specifier \`${spec}\``)
 
   return out
@@ -1555,7 +1559,7 @@ describe('crypto-blind import boundary', () => {
       // module-system token left over after the resolved imports are removed, a
       // call to a global nobody vouched for, an unvetted `Bun` member, a bare
       // specifier that resolves nowhere the walker can read.
-      for (const risk of moduleRisks(raw))
+      for (const risk of moduleRisks(raw, relative(REPO_ROOT, current)))
         violations.push(`${relative(REPO_ROOT, current)} -> ${risk}`)
       for (const spec of edgesOfSource(raw).specs) {
         // Relative first, then this package's own name through `exports`: a bare
@@ -1913,6 +1917,14 @@ describe('guard positive controls', () => {
       // Three rules see it, which is the point of layering them: the edge is
       // unresolvable, the token survives the accounted-load subtraction, and
       // the callee is a global nobody vouched for.
+      // The driver's allowance is for its own file only: the same import from
+      // any other module under src/ is still flagged.
+      expect(
+        moduleRisks("import { spawn } from 'node:child_process'\n", 'src/store/node.ts'),
+      ).toEqual([])
+      expect(
+        moduleRisks("import { spawn } from 'node:child_process'\n", 'src/store/fs.ts'),
+      ).toEqual(['imports unvetted bare specifier `node:child_process`'])
       expect(moduleRisks("const spec = './x.ts'\nawait import(spec)\n")).toEqual([
         '1 unresolvable import()/require()',
         '1 unaccounted module-system reference(s): import',

@@ -112,6 +112,8 @@ type Clone = {
 export type NodeStoreOptions = {
   /** Where clones live. Defaults to a fresh temp directory. */
   workdir?: string
+  /** How long one git or gl command may run before its process group is killed. */
+  commandTimeoutMs?: number
 }
 
 export class NodeBlobStore implements BlobStore {
@@ -121,6 +123,7 @@ export class NodeBlobStore implements BlobStore {
   private readonly naming: NodeNaming
   private readonly identityDir: string
   private readonly workdirOption: string | undefined
+  private readonly commandTimeoutMs: number
   private workdir: string | null = null
   private ownerDid: string | null = null
   private readonly clones = new Map<string, Clone>()
@@ -132,6 +135,7 @@ export class NodeBlobStore implements BlobStore {
     this.naming = createNodeNaming(this.cfg.secret)
     this.identityDir = dirname(this.cfg.identityPath)
     this.workdirOption = opts.workdir
+    this.commandTimeoutMs = opts.commandTimeoutMs ?? COMMAND_TIMEOUT_MS
   }
 
   describe(): string {
@@ -159,12 +163,14 @@ export class NodeBlobStore implements BlobStore {
     await this.serialize(obj.repo, async () => {
       const clone = await this.openRepo(obj.repo, true)
       if (!clone) throw new Error('node store could not open a repo for writing')
-      const dest = join(clone.dir, obj.path)
-      await mkdir(dirname(dest), { recursive: true })
-      await writeFile(dest, obj.wrap ? this.naming.wrap(path, bytes) : bytes)
-      clone.index.set(obj.path, path)
-      await this.commit(clone, [obj.path])
-      await this.push(obj.repo, clone)
+      await this.atomically(clone, async () => {
+        const dest = join(clone.dir, obj.path)
+        await mkdir(dirname(dest), { recursive: true })
+        await writeFile(dest, obj.wrap ? this.naming.wrap(path, bytes) : bytes)
+        clone.index.set(obj.path, path)
+        await this.commit(clone, [obj.path])
+        await this.push(obj.repo, clone)
+      })
     })
   }
 
@@ -173,18 +179,20 @@ export class NodeBlobStore implements BlobStore {
     await this.serialize(obj.repo, async () => {
       const clone = await this.openRepo(obj.repo, false)
       if (!clone) return
-      const dest = join(clone.dir, obj.path)
-      const present = existsSync(dest)
-      const indexed = clone.index.delete(obj.path)
-      // A delete of something the repo never held is a no-op, the way it is on
-      // every other adapter. Committing anyway would hand `git add` a pathspec
-      // matching nothing, which fails, and reclaim deletes paths speculatively:
-      // it removes the legacy key-derived path for every key it touches whether
-      // one was ever written there or not.
-      if (!present && !indexed) return
-      await rm(dest, { force: true })
-      await this.commit(clone, present ? [obj.path] : [])
-      await this.push(obj.repo, clone)
+      await this.atomically(clone, async () => {
+        const dest = join(clone.dir, obj.path)
+        const present = existsSync(dest)
+        const indexed = clone.index.delete(obj.path)
+        // A delete of something the repo never held is a no-op, the way it is on
+        // every other adapter. Committing anyway would hand `git add` a pathspec
+        // matching nothing, which fails, and reclaim deletes paths speculatively:
+        // it removes the legacy key-derived path for every key it touches whether
+        // one was ever written there or not.
+        if (!present && !indexed) return
+        await rm(dest, { force: true })
+        await this.commit(clone, present ? [obj.path] : [])
+        await this.push(obj.repo, clone)
+      })
     })
   }
 
@@ -264,7 +272,17 @@ export class NodeBlobStore implements BlobStore {
     await rm(dir, { recursive: true, force: true })
     await mkdir(dirname(dir), { recursive: true })
     const url = `gitlawb://${await this.owner()}/${repo}`
-    const r = await this.command('git', ['clone', '--quiet', url, dir])
+    const r = await this.command('git', [
+      '-c',
+      // The node serves this repository, so it is untrusted input. A symlink in
+      // it would otherwise be checked out as a link, and the driver's writes to
+      // manifest.json or paths.idx would follow it out of the clone.
+      'core.symlinks=false',
+      'clone',
+      '--quiet',
+      url,
+      dir,
+    ])
     if (r.code !== 0) throw new Error(`node store could not clone repo ${repo}: ${cause(r)}`)
     // An empty repo clones with no HEAD commit and whatever default branch the
     // local git happens to have. Pin it, so the first push lands on main.
@@ -325,6 +343,36 @@ export class NodeBlobStore implements BlobStore {
     const json = new TextDecoder().decode(this.naming.unwrap(indexAad(repo), new Uint8Array(raw)))
     for (const [k, v] of Object.entries(JSON.parse(json) as Record<string, string>)) {
       clone.index.set(k, v)
+    }
+  }
+
+  /**
+   * Run a write so that a failure leaves nothing behind.
+   *
+   * Reads come from the working tree, so a commit that failed to push would
+   * otherwise be served as stored, and then be lost when the process restarts
+   * and re-clones. The caller sees the write fail and treats it as not stored,
+   * which is only true if the clone agrees. On failure the clone goes back to
+   * where it was before the write, and the in-memory index with it.
+   *
+   * A repo with no commit yet has nothing to go back to; the failed write stays
+   * in its clone, and the next write retries the push.
+   */
+  private async atomically(clone: Clone, work: () => Promise<void>): Promise<void> {
+    const before = await this.git(clone.dir, ['rev-parse', '--verify', '--quiet', 'HEAD'])
+    const head = before.code === 0 ? before.out.trim() : null
+    const index = new Map(clone.index)
+    try {
+      await work()
+    } catch (err) {
+      if (head) {
+        const reset = await this.git(clone.dir, ['reset', '--hard', '--quiet', head])
+        if (reset.code === 0) {
+          clone.index.clear()
+          for (const [k, v] of index) clone.index.set(k, v)
+        }
+      }
+      throw err
     }
   }
 
@@ -405,11 +453,22 @@ export class NodeBlobStore implements BlobStore {
       GIT_TERMINAL_PROMPT: '0',
     }
     return new Promise(resolve => {
-      const child = spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] })
+      // Its own process group, so the timeout can kill the whole tree: the git
+      // remote helper is a grandchild, and one that survives holds the pipes
+      // open and keeps `close` from ever firing.
+      const child = spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'], detached: true })
       let out = ''
       let err = ''
       let settled = false
-      const timer = setTimeout(() => child.kill('SIGKILL'), COMMAND_TIMEOUT_MS)
+      const timer = setTimeout(() => {
+        try {
+          if (child.pid) process.kill(-child.pid, 'SIGKILL')
+        } catch {
+          child.kill('SIGKILL')
+        }
+        err += `${err ? ' ' : ''}timed out after ${this.commandTimeoutMs}ms`
+        done(124)
+      }, this.commandTimeoutMs)
       child.stdout.on('data', d => {
         out += d
       })
