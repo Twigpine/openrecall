@@ -15,11 +15,12 @@
  * by OPENRECALL_URL / _API_KEY / _PASSPHRASE / _NAMESPACE / _SCAN / _HOME.
  *
  * The published package runs this file as a Node bundle (dist/openrecall.js),
- * so everything except `serve` must stay Node-compatible.
+ * so `serve` hands off to Bun; everything else stays Node-compatible.
  */
 
+import { spawn } from 'node:child_process'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join, sep } from 'node:path'
+import { dirname, join, resolve, sep } from 'node:path'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
 import {
   configTooOpen,
@@ -162,6 +163,51 @@ async function cmdPull(dir: string, namespace?: string) {
   console.log(`pulled ${ns} v${r.version}: ${n} files → ${dir}`)
 }
 
+async function cmdServe() {
+  if (typeof Bun !== 'undefined') {
+    await import('../src/index.ts')
+    return
+  }
+
+  // Run this installed version, offline, with the same cwd and environment.
+  // --bun overrides the bundle's Node shebang and prevents a relaunch loop.
+  process.exitCode = await new Promise<number>((done, reject) => {
+    const child = spawn(
+      'bun',
+      ['run', '--bun', resolve(process.argv[1]), ...process.argv.slice(2)],
+      {
+        stdio: 'inherit',
+      },
+    )
+    const signals = ['SIGINT', 'SIGTERM', 'SIGHUP'] as const
+    const handlers = signals.map(signal => {
+      const forward = () => child.kill(signal)
+      process.on(signal, forward)
+      return { signal, forward }
+    })
+    const cleanup = () => {
+      for (const { signal, forward } of handlers) process.off(signal, forward)
+    }
+    child.once('error', err => {
+      cleanup()
+      reject(
+        (err as NodeJS.ErrnoException).code === 'ENOENT'
+          ? new Error(
+              'the server needs Bun (https://bun.sh). Install Bun and ensure `bun` is on PATH, ' +
+                'then retry `openrecall serve`. Local memory needs no server: ' +
+                '`openrecall init` then `openrecall setup all --write`.',
+            )
+          : err,
+      )
+    })
+    child.once('exit', (code, signal) => {
+      cleanup()
+      if (signal) process.kill(process.pid, signal)
+      done(code ?? 1)
+    })
+  })
+}
+
 const [cmd, ...rest] = process.argv.slice(2)
 const args = parseArgs(rest)
 const [a, b] = args.positional
@@ -195,12 +241,7 @@ try {
       await import('../src/mcp/server.ts')
       break
     case 'serve':
-      if (typeof Bun === 'undefined') {
-        throw new Error(
-          'the server needs Bun (https://bun.sh): `bunx --bun @twigpine/openrecall serve`',
-        )
-      }
-      await import('../src/index.ts')
+      await cmdServe()
       break
     case undefined:
     case 'help':

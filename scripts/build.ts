@@ -4,8 +4,8 @@
  * 1. The CLI + MCP server as one Node-compatible file, dist/openrecall.js, so
  *    agents can launch it with plain `npx -y @twigpine/openrecall mcp` — no
  *    Bun required. Dependencies (MCP SDK, zod) and SKILL.md are inlined.
- *    `serve` is the one Bun-only command (Bun.serve / Bun.S3Client); the CLI
- *    refuses it with a clear message when run under Node.
+ *    `serve` uses Bun APIs (Bun.serve / Bun.S3Client); under Node, the CLI
+ *    launches the same installed bundle with Bun from PATH.
  *
  * 2. The client as a library, dist/client/, for agents that import
  *    `@twigpine/openrecall` rather than spawn the MCP server: plain ESM plus

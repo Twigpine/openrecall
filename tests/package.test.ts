@@ -18,7 +18,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const REPO_ROOT = resolve(import.meta.dir, '..')
 const BUILT = existsSync(join(REPO_ROOT, 'dist/client/index.js'))
@@ -28,6 +28,23 @@ function run(cmd: string[], cwd: string): { code: number; out: string; err: stri
   return { code: r.exitCode, out: r.stdout.toString(), err: r.stderr.toString() }
 }
 
+async function listeningPort(output: ReadableStream<Uint8Array>): Promise<number> {
+  const reader = output.getReader()
+  const decoder = new TextDecoder()
+  let log = ''
+  try {
+    while (true) {
+      const { value, done } = await reader.read()
+      if (done) throw new Error(`server exited before listening:\n${log}`)
+      log += decoder.decode(value, { stream: true })
+      const port = log.match(/listening on :(\d+)/)?.[1]
+      if (port) return Number(port)
+    }
+  } finally {
+    reader.releaseLock()
+  }
+}
+
 describe.skipIf(!BUILT)('the published package, installed and used under Node', () => {
   let tmp = ''
   let consumer = ''
@@ -35,7 +52,7 @@ describe.skipIf(!BUILT)('the published package, installed and used under Node', 
 
   beforeAll(() => {
     tmp = mkdtempSync(join(tmpdir(), 'openrecall-pack-'))
-    consumer = join(tmp, 'consumer')
+    consumer = join(tmp, 'consumer with spaces')
 
     const pack = run(['npm', 'pack', '--json', '--pack-destination', tmp], REPO_ROOT)
     if (pack.code !== 0) throw new Error(`npm pack failed:\n${pack.err}`)
@@ -79,6 +96,83 @@ describe.skipIf(!BUILT)('the published package, installed and used under Node', 
     ])
       expect(shipped).toContain(p)
     expect(shipped.filter(p => p.startsWith('tests/') || p.includes('node_modules/'))).toEqual([])
+  })
+
+  for (const runtime of ['node', 'bun'] as const) {
+    test(`installed serve starts under ${runtime}, keeps server settings, and stops on SIGTERM`, async () => {
+      const cli = join(consumer, 'node_modules/.bin/openrecall')
+      const dataDir = `./server data ${runtime}`
+      const child = Bun.spawn({
+        cmd: [runtime === 'node' ? Bun.which('node')! : process.execPath, cli, 'serve'],
+        cwd: consumer,
+        env: {
+          ...process.env,
+          // Node can find Bun, but neither launcher can download via npm/bunx.
+          PATH: runtime === 'node' ? dirname(process.execPath) : '',
+          PORT: '0',
+          STORE: 'fs',
+          DATA_DIR: dataDir,
+          ALLOW_UNAUTHENTICATED: 'false',
+          STATIC_API_KEYS: 'probe:probe-api-key',
+        },
+        stdout: 'pipe',
+        stderr: 'pipe',
+      })
+      const deadline = setTimeout(() => child.kill('SIGTERM'), 5_000)
+      try {
+        const port = await listeningPort(child.stdout)
+        const base = `http://127.0.0.1:${port}`
+        const health = await fetch(`${base}/health`)
+        expect(health.status).toBe(200)
+        expect(await health.json()).toEqual({ ok: true, service: 'openrecall' })
+        expect(existsSync(join(consumer, dataDir))).toBe(true)
+        const path = `${base}/api/memory/user:probe?view=hashes`
+        expect((await fetch(path)).status).toBe(401)
+        expect(
+          (await fetch(path, { headers: { Authorization: 'Bearer probe-api-key' } })).status,
+        ).toBe(200)
+        child.kill('SIGTERM')
+        await child.exited
+        expect(child.signalCode).toBe('SIGTERM')
+        // The Bun server child must also be gone, not orphaned by its launcher.
+        await expect(fetch(`${base}/health`)).rejects.toThrow()
+      } finally {
+        clearTimeout(deadline)
+        child.kill('SIGTERM')
+        await child.exited
+      }
+    }, 10_000)
+  }
+
+  test('Node without Bun explains installation, while local memory still works', () => {
+    const cli = join(consumer, 'node_modules/.bin/openrecall')
+    const node = Bun.which('node')!
+    const env = { ...process.env, PATH: '', OPENRECALL_HOME: join(consumer, 'local home') }
+    const command = (args: string[]) =>
+      Bun.spawnSync([node, cli, ...args], { cwd: consumer, env, stdout: 'pipe', stderr: 'pipe' })
+    const serve = command(['serve'])
+    expect(serve.exitCode).toBe(1)
+    expect(serve.stderr.toString()).toContain('Install Bun')
+    expect(serve.stderr.toString()).toContain('on PATH')
+    expect(serve.stderr.toString()).toContain('openrecall init')
+    expect(command(['init']).exitCode).toBe(0)
+    const status = command(['status'])
+    expect(status.exitCode).toBe(0)
+    expect(status.stdout.toString()).toContain('ok — 0 entries')
+  })
+
+  test('Node preserves a Bun server startup failure and its diagnostics', () => {
+    const cli = join(consumer, 'node_modules/.bin/openrecall')
+    const dataDir = join(consumer, 'not-a-directory')
+    writeFileSync(dataDir, 'cannot store here')
+    const child = Bun.spawnSync([Bun.which('node')!, cli, 'serve'], {
+      cwd: consumer,
+      env: { ...process.env, PATH: dirname(process.execPath), STORE: 'fs', DATA_DIR: dataDir },
+      stdout: 'pipe',
+      stderr: 'pipe',
+    })
+    expect(child.exitCode).toBe(1)
+    expect(child.stderr.toString()).toContain('store probe failed')
   })
 
   test('every subpath loads under Node, shares one class identity, and the crypto round-trips', () => {

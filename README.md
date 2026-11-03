@@ -149,17 +149,22 @@ client gets it.
 
 ## Self-host a server
 
-A server lets several machines share one memory. It needs [Bun](https://bun.sh);
-everything else in the package runs on Node.
+A server lets several machines share one memory. Install [Bun](https://bun.sh)
+and ensure `bun` is on your PATH. The npm-installed `openrecall serve` launches
+Bun automatically; everything else in the package runs on Node. For local
+memory on one machine, use `init` and `setup` from the quick start above.
 
 ```bash
-bun install
+npm i -g @twigpine/openrecall
 export STATIC_API_KEYS="me:$(openssl rand -hex 24)"   # owner:key, note the key
-STORE=fs DATA_DIR=./data bun run src/index.ts
+STORE=fs DATA_DIR=./data openrecall serve
 
 # on each machine, the same passphrase everywhere (copy it from the first)
 openrecall init --url https://memory.example.com --api-key <key> --namespace user:me
 ```
+
+With releases before the automatic Bun launch, run
+`bunx --bun @twigpine/openrecall serve` instead.
 
 Each API key owns the `user:<owner>` namespace subtree. For many users, use the
 Supabase key table in [`migrations/`](./migrations) instead of static keys.
