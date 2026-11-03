@@ -3,15 +3,13 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "memlawb",
-      "dependencies": {
-        "@modelcontextprotocol/sdk": "^1.29.0",
-        "zod": "^4.4.3",
-      },
+      "name": "openrecall",
       "devDependencies": {
         "@biomejs/biome": "^2.5.1",
+        "@modelcontextprotocol/sdk": "^1.29.0",
         "@types/bun": "^1.1.0",
         "typescript": "^5.7.0",
+        "zod": "^4.4.3",
       },
     },
   },

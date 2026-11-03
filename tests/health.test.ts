@@ -25,7 +25,7 @@ describe('health route', () => {
   test('reports liveness and nothing about the store', async () => {
     const res = await handleRequest(new Request('http://x/health'))
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ ok: true, service: 'memlawb' })
+    expect(await res.json()).toEqual({ ok: true, service: 'openrecall' })
   })
 })
 

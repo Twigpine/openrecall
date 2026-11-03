@@ -9,7 +9,7 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.2'
@@ -18,31 +18,12 @@ jobs:
         run: bunx biome ci
       - name: Type-check
         run: bun run type-check
-      - name: Test
-        run: bun test
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.22.1'
+      # Build the Node bundle so the MCP stdio tests also exercise what
+      # `npx -y @twigpine/openrecall mcp` runs (dist/openrecall.js under Node).
       - name: Build
         run: bun run build
-
-  # The working tree always runs from source under Bun, so every packaging
-  # failure is invisible to the job above: it was green while Node could not
-  # import this package at all. This job is the only thing that reads the
-  # artifact a consumer actually installs.
-  package:
-    runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        # 20 is the declared engines floor, and is otherwise never exercised;
-        # 22 is what a consumer most likely has today.
-        node-version: ['20', '22']
-    steps:
-      - uses: actions/checkout@v4
-      - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: '1.2'
-      - uses: actions/setup-node@v4
-        with:
-          node-version: ${{ matrix.node-version }}
-      - run: bun install --frozen-lockfile
-      - name: Packed tarball, installed and driven under Node
-        run: bun run test:package
+      - name: Test
+        run: bun test

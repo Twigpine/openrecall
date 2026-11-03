@@ -1,7 +1,7 @@
 /**
- * Setup card — the block a first-time user pastes into an agent's MCP config.
+ * Setup card: the block a first-time user pastes into an agent's MCP config.
  *
- * This lives in memlawb rather than in the onboarding console for one reason:
+ * This lives in openrecall rather than in the onboarding console for one reason:
  * the passphrase. The console knows the user's service key and could happily
  * render a card server-side, but then the passphrase would either be generated
  * on the server or travel back to it, and the whole point of this project is
@@ -108,7 +108,7 @@ export function ownerNamespace(owner: string): string {
  * everything mixes every project into a single recall corpus, which is the
  * fastest way to make recall useless for the developer this is built for.
  *
- * The form is `user:<owner>/<repo>`, the same one skills/memlawb-memory/SKILL.md
+ * The form is `user:<owner>/<repo>`, the same one skills/openrecall-memory/SKILL.md
  * gives the model. These two surfaces once disagreed (the card said
  * `user:<owner>/repo/<repo>`), which put the same repository's memory in two
  * subtrees and made recall come back empty with no error anywhere. The test in
@@ -150,7 +150,7 @@ export function assertServiceUrl(url: string): string {
   if (parsed.username !== '' || parsed.password !== '')
     throw new Error(
       `setup: the service URL must not carry a username or password. Put the service key in ` +
-        `MEMLAWB_API_KEY in the block, not in MEMLAWB_URL.`,
+        `OPENRECALL_API_KEY in the block, not in OPENRECALL_URL.`,
     )
   if (parsed.protocol === 'https:') return url
   if (parsed.protocol === 'http:' && isLoopbackHost(parsed.hostname)) return url
@@ -169,11 +169,11 @@ export function renderSetupCard(target: SetupTarget, input: SetupCardInput): str
   const owner = ownerNamespace(input.owner)
   const perRepo = repoNamespace(input.owner, input.repo ?? 'my-repo')
   const env = [
-    ['MEMLAWB_URL', url],
-    ['MEMLAWB_API_KEY', input.apiKey],
-    ['MEMLAWB_PASSPHRASE', '<paste your passphrase here>'],
-    ['MEMLAWB_NAMESPACE', owner],
-    ['MEMLAWB_SCAN', 'block'],
+    ['OPENRECALL_URL', url],
+    ['OPENRECALL_API_KEY', input.apiKey],
+    ['OPENRECALL_PASSPHRASE', '<paste your passphrase here>'],
+    ['OPENRECALL_NAMESPACE', owner],
+    ['OPENRECALL_SCAN', 'block'],
   ]
     .map(
       ([k, v], i, all) =>
@@ -181,15 +181,15 @@ export function renderSetupCard(target: SetupTarget, input: SetupCardInput): str
     )
     .join('\n')
 
-  return `memlawb setup for ${target}
+  return `openrecall setup for ${target}
 
 Paste this into your MCP config:
 
 {
   "mcpServers": {
-    "memlawb": {
+    "openrecall": {
       "command": "bunx",
-      "args": ["-y", "@gitlawb/memlawb", "mcp"],
+      "args": ["-y", "@twigpine/openrecall", "mcp"],
       "env": {
 ${env}
       }
@@ -198,12 +198,12 @@ ${env}
 }
 
 Namespace. ${owner} is your whole memory, and it is the only subtree your key
-can reach. For one memory set per codebase, set MEMLAWB_NAMESPACE to
+can reach. For one memory set per codebase, set OPENRECALL_NAMESPACE to
 ${perRepo} in that repository's config. Anything outside
 ${owner} is refused by the server.
 
 Passphrase. It is generated on your machine, is never sent to the service, and
-cannot be recovered. Put it in MEMLAWB_PASSPHRASE above and back it up now. If
+cannot be recovered. Put it in OPENRECALL_PASSPHRASE above and back it up now. If
 you lose it, everything stored under this account stays encrypted forever, to
 you and to us alike.
 `

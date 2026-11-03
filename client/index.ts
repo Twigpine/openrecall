@@ -1,5 +1,5 @@
 /**
- * MemlawbClient — the zero-knowledge sync client.
+ * OpenRecallClient — the zero-knowledge sync client.
  *
  * Wraps the crypto + the HTTP sync contract so callers (the openclaude shim,
  * the MCP server, the CLI) work in plaintext and never touch ciphertext or the
@@ -9,7 +9,7 @@
  * Every request is bounded: no call waits longer than `timeoutMs`
  * (default {@link DEFAULT_TIMEOUT_MS}, 120s) for the server to answer.
  *
- *   const client = new MemlawbClient({ url, apiKey, passphrase })
+ *   const client = new OpenRecallClient({ url, apiKey, passphrase })
  *   await client.push('user:me', { 'MEMORY.md': '# index...' })
  *   const { entries } = await client.pull('user:me')
  */
@@ -17,8 +17,8 @@
 import { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'
 import { enforce, type Finding, type ScanMode } from './secretscan.ts'
 
-export type MemlawbClientOptions = {
-  /** Base URL, e.g. https://memory.gitlawb.com (no trailing slash needed). */
+export type OpenRecallClientOptions = {
+  /** Base URL, e.g. https://memory.twigpine.com (no trailing slash needed). */
   url: string
   /** API key (Bearer). Omit only against an ALLOW_UNAUTHENTICATED self-host. */
   apiKey?: string
@@ -36,13 +36,45 @@ export type MemlawbClientOptions = {
    * {@link DEFAULT_TIMEOUT_MS} (120s).
    */
   timeoutMs?: number
+  /**
+   * Transport override (default: global `fetch`). Local mode uses this to
+   * serve requests in-process from an encrypted store on disk, with no server.
+   */
+  fetch?: FetchLike
 }
+
+/** The subset of `fetch` the client needs. */
+export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 export type PullResult = {
   namespace: string
   version: number
   /** entryKey -> decrypted plaintext */
   entries: Record<string, string>
+  /**
+   * entryKey -> ISO 8601 timestamp of the entry's last write, as recorded by
+   * the server's own manifest. Empty when the server does not send the field,
+   * which is what an older server looks like.
+   *
+   * Required rather than optional on purpose: it makes the compiler find every
+   * stand-in for this client, so a test double cannot quietly omit the field
+   * and diverge from what the real client returns.
+   *
+   * This is the one value here the crypto does not vouch for. Ciphertext is
+   * bound to its entry key by the GCM AAD and checksums are recomputed
+   * locally, but a timestamp is whatever the server says it is, so `pull`
+   * sanitizes it rather than trusting the shape. Note it is not covered by
+   * `namespaceChecksum` either, which is computed over entry checksums alone:
+   * a server can rewrite every timestamp and nothing here detects it.
+   *
+   * Values are `string | undefined` deliberately. A key can be absent (an
+   * older server, a partial map, an entry whose blob drifted), and typing it
+   * as bare `string` would let a consumer index a missing key, get `undefined`
+   * at runtime, and see `string` at the type level. `noUncheckedIndexedAccess`
+   * is off in this project, so the union is what forces the absent case to be
+   * handled.
+   */
+  updatedAt: Record<string, string | undefined>
 }
 
 export type PushResult = {
@@ -69,14 +101,14 @@ export type PushResult = {
  * truncated response and a dropped socket alike, so a preflight check has no
  * honest way to say which happened and defaults to blaming the passphrase.
  */
-export class MemlawbDecryptError extends Error {
+export class OpenRecallDecryptError extends Error {
   constructor(
     readonly entryKey: string,
     readonly namespace: string,
     readonly reason: string,
   ) {
-    super(`memlawb: could not decrypt "${entryKey}" in ${namespace}: ${reason}`)
-    this.name = 'MemlawbDecryptError'
+    super(`openrecall: could not decrypt "${entryKey}" in ${namespace}: ${reason}`)
+    this.name = 'OpenRecallDecryptError'
   }
 }
 
@@ -103,7 +135,7 @@ type Answer = { ok: boolean; status: number; statusText: string; raw: string }
  * an agent surfacing it had nothing to act on. `code` is the server's own error
  * code and `details` its payload, so a stale write names the keys that moved.
  */
-export class MemlawbHttpError extends Error {
+export class OpenRecallHttpError extends Error {
   constructor(
     message: string,
     readonly status: number,
@@ -111,7 +143,7 @@ export class MemlawbHttpError extends Error {
     readonly details?: Record<string, unknown>,
   ) {
     super(message)
-    this.name = 'MemlawbHttpError'
+    this.name = 'OpenRecallHttpError'
   }
 }
 
@@ -123,14 +155,14 @@ export class MemlawbHttpError extends Error {
  * and the MCP preflight guesses wrong in the most confusing direction. This one
  * says the connection was made and the answer never came.
  */
-export class MemlawbTimeoutError extends Error {
+export class OpenRecallTimeoutError extends Error {
   constructor(
     readonly operation: string,
     readonly namespace: string,
     readonly timeoutMs: number,
   ) {
-    super(`memlawb: ${operation} for ${namespace} got no answer within ${timeoutMs}ms`)
-    this.name = 'MemlawbTimeoutError'
+    super(`openrecall: ${operation} for ${namespace} got no answer within ${timeoutMs}ms`)
+    this.name = 'OpenRecallTimeoutError'
   }
 }
 
@@ -179,7 +211,51 @@ function lruSet<T>(map: Map<string, T>, key: string, value: T): void {
   }
 }
 
-export class MemlawbClient {
+/**
+ * Keep only the timestamps that are safe to act on: an own string property
+ * whose key is an entry we actually decrypted.
+ *
+ * Iterating the DECRYPTED keys rather than the server's map is what does the
+ * work. A hostile or broken server can send extra keys, a prototype-polluting
+ * key, a bare string, an array, or numbers instead of dates, and none of it
+ * survives, because the only keys ever looked up are ones the caller already
+ * holds plaintext for. That also bounds the result: the map cannot be larger
+ * than the namespace, however large the response was.
+ *
+ * `Object.hasOwn` rather than an index test, matching the entry lookup in
+ * src/mcp/tools.ts: a key like `__proto__` or `toString` must miss, never
+ * resolve to something off the prototype.
+ *
+ * The VALUE is bounded here too, not just the key space. An earlier version
+ * accepted any string and documented that callers should treat an unparseable
+ * one as absent, which is the wrong place to put the rule: this function is
+ * the only trust boundary the datum crosses, so every future caller would have
+ * had to re-implement the same check or silently act on junk. Measured, a
+ * 20,000,000-character "timestamp" passed through unaltered. A length cap plus
+ * a parse check closes that by construction and costs nothing.
+ *
+ * Still NOT validated, and not knowable client-side: whether the server is
+ * telling the TRUTH. A well-formed timestamp is accepted whatever it claims,
+ * and nothing in the response authenticates it, so a hostile server can order
+ * a caller's results at will within the shapes this function admits.
+ */
+const MAX_TIMESTAMP_CHARS = 32
+
+function sanitizeUpdatedAt(raw: unknown, entries: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {}
+  if (!raw || typeof raw !== 'object') return out
+  const src = raw as Record<string, unknown>
+  for (const entryKey of Object.keys(entries)) {
+    if (!Object.hasOwn(src, entryKey)) continue
+    const value = src[entryKey]
+    if (typeof value !== 'string' || value.length > MAX_TIMESTAMP_CHARS) continue
+    if (!Number.isFinite(Date.parse(value))) continue
+    out[entryKey] = value
+  }
+  return out
+}
+
+export class OpenRecallClient {
   /**
    * What this client has learned about each namespace, from reads the caller
    * asked for and from its own successful writes. No entry at all means this
@@ -218,14 +294,16 @@ export class MemlawbClient {
   private readonly timeoutMs: number
   /** Derived keys, LRU-bounded: see MAX_TRACKED_NAMESPACES. */
   private readonly keyCache = new Map<string, Buffer>()
+  private readonly fetch: FetchLike
 
-  constructor(opts: MemlawbClientOptions) {
+  constructor(opts: OpenRecallClientOptions) {
     this.url = opts.url.replace(/\/$/, '')
     this.apiKey = opts.apiKey
     this.passphrase = opts.passphrase
     this.scanMode = opts.scanMode ?? 'block'
     this.onScanWarning = opts.onScanWarning
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
+    this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
   }
 
   private key(namespace: string): Buffer {
@@ -266,9 +344,9 @@ export class MemlawbClient {
     init?: RequestInit,
   ): Promise<Answer> {
     try {
-      const res = await fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) })
+      const res = await this.fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) })
       // A body that fails to read for any other reason still yields an Answer,
-      // so a refusal whose body is unreadable stays a MemlawbHttpError with an
+      // so a refusal whose body is unreadable stays a OpenRecallHttpError with an
       // empty text rather than becoming a bare transport throw. That is what
       // the `.catch(() => '')` in httpError used to do; only the timeout is
       // allowed past, because typing it is the point.
@@ -282,7 +360,7 @@ export class MemlawbClient {
       // dropped socket is a different name and stays untouched, so the class
       // means exactly one thing.
       if ((err as Error)?.name === 'TimeoutError')
-        throw new MemlawbTimeoutError(operation, namespace, this.timeoutMs)
+        throw new OpenRecallTimeoutError(operation, namespace, this.timeoutMs)
       throw err
     }
   }
@@ -351,30 +429,47 @@ export class MemlawbClient {
       // so there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
       lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
-      return { namespace, version: 0, entries: {} }
+      return { namespace, version: 0, entries: {}, updatedAt: {} }
     }
     if (!res.ok) throw httpError(res)
     const data = JSON.parse(res.raw) as {
       version: number
-      content: { entries: Record<string, string> }
+      content?: { entries?: Record<string, string>; entryUpdatedAt?: unknown }
+    }
+    // Pre-existing gap, closed here because this method now hardens the sibling
+    // field against exactly this class and leaving the container unchecked
+    // would be inconsistent. A 200 whose body is missing `content.entries`
+    // used to throw a raw TypeError out of Object.entries; it fails closed
+    // either way, but a protocol error names what went wrong.
+    const entriesRaw = data.content?.entries
+    if (!entriesRaw || typeof entriesRaw !== 'object') {
+      throw new Error(
+        `openrecall ${res.status} ${res.statusText}: malformed body (no content.entries)`,
+      )
     }
     const key = this.key(namespace)
     const entries: Record<string, string> = {}
     // The base is derived from the bodies rather than the response's checksum
     // map, so it reflects what was actually decrypted here. This is a read the
-    // caller asked for, so it is what a later write's base is measured against
-    // — but positive knowledge only, hence `enumerated: false`; see `observed`.
+    // caller asked for, so it is what a later write's base is measured
+    // against, but positive knowledge only, hence `enumerated: false`; see
+    // `observed`.
     const seen: Record<string, string> = {}
-    for (const [entryKey, b64] of Object.entries(data.content.entries)) {
+    for (const [entryKey, b64] of Object.entries(entriesRaw)) {
       try {
         entries[entryKey] = decryptEntry(key, entryKey, b64)
       } catch (err) {
-        throw new MemlawbDecryptError(entryKey, namespace, (err as Error).message)
+        throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
       }
       seen[entryKey] = ciphertextHash(b64)
     }
     lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
-    return { namespace, version: data.version, entries }
+    return {
+      namespace,
+      version: data.version,
+      entries,
+      updatedAt: sanitizeUpdatedAt(data.content?.entryUpdatedAt, entries),
+    }
   }
 
   /**
@@ -386,7 +481,7 @@ export class MemlawbClient {
    * necessary; every agent session used to pay a full namespace read before its
    * first tool call.
    *
-   * Every refusal reaches the caller as a `MemlawbHttpError`, including both
+   * Every refusal reaches the caller as a `OpenRecallHttpError`, including both
    * 404s. `pull` translates the server's `empty` into an empty result because a
    * namespace with nothing in it is a legitimate answer to "give me everything";
    * there is no such answer to "give me this key", and returning an empty
@@ -414,15 +509,15 @@ export class MemlawbClient {
     const data = JSON.parse(res.raw) as { entry?: unknown }
     // A 200 whose body is not this view's is a broken or misrouted server, and
     // it must not be handed to decryptEntry: that would raise a
-    // MemlawbDecryptError, which is the one failure a caller is entitled to
+    // OpenRecallDecryptError, which is the one failure a caller is entitled to
     // blame on the passphrase.
     if (typeof data.entry !== 'string')
-      throw new Error(`memlawb: no entry in the response for "${entryKey}" in ${namespace}`)
+      throw new Error(`openrecall: no entry in the response for "${entryKey}" in ${namespace}`)
     let plaintext: string
     try {
       plaintext = decryptEntry(this.key(namespace), entryKey, data.entry)
     } catch (err) {
-      throw new MemlawbDecryptError(entryKey, namespace, (err as Error).message)
+      throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
     }
     const observed = this.observed.get(namespace) ?? { hashes: {}, enumerated: false }
     observed.hashes[entryKey] = ciphertextHash(data.entry)
@@ -446,7 +541,7 @@ export class MemlawbClient {
       if (this.onScanWarning) this.onScanWarning(findings)
       else
         console.warn(
-          `[memlawb] ${findings.length} potential secret(s) in pushed memory (scan=warn)`,
+          `[openrecall] ${findings.length} potential secret(s) in pushed memory (scan=warn)`,
         )
     }
 
@@ -594,7 +689,7 @@ export class MemlawbClient {
  * caller can say what changed but not what it was working from, and KTD3 asks
  * the tool text for both.
  */
-function httpError(res: Answer, sentBase?: Record<string, string | null>): MemlawbHttpError {
+function httpError(res: Answer, sentBase?: Record<string, string | null>): OpenRecallHttpError {
   let code = 'unknown'
   let details: Record<string, unknown> | undefined
   // The body was read ONCE, in `request`. This used to call res.json() and then
@@ -611,8 +706,8 @@ function httpError(res: Answer, sentBase?: Record<string, string | null>): Memla
   } catch {
     // Not JSON. The raw text is the only thing there is to report.
   }
-  return new MemlawbHttpError(
-    `memlawb ${res.status} ${safeText(res.statusText)}: ${safeText(raw)}`,
+  return new OpenRecallHttpError(
+    `openrecall ${res.status} ${safeText(res.statusText)}: ${safeText(raw)}`,
     res.status,
     code,
     sentBase ? { ...details, sentBase } : details,

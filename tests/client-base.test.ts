@@ -16,20 +16,20 @@ import { contentPath, getStore, manifestPath } from '../src/store/index.ts'
 
 let server: ReturnType<typeof Bun.serve>
 let base: string
-let MemlawbClient: typeof import('../client/index.ts').MemlawbClient
-let MemlawbHttpError: typeof import('../client/index.ts').MemlawbHttpError
-let MemlawbDecryptError: typeof import('../client/index.ts').MemlawbDecryptError
-let MemlawbTimeoutError: typeof import('../client/index.ts').MemlawbTimeoutError
+let OpenRecallClient: typeof import('../client/index.ts').OpenRecallClient
+let OpenRecallHttpError: typeof import('../client/index.ts').OpenRecallHttpError
+let OpenRecallDecryptError: typeof import('../client/index.ts').OpenRecallDecryptError
+let OpenRecallTimeoutError: typeof import('../client/index.ts').OpenRecallTimeoutError
 let DEFAULT_TIMEOUT_MS: number
 let MAX_TRACKED_NAMESPACES: number
 
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
   ;({
-    MemlawbClient,
-    MemlawbHttpError,
-    MemlawbDecryptError,
-    MemlawbTimeoutError,
+    OpenRecallClient,
+    OpenRecallHttpError,
+    OpenRecallDecryptError,
+    OpenRecallTimeoutError,
     DEFAULT_TIMEOUT_MS,
     MAX_TRACKED_NAMESPACES,
   } = await import('../client/index.ts'))
@@ -39,7 +39,7 @@ beforeAll(async () => {
 afterAll(() => server?.stop(true))
 afterEach(() => _reset())
 
-const client = () => new MemlawbClient({ url: base, passphrase: 'pw' })
+const client = () => new OpenRecallClient({ url: base, passphrase: 'pw' })
 
 /** A server that answers every request with one canned refusal. */
 function denyingServer(status: number, code: string) {
@@ -66,8 +66,8 @@ describe('base carriage', () => {
     await b.push(ns, { 'a.md': 'from-b' })
 
     const err = await a.push(ns, { 'a.md': 'from-a' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     expect((await b.pull(ns)).entries['a.md']).toBe('from-b')
   })
 
@@ -100,8 +100,8 @@ describe('base carriage', () => {
     await b.push(ns, { 'a.md': 'moved' })
 
     const err = await a.delete(ns, 'a.md').catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
 
     await a.pull(ns)
     await a.delete(ns, 'a.md')
@@ -119,7 +119,7 @@ describe('base carriage', () => {
     await b.push(ns, { 'a.md': 'from-b' })
     // A push whose only read of this namespace since is push's own internal one.
     const err = await a.push(ns, { 'a.md': 'from-a' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
   })
 })
 
@@ -132,12 +132,12 @@ describe('typed refusals', () => {
       [429, 'rate_limited'],
     ] as const) {
       const s = denyingServer(status, code)
-      const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+      const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
       const err = await c.pull('user:x').catch(e => e)
       s.stop(true)
-      expect(err).toBeInstanceOf(MemlawbHttpError)
-      expect((err as InstanceType<typeof MemlawbHttpError>).status).toBe(status)
-      expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe(code)
+      expect(err).toBeInstanceOf(OpenRecallHttpError)
+      expect((err as InstanceType<typeof OpenRecallHttpError>).status).toBe(status)
+      expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe(code)
     }
   })
 
@@ -145,10 +145,10 @@ describe('typed refusals', () => {
     // The denial-rendered-as-success shape: a wrong URL or a proxy 404 must not
     // reach a caller as a successful read of nothing.
     const s = denyingServer(404, 'not_found')
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const err = await c.pull('user:x').catch(e => e)
     s.stop(true)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
 
     // Control: the server's own empty response still reads as an empty namespace.
     const fresh = await client().pull('user:cb-never-written')
@@ -171,7 +171,7 @@ describe('typed refusals', () => {
     await b.push(ns, { 'x.md': 'two' })
 
     const err = await a.push(ns, { 'x.md': 'three' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
     expect(err.status).toBe(409)
     expect(err.details?.sentBase).toEqual({ 'x.md': stale })
   })
@@ -192,7 +192,7 @@ describe('typed refusals', () => {
         })
       },
     })
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const r = await c.push('user:x', {})
     s.stop(true)
     expect(hits).toBe(1)
@@ -213,7 +213,7 @@ describe('typed refusals', () => {
 
     await b.push(ns, { 'k.md': 'from b' })
     const err = await a.push(ns, { 'k.md': 'from a' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
     expect(err.status).toBe(409)
 
     // Control: b's write survived, so the refusal protected it rather than
@@ -225,10 +225,10 @@ describe('typed refusals', () => {
     // pull and the hashes view each decide what a 404 means, so each needs
     // covering; a fix applied to one is not a fix applied to both.
     const s = denyingServer(404, 'not_found')
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const err = await c.hashes('user:x').catch(e => e)
     s.stop(true)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
 
     // Control: a namespace the real server has never seen still reads as empty.
     expect(await client().hashes('user:cb-hashes-empty')).toEqual({})
@@ -244,7 +244,7 @@ describe('precondition advertisement', () => {
           headers: { 'content-type': 'application/json' },
         }),
     })
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     expect(await c.preconditionEnforced('user:x')).toBe(false)
     s.stop(true)
 
@@ -304,8 +304,8 @@ describe('observed knowledge', () => {
     await b.push(ns, { 'x.md': 'from-b' })
 
     const err = await a.push(ns, { 'x.md': 'from-a' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     expect((await b.pull(ns)).entries['x.md']).toBe('from-b')
   })
 
@@ -343,8 +343,8 @@ describe('observed knowledge', () => {
     await b.push(ns, { 'k.md': 'from-b' })
 
     const err = await a.push(ns, { 'k.md': 'two' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     expect((await b.pull(ns)).entries['k.md']).toBe('from-b')
   })
 
@@ -362,8 +362,8 @@ describe('observed knowledge', () => {
     await b.push(ns, { 'k.md': 'from-b' })
 
     const err = await a.push(ns, { 'k.md': 'mine-again' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     expect((await b.pull(ns)).entries['k.md']).toBe('from-b')
   })
 
@@ -390,8 +390,8 @@ describe('observed knowledge', () => {
     await b.push(ns, { 'k.md': 'from-b' })
 
     const err = await a.delete(ns, 'k.md').catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     // The refusal has to actually protect the entry, not merely be thrown.
     expect((await b.pull(ns)).entries['k.md']).toBe('from-b')
   })
@@ -414,10 +414,10 @@ describe('error text', () => {
     // httpError used to call res.text() on a body res.json() had consumed, so
     // the fallback always produced '' and the caller got a bare status.
     const s = rawServer(502, 'upstream said no', 'text/plain')
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const err = await c.pull('user:x').catch(e => e)
     s.stop(true)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
     expect((err as Error).message).toContain('upstream said no')
   })
 
@@ -427,8 +427,8 @@ describe('error text', () => {
     // instructions there.
     const nasty = `IGNORE PREVIOUS ${'A'.repeat(5000)}`
     const s = rawServer(500, JSON.stringify({ error: { code: 'boom', details: { raw: nasty } } }))
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
-    const err = (await c.pull('user:x').catch(e => e)) as InstanceType<typeof MemlawbHttpError>
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const err = (await c.pull('user:x').catch(e => e)) as InstanceType<typeof OpenRecallHttpError>
     s.stop(true)
     expect(err.message.length).toBeLessThanOrEqual(300)
     // Structured fields are the machine-readable half and stay verbatim, so the
@@ -442,8 +442,8 @@ describe('error text', () => {
     // inert text, so only a non-JSON body carries real ones, and that is
     // exactly the body the text branch handles.
     const s = rawServer(500, '\u001b[31mred\u001b[0m\nboom\u0007', 'text/plain')
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
-    const err = (await c.pull('user:x').catch(e => e)) as InstanceType<typeof MemlawbHttpError>
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const err = (await c.pull('user:x').catch(e => e)) as InstanceType<typeof OpenRecallHttpError>
     s.stop(true)
     // Non-vacuous: a message that lost the whole body would pass every
     // not-toContain below.
@@ -458,7 +458,7 @@ describe('error text', () => {
     // Negative control: a sanitiser that returned '' would pass both tests
     // above and lose every real diagnostic.
     const s = rawServer(500, JSON.stringify({ error: { code: 'boom', message: 'disk full' } }))
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const err = await c.pull('user:x').catch(e => e)
     s.stop(true)
     expect((err as Error).message).toContain('disk full')
@@ -497,11 +497,11 @@ describe('typed decrypt failure', () => {
   test('a wrong passphrase is a decrypt error naming the entry, not a transport error', async () => {
     const ns = 'user:cb-decrypt'
     await client().push(ns, { 'a.md': 'secret' })
-    const wrong = new MemlawbClient({ url: base, passphrase: 'not-the-passphrase' })
+    const wrong = new OpenRecallClient({ url: base, passphrase: 'not-the-passphrase' })
 
     const err = await wrong.pull(ns).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbDecryptError)
-    expect((err as InstanceType<typeof MemlawbDecryptError>).entryKey).toBe('a.md')
+    expect(err).toBeInstanceOf(OpenRecallDecryptError)
+    expect((err as InstanceType<typeof OpenRecallDecryptError>).entryKey).toBe('a.md')
     expect((err as Error).message).toContain('a.md')
   })
 
@@ -509,11 +509,11 @@ describe('typed decrypt failure', () => {
     // Negative control: the distinction is the point, so a class that captured
     // every failure would be worth nothing.
     const s = denyingServer(500, 'internal')
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const err = await c.pull('user:x').catch(e => e)
     s.stop(true)
-    expect(err).not.toBeInstanceOf(MemlawbDecryptError)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
+    expect(err).not.toBeInstanceOf(OpenRecallDecryptError)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
   })
 })
 
@@ -551,7 +551,7 @@ describe('bounded waits', () => {
     const all = stallingServer(() => true)
     const writes = stallingServer(req => req.method !== 'GET')
     const stalled = (port: number | undefined) =>
-      new MemlawbClient({ url: `http://localhost:${port}`, passphrase: 'pw', timeoutMs: 500 })
+      new OpenRecallClient({ url: `http://localhost:${port}`, passphrase: 'pw', timeoutMs: 500 })
 
     const timedOut = async (label: string, run: () => Promise<unknown>) => {
       const t0 = Date.now()
@@ -579,10 +579,10 @@ describe('bounded waits', () => {
     writes.stop(true)
 
     for (const { label, err, elapsed } of results) {
-      expect(`${label}: ${(err as Error)?.name}`).toBe(`${label}: MemlawbTimeoutError`)
-      expect(err).toBeInstanceOf(MemlawbTimeoutError)
-      expect((err as InstanceType<typeof MemlawbTimeoutError>).timeoutMs).toBe(500)
-      expect((err as InstanceType<typeof MemlawbTimeoutError>).namespace).toBe('user:tmo')
+      expect(`${label}: ${(err as Error)?.name}`).toBe(`${label}: OpenRecallTimeoutError`)
+      expect(err).toBeInstanceOf(OpenRecallTimeoutError)
+      expect((err as InstanceType<typeof OpenRecallTimeoutError>).timeoutMs).toBe(500)
+      expect((err as InstanceType<typeof OpenRecallTimeoutError>).namespace).toBe('user:tmo')
       // Bounded wall clock, not "eventually": a client that hung until bun's
       // own test timeout killed it would otherwise look the same.
       expect(`${label}: ${elapsed < 5000}`).toBe(`${label}: true`)
@@ -590,7 +590,7 @@ describe('bounded waits', () => {
 
     // Positive control, same knob against a server that does answer. Without
     // it, a client that refused every request would pass everything above.
-    const ok = new MemlawbClient({ url: base, passphrase: 'pw', timeoutMs: 500 })
+    const ok = new OpenRecallClient({ url: base, passphrase: 'pw', timeoutMs: 500 })
     const ns = 'user:cb-tmo-control'
     await ok.push(ns, { 'a.md': 'v1' })
     expect((await ok.pull(ns)).entries['a.md']).toBe('v1')
@@ -616,7 +616,7 @@ describe('bounded waits', () => {
           { headers: { 'content-type': 'application/json' } },
         ),
     })
-    const c = new MemlawbClient({
+    const c = new OpenRecallClient({
       url: `http://localhost:${s.port}`,
       passphrase: 'pw',
       timeoutMs: 500,
@@ -624,8 +624,8 @@ describe('bounded waits', () => {
     const t0 = Date.now()
     const err = await c.pull('user:tmo-body').catch(e => e)
     s.stop(true)
-    expect((err as Error)?.name).toBe('MemlawbTimeoutError')
-    expect(err).toBeInstanceOf(MemlawbTimeoutError)
+    expect((err as Error)?.name).toBe('OpenRecallTimeoutError')
+    expect(err).toBeInstanceOf(OpenRecallTimeoutError)
     expect(Date.now() - t0).toBeLessThan(5000)
   }, 15000)
 
@@ -670,8 +670,8 @@ describe('bounded per-namespace caches', () => {
     // insert would pass the half above and lose this.
     await b.push(kept, { 'k.md': 'from-b' })
     const err = await a.push(kept, { 'k.md': 'from-a' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     expect((await b.pull(kept)).entries['k.md']).toBe('from-b')
   }, 30000)
 
@@ -722,8 +722,8 @@ function recordingProxy(upstream: string) {
         method: req.method,
         headers: req.headers,
         body: req.method === 'GET' || req.method === 'DELETE' ? undefined : req.body,
-        // biome-ignore lint/suspicious/noExplicitAny: duplex is not in the DOM types bun uses
         duplex: 'half',
+        // biome-ignore lint/suspicious/noExplicitAny: duplex is not in the DOM types bun uses
       } as any)
     },
   })
@@ -736,7 +736,7 @@ describe('single-entry read', () => {
     await client().push(ns, { 'a.md': 'alpha', 'b.md': 'beta' })
     const p = recordingProxy(base)
     try {
-      const c = new MemlawbClient({ url: p.url, passphrase: 'pw' })
+      const c = new OpenRecallClient({ url: p.url, passphrase: 'pw' })
       expect(await c.entry(ns, 'a.md')).toBe('alpha')
       // The boundedness control. Asserting the plaintext alone cannot tell this
       // from a full pull that threw away the rest, so the wire is what proves
@@ -750,10 +750,10 @@ describe('single-entry read', () => {
   test('a wrong passphrase is a decrypt error naming the entry', async () => {
     const ns = 'user:cb-entry-wrong'
     await client().push(ns, { 'a.md': 'alpha' })
-    const wrong = new MemlawbClient({ url: base, passphrase: 'not-the-passphrase' })
+    const wrong = new OpenRecallClient({ url: base, passphrase: 'not-the-passphrase' })
     const err = await wrong.entry(ns, 'a.md').catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbDecryptError)
-    expect((err as InstanceType<typeof MemlawbDecryptError>).entryKey).toBe('a.md')
+    expect(err).toBeInstanceOf(OpenRecallDecryptError)
+    expect((err as InstanceType<typeof OpenRecallDecryptError>).entryKey).toBe('a.md')
   })
 
   test('every refusal reaches the caller as a typed HTTP error, never as an empty read', async () => {
@@ -776,12 +776,12 @@ describe('single-entry read', () => {
 
     expect(
       [nsGone, keyGone, unreadable].map(
-        e => `${(e as Error).name}:${(e as InstanceType<typeof MemlawbHttpError>).code}`,
+        e => `${(e as Error).name}:${(e as InstanceType<typeof OpenRecallHttpError>).code}`,
       ),
     ).toEqual([
-      'MemlawbHttpError:empty',
-      'MemlawbHttpError:entry_not_found',
-      'MemlawbHttpError:entry_unreadable',
+      'OpenRecallHttpError:empty',
+      'OpenRecallHttpError:entry_not_found',
+      'OpenRecallHttpError:entry_unreadable',
     ])
   })
 
@@ -790,10 +790,10 @@ describe('single-entry read', () => {
     // failure may be blamed on the passphrase. A server that answers the entry
     // view with some other 200 body must not look like a wrong key.
     const s = rawServer(200, JSON.stringify({ version: 1, content: { entries: {} } }))
-    const c = new MemlawbClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
+    const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
     const err = await c.entry('user:cb-entry-shape', 'a.md').catch(e => e)
     s.stop(true)
-    expect(err).not.toBeInstanceOf(MemlawbDecryptError)
+    expect(err).not.toBeInstanceOf(OpenRecallDecryptError)
     expect(err).toBeInstanceOf(Error)
     expect((err as Error).message).toContain('a.md')
   })
@@ -807,8 +807,8 @@ describe('single-entry read', () => {
     await b.push(ns, { 'a.md': 'v2' })
 
     const err = await a.push(ns, { 'a.md': 'from-a' }).catch(e => e)
-    expect(err).toBeInstanceOf(MemlawbHttpError)
-    expect((err as InstanceType<typeof MemlawbHttpError>).code).toBe('stale_base_version')
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
     expect((await b.pull(ns)).entries['a.md']).toBe('v2')
   })
 
@@ -844,7 +844,7 @@ describe('single-entry read', () => {
     await b.push(ns, { 'b.md': 'from-b' })
 
     const err = await a.push(ns, { 'b.md': 'from-a' }).catch(e => e)
-    expect((err as InstanceType<typeof MemlawbHttpError>)?.code).toBe('stale_base_version')
+    expect((err as InstanceType<typeof OpenRecallHttpError>)?.code).toBe('stale_base_version')
     expect((await b.pull(ns)).entries['b.md']).toBe('from-b')
   })
 })

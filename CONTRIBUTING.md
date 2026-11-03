@@ -1,6 +1,6 @@
-# Contributing to memlawb
+# Contributing to OpenRecall
 
-Thanks for your interest in improving memlawb — open-source, self-hostable,
+Thanks for your interest in improving OpenRecall — open-source, self-hostable,
 zero-knowledge agent memory. This guide gets you from clone to merged PR.
 
 By participating you agree to our [Code of Conduct](./CODE_OF_CONDUCT.md).
@@ -18,8 +18,10 @@ Green on all three is the bar for every PR.
 
 ## Prerequisites
 
-- [Bun](https://bun.sh) `>= 1.1` — the runtime, test runner, and package manager.
-  No Node build step; TypeScript runs directly.
+- [Bun](https://bun.sh) `>= 1.2` — the runtime, test runner, and package manager.
+  TypeScript runs directly in development; `bun run build` bundles the CLI +
+  MCP server into `dist/openrecall.js` (plain Node 24+) for npm.
+- Node `>= 20` to exercise the bundle (`node dist/openrecall.js …`).
 
 ## Project layout
 
@@ -31,13 +33,17 @@ src/            crypto-blind HTTP server (never sees plaintext)
   ratelimit.ts    per-owner token bucket
   auth.ts         API-key → owner; namespace authorization
   store/          BlobStore: fs | s3 (Tigris/R2/AWS)
-  mcp/            the `memlawb mcp` server (tools, relevance, guide)
+  mcp/            the `openrecall mcp` server (tools, relevance, guide)
+  cli/            client settings, local mode (in-process store + lock), `setup`
 client/         the zero-knowledge client (encrypt → ciphertext)
   crypto.ts       AES-256-GCM + scrypt; deterministic nonce for delta sync
   secretscan.ts   pre-encryption secret scanner
-  index.ts        MemlawbClient (push/pull/delta)
-bin/memlawb.ts  CLI: push | pull | mcp | serve
-skills/         the memlawb-memory agent skill (canonical guidance)
+  index.ts        OpenRecallClient (push/pull/delta)
+bin/            the CLI (openrecall.ts): init | setup | status | push | pull | mcp | serve
+scripts/        build.ts — the single-file Node bundle
+skills/         the openrecall-memory agent skill (canonical guidance)
+.claude-plugin/ Claude Code / OpenClaude plugin + marketplace manifests
+docs/           user docs (agents.md)
 migrations/     hosted Supabase schema
 tests/          bun:test suites
 ```
@@ -45,16 +51,20 @@ tests/          bun:test suites
 ## Running it locally
 
 ```bash
-# Server (filesystem storage, single-user open mode)
+# Use a throwaway home so you never touch your real ~/.openrecall
+export OPENRECALL_HOME=$(mktemp -d)
+
+# Local mode: no server, encrypted store under $OPENRECALL_HOME/data
+bun run bin/openrecall.ts init
+bun run bin/openrecall.ts push ./my-memories
+bun run bin/openrecall.ts setup all          # dry run — prints what it would change
+
+# Against a server (filesystem storage, single-user open mode, localhost only)
 ALLOW_UNAUTHENTICATED=true STORE=fs DATA_DIR=./data bun run src/index.ts
+OPENRECALL_URL=http://localhost:8080 bun run bin/openrecall.ts status
 
-# In another shell: round-trip some memory, end-to-end encrypted
-MEMLAWB_URL=http://localhost:8080 MEMLAWB_PASSPHRASE=dev \
-  bun run bin/memlawb.ts push ./my-memories user:me
-
-# Or run the MCP server (stdio)
-MEMLAWB_URL=http://localhost:8080 MEMLAWB_PASSPHRASE=dev \
-  bun run bin/memlawb.ts mcp
+# The published artifact: build, then run under plain Node
+bun run build && node dist/openrecall.js mcp
 ```
 
 ## Design principles (please preserve these)

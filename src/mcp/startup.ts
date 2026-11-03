@@ -10,7 +10,7 @@
  *
  * It uses the reads the client already has: an authenticated hashes view of the
  * pinned namespace, then a pull when that view reports entries. No new server
- * endpoint, so this works against any deployed memlawb.
+ * endpoint, so this works against any deployed openrecall.
  *
  * A refusal has to name what is wrong, and naming the wrong thing has a cost
  * here that it does not have elsewhere: an operator told to change their
@@ -28,21 +28,18 @@
  * diagnostic to stderr.
  */
 
-import { readFileSync } from 'node:fs'
 import {
-  MemlawbClient,
-  MemlawbDecryptError,
-  MemlawbHttpError,
-  MemlawbTimeoutError,
+  type OpenRecallClient,
+  OpenRecallDecryptError,
+  OpenRecallHttpError,
+  OpenRecallTimeoutError,
 } from '../../client/index.ts'
-import type { ScanMode } from '../../client/secretscan.ts'
+import { describeTarget, makeClient } from '../cli/client.ts'
+import { PassphraseFileError, resolveSettings } from '../cli/settings.ts'
 
 export type PreflightResult =
-  | { ready: true; client: MemlawbClient; url: string; namespace: string; warnings: string[] }
-  | { ready: false; diagnostic: string }
-
-const DEFAULT_URL = 'http://localhost:8080'
-const DEFAULT_NAMESPACE = 'user:me'
+  | { ready: true; client: OpenRecallClient; url: string; namespace: string; warnings: string[] }
+  | { ready: false; diagnostic: string; unconfigured?: true }
 
 type Env = Record<string, string | undefined>
 
@@ -56,7 +53,7 @@ function read(env: Env, name: string): string | undefined {
  * behind.
  *
  * openclaude substitutes an unset variable reference with its own literal text
- * and registers the server anyway, reporting only a warning, so memlawb
+ * and registers the server anyway, reporting only a warning, so openrecall
  * receives a non-empty passphrase that is really a template. Matching only the
  * one canonical spelling would miss every config that named the variable
  * something else. This is the only thing standing between the openclaude
@@ -68,7 +65,7 @@ function read(env: Env, name: string): string | undefined {
  * a service key can be reissued, but a refused passphrase is the one thing
  * nobody can reissue, and the memory it opens is unreadable without it.
  *
- * BRACED matches anywhere in the value. `${` is not something `memlawb setup`
+ * BRACED matches anywhere in the value. `${` is not something `openrecall setup`
  * can generate, it is not a shape a password manager emits, and an operator who
  * genuinely wants those two characters can still choose a passphrase that
  * separates them.
@@ -77,8 +74,8 @@ function read(env: Env, name: string): string | undefined {
  * means "this value is a variable reference" rather than "this value contains a
  * dollar sign". A single `$` is perfectly ordinary inside a high-entropy
  * secret, including as its first character, so anything looser would lock a
- * user out of their own memory. Refused: `$MEMLAWB_PASSPHRASE`, `$HOME`,
- * `$API_KEY_2`. Accepted: `$Xk9!vQ2m`, `pa$$word`, `$MEMLAWB_PASSPHRASE more`,
+ * user out of their own memory. Refused: `$OPENRECALL_PASSPHRASE`, `$HOME`,
+ * `$API_KEY_2`. Accepted: `$Xk9!vQ2m`, `pa$$word`, `$OPENRECALL_PASSPHRASE more`,
  * a lone `$`, `$4DOLLARS` (an identifier cannot start with a digit).
  *
  * What BARE knowingly does not catch, since an undocumented limit reads as
@@ -91,7 +88,7 @@ function read(env: Env, name: string): string | undefined {
  * partially expanded value.
  *
  * The residual false positive, a passphrase that really is `$` plus all caps
- * and nothing else, is recoverable: preflight gates only `memlawb mcp`, so the
+ * and nothing else, is recoverable: preflight gates only `openrecall mcp`, so the
  * CLI can still pull that namespace and push it again under a new passphrase.
  */
 /**
@@ -121,29 +118,27 @@ function isUnexpanded(value: string): boolean {
  * logs first. It costs nothing in the other direction, because no legal
  * namespace can trip either rule (namespace.ts NAMESPACE_RE has no `$` in it).
  *
- * MEMLAWB_URL is deliberately left out. Template text there fails as a
+ * OPENRECALL_URL is deliberately left out. Template text there fails as a
  * transport error that quotes the URL it could not reach, which already names
  * the defect, and a URL is the one value here that can legitimately carry a
  * `$`.
  */
 const MISEXPANSION_CHECKED = [
-  'MEMLAWB_PASSPHRASE',
-  'MEMLAWB_PASSPHRASE_FILE',
-  'MEMLAWB_API_KEY',
-  'MEMLAWB_NAMESPACE',
+  'OPENRECALL_PASSPHRASE',
+  'OPENRECALL_PASSPHRASE_FILE',
+  'OPENRECALL_API_KEY',
+  'OPENRECALL_NAMESPACE',
 ] as const
 
 const MISEXPANSION_STAKE: Record<(typeof MISEXPANSION_CHECKED)[number], string> = {
-  MEMLAWB_PASSPHRASE: 'Starting like this would write memory under a key nobody can reproduce.',
-  MEMLAWB_PASSPHRASE_FILE:
+  OPENRECALL_PASSPHRASE: 'Starting like this would write memory under a key nobody can reproduce.',
+  OPENRECALL_PASSPHRASE_FILE:
     'Without it there is no passphrase to read, and the path in a file error would be the template text rather than anything to go and look at.',
-  MEMLAWB_API_KEY:
+  OPENRECALL_API_KEY:
     'Starting like this would send template text as the service key, which the server rejects.',
-  MEMLAWB_NAMESPACE:
+  OPENRECALL_NAMESPACE:
     'Starting like this would send that literal to the server as a namespace, and every read and write would fail against a name that does not exist.',
 }
-
-const SCAN_MODES: ScanMode[] = ['block', 'warn', 'off']
 
 /**
  * Flatten server-chosen text before it goes into a diagnostic. An entry key
@@ -163,12 +158,55 @@ function oneLine(text: string): string {
  * ready client or the one diagnostic that explains what to change.
  */
 export async function preflight(env: Env = process.env): Promise<PreflightResult> {
-  const url = read(env, 'MEMLAWB_URL') ?? DEFAULT_URL
-  const namespace = read(env, 'MEMLAWB_NAMESPACE') ?? DEFAULT_NAMESPACE
-  const apiKey = read(env, 'MEMLAWB_API_KEY')
-  // 1. Misexpansion, before anything is sent anywhere.
+  // Env over config file over defaults, the same resolution the CLI uses. A bad
+  // URL or scan mode throws here; a typo in the scan mode used to be cast
+  // rather than checked, which built a client whose secret scanner was in no
+  // recognized mode and silently weakened the guard that keeps a live
+  // credential from being encrypted and stored. Refusing is the only safe
+  // answer, so the settings error is the diagnostic.
+  //
+  // The passphrase file's path is checked for template text first: resolving the
+  // settings reads that file, and an unexpanded path would otherwise surface as
+  // "could not be read" about text that is not a path at all.
+  const fileVar = read(env, 'OPENRECALL_PASSPHRASE_FILE')
+  if (fileVar && isUnexpanded(fileVar)) {
+    return refuse(
+      `OPENRECALL_PASSPHRASE_FILE still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
+        'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
+        MISEXPANSION_STAKE.OPENRECALL_PASSPHRASE_FILE,
+    )
+  }
+  let settings: ReturnType<typeof resolveSettings>
+  try {
+    settings = resolveSettings(env)
+  } catch (err) {
+    if (err instanceof PassphraseFileError) return refuse(err.message)
+    const message = (err as Error).message
+    const badScan = /^invalid scan mode "([^"]*)"/.exec(message)
+    if (badScan) {
+      return refuse(
+        `OPENRECALL_SCAN (or "scan" in the config file) is set to "${oneLine(badScan[1] ?? '')}", which is not a scan mode. ` +
+          'Set it to one of block, warn, off, or leave it unset for block. ' +
+          'Starting with an unrecognized mode would leave the secret scanner in no mode at all, so a live credential could be encrypted and stored without a word.',
+      )
+    }
+    return refuse(message)
+  }
+  const url = describeTarget(settings)
+  const namespace = settings.namespace
+  const passphrase = settings.passphrase
+
+  // 1. Misexpansion, before anything is sent anywhere. Checked on the resolved
+  // values, so a template that came from the config file is caught as well as
+  // one from the launcher's environment.
+  const resolved = {
+    OPENRECALL_PASSPHRASE: passphrase,
+    OPENRECALL_PASSPHRASE_FILE: undefined,
+    OPENRECALL_API_KEY: settings.apiKey,
+    OPENRECALL_NAMESPACE: namespace,
+  } as const
   for (const name of MISEXPANSION_CHECKED) {
-    const value = read(env, name)
+    const value = resolved[name]
     if (value && isUnexpanded(value)) {
       return refuse(
         `${name} still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
@@ -178,90 +216,42 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
     }
   }
 
-  // The passphrase may come from a file instead of the environment, and when
-  // both are set the file wins. The reason is the host, not us: an agent that
-  // launches this server spreads its own environment into every stdio child it
-  // runs, so a passphrase exported for memlawb is readable by every other MCP
-  // server the user has configured. A path is safe to spread that way; the
-  // value never is, and a file can carry permissions an environment cannot.
-  // Whoever moved the secret out of the environment should not then be
-  // overridden by a stale export of the old one.
-  const passphraseFile = read(env, 'MEMLAWB_PASSPHRASE_FILE')
-  let passphrase = read(env, 'MEMLAWB_PASSPHRASE')
-  if (passphraseFile) {
-    let contents: string
-    try {
-      contents = readFileSync(passphraseFile, 'utf8')
-    } catch (err) {
-      return refuse(
-        `MEMLAWB_PASSPHRASE_FILE points at ${oneLine(passphraseFile)}, which could not be read: ${oneLine((err as Error).message)}. ` +
-          'Check the path and that the launching user can read it. ' +
-          'Refusing to start rather than falling back to MEMLAWB_PASSPHRASE, because a silent fallback is how a namespace ends up written under a second key.',
-      )
-    }
-    // Trailing newlines are what a file written by `echo` or an editor carries,
-    // and a passphrase that differs by one byte decrypts nothing.
-    const trimmed = contents.trim()
-    if (!trimmed) {
-      return refuse(
-        `MEMLAWB_PASSPHRASE_FILE points at ${oneLine(passphraseFile)}, which is empty. ` +
-          'Write the passphrase into that file, or unset the variable to use MEMLAWB_PASSPHRASE instead.',
-      )
-    }
-    passphrase = trimmed
-  }
-
-  // 2. Missing passphrase.
+  // 2. Missing passphrase. Not a corruption risk (nothing can be read or
+  // written without it), so the server still starts and its tools return the
+  // fix; see server.ts.
   if (!passphrase) {
-    return refuse(
-      'MEMLAWB_PASSPHRASE is not set. It is your zero-knowledge encryption key, it never reaches the server, and without it nothing can be read or written. ' +
-        'Set it in the environment that launches the MCP server.',
-    )
-  }
-
-  // 3. Scan mode. This used to be cast rather than checked, so a typo built a
-  // client whose secret scanner was in no recognized mode, silently weakening
-  // the guard that keeps a live credential from being encrypted and stored.
-  // Nothing downstream would ever have reported it, so the typo has to be
-  // caught here or not at all.
-  const scanMode = read(env, 'MEMLAWB_SCAN') ?? 'block'
-  if (!SCAN_MODES.includes(scanMode as ScanMode)) {
-    return refuse(
-      `MEMLAWB_SCAN is set to "${scanMode}", which is not a scan mode. ` +
-        `Set it to one of ${SCAN_MODES.join(', ')}, or leave it unset for block. ` +
-        'Starting with an unrecognized mode would leave the secret scanner in no mode at all, so a live credential could be encrypted and stored without a word.',
-    )
+    return {
+      ready: false,
+      unconfigured: true,
+      diagnostic:
+        `OPENRECALL_PASSPHRASE is not set and ${settings.configPath} holds none. Run \`openrecall init\` to create it. ` +
+        'The passphrase is your zero-knowledge key, it never reaches the server, and without it nothing can be read or written.',
+    }
   }
 
   // A hung server would otherwise block startup for the client default, which
   // is sized for a full 10 MB pull rather than for the small reads this makes.
-  const timeoutMs = Number(read(env, 'MEMLAWB_TIMEOUT_MS') ?? '') || undefined
-  const client = new MemlawbClient({
-    url,
-    apiKey,
-    passphrase,
-    scanMode: scanMode as ScanMode,
-    ...(timeoutMs ? { timeoutMs } : {}),
-  })
+  const timeoutMs = Number(read(env, 'OPENRECALL_TIMEOUT_MS') ?? '') || undefined
+  const client = await makeClient(settings, { timeoutMs })
 
   // 4, 5, 6. One authenticated read of the pinned namespace separates a
   // transport failure from a refusal, and a rejected key from a namespace this
   // key does not own. They are debugged in completely different places.
   // Built once: an unmapped status can surface from either read, and two
   // copies of the same sentence are two chances for them to drift apart.
-  const refuseHttp = (err: MemlawbHttpError) =>
+  const refuseHttp = (err: OpenRecallHttpError) =>
     refuse(
-      `the memlawb server at ${url} refused the startup read of "${namespace}" with HTTP ${err.status} (${err.code}). ${err.message}`,
+      `the openrecall server at ${url} refused the startup read of "${namespace}" with HTTP ${err.status} (${err.code}). ${err.message}`,
     )
 
   // A server that accepted the connection and then said nothing is neither
   // refusing nor absent. Reporting it as unreachable sends an operator to check
   // DNS and firewalls for a server that answered them.
-  const refuseNoAnswer = (err: MemlawbTimeoutError) =>
+  const refuseNoAnswer = (err: OpenRecallTimeoutError) =>
     refuse(
-      `the memlawb server at ${url} accepted the connection but did not answer the startup ${err.operation} for "${namespace}" within ${err.timeoutMs}ms. ` +
+      `the openrecall server at ${url} accepted the connection but did not answer the startup ${err.operation} for "${namespace}" within ${err.timeoutMs}ms. ` +
         'The URL and the route are reachable, so this is the server or the link being slow or stuck rather than misconfiguration. ' +
-        'Check the server, and raise MEMLAWB_TIMEOUT_MS if the link is simply slow.',
+        'Check the server, and raise OPENRECALL_TIMEOUT_MS if the link is simply slow.',
     )
 
   // Conditions that are worth telling the operator about but must not stop a
@@ -272,18 +262,18 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   try {
     checksums = await client.hashes(namespace)
   } catch (err) {
-    if (err instanceof MemlawbTimeoutError) return refuseNoAnswer(err)
-    if (!(err instanceof MemlawbHttpError)) {
+    if (err instanceof OpenRecallTimeoutError) return refuseNoAnswer(err)
+    if (!(err instanceof OpenRecallHttpError)) {
       return refuse(
-        `cannot reach the memlawb server at ${url}: ${(err as Error).message}. ` +
+        `cannot reach the openrecall server at ${url}: ${(err as Error).message}. ` +
           'This is a transport failure, not a refusal: the server never answered. ' +
-          'Check MEMLAWB_URL, name resolution, and whether the server is running.',
+          'Check OPENRECALL_URL, name resolution, and whether the server is running.',
       )
     }
     if (err.status === 401) {
       return refuse(
-        `the memlawb server at ${url} rejected the service key (HTTP 401). ` +
-          'Change MEMLAWB_API_KEY. Your passphrase is not involved here, this is the account key, not the encryption key.',
+        `the openrecall server at ${url} rejected the service key (HTTP 401). ` +
+          'Change OPENRECALL_API_KEY. Your passphrase is not involved here, this is the account key, not the encryption key.',
       )
     }
     if (err.status === 403) {
@@ -291,8 +281,8 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
       // their own configuration. tools.ts withholds it on a 403 for the
       // opposite reason: that text goes into a model's context.
       return refuse(
-        `the memlawb server at ${url} refused namespace "${namespace}" for this service key (HTTP 403). ` +
-          'Point MEMLAWB_NAMESPACE at a namespace this key owns, or use the key that owns this one.',
+        `the openrecall server at ${url} refused namespace "${namespace}" for this service key (HTTP 403). ` +
+          'Point OPENRECALL_NAMESPACE at a namespace this key owns, or use the key that owns this one.',
       )
     }
     return refuseHttp(err)
@@ -329,16 +319,16 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
         proven = true
         break
       } catch (err) {
-        if (err instanceof MemlawbTimeoutError) return refuseNoAnswer(err)
-        if (err instanceof MemlawbDecryptError) {
+        if (err instanceof OpenRecallTimeoutError) return refuseNoAnswer(err)
+        if (err instanceof OpenRecallDecryptError) {
           // The one failure the passphrase is entitled to be blamed for.
           return refuse(
-            `MEMLAWB_PASSPHRASE cannot decrypt the existing entries in namespace "${namespace}" (entry "${oneLine(err.entryKey)}": ${oneLine(err.reason)}). ` +
+            `OPENRECALL_PASSPHRASE cannot decrypt the existing entries in namespace "${namespace}" (entry "${oneLine(err.entryKey)}": ${oneLine(err.reason)}). ` +
               'Set the passphrase this namespace was created with. ' +
               'Refusing to start, because saving under a second key would leave the namespace unreadable by the correct passphrase as well.',
           )
         }
-        if (err instanceof MemlawbHttpError) {
+        if (err instanceof OpenRecallHttpError) {
           // The manifest names it and the store cannot produce it, or the
           // server no longer has it at all. Neither says anything about the
           // passphrase, so try the next key rather than concluding.
@@ -353,7 +343,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
         // failure is what creates the mixed-key namespace.
         return refuse(
           `the startup read of namespace "${namespace}" from ${url} failed before anything could be decrypted: ${oneLine((err as Error).message)}. ` +
-            'This is a transport or response failure, not a passphrase problem, so do not change MEMLAWB_PASSPHRASE on the strength of it. ' +
+            'This is a transport or response failure, not a passphrase problem, so do not change OPENRECALL_PASSPHRASE on the strength of it. ' +
             'Retry, and check the server and the network between you and it.',
         )
       }
@@ -361,17 +351,17 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
 
     if (!proven) {
       return refuse(
-        `the memlawb server at ${url} lists ${listed.length} entr${listed.length === 1 ? 'y' : 'ies'} in namespace "${namespace}" but served none of the ${unreadable.length} it was asked for, ` +
+        `the openrecall server at ${url} lists ${listed.length} entr${listed.length === 1 ? 'y' : 'ies'} in namespace "${namespace}" but served none of the ${unreadable.length} it was asked for, ` +
           'so nothing was decrypted and the passphrase could not be checked. ' +
           'This is server-side drift, not a passphrase problem: the manifest names entries whose stored bodies are gone. ' +
-          'Restore the namespace from a backup, or point MEMLAWB_NAMESPACE somewhere else. ' +
+          'Restore the namespace from a backup, or point OPENRECALL_NAMESPACE somewhere else. ' +
           'Refusing to start, because a save into this namespace could not be verified against anything.',
       )
     }
 
     if (unreadable.length > 0) {
       warnings.push(
-        `the memlawb server at ${url} could not serve ${unreadable.map(oneLine).join(', ')} in namespace "${namespace}", though the manifest names ${listed.length === 1 ? 'it' : 'them'}. ` +
+        `the openrecall server at ${url} could not serve ${unreadable.map(oneLine).join(', ')} in namespace "${namespace}", though the manifest names ${listed.length === 1 ? 'it' : 'them'}. ` +
           'Those entries are missing from memory until the namespace is restored, and any others past the first readable one were not checked.',
       )
     }
@@ -386,7 +376,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   try {
     if (!(await client.preconditionEnforced(namespace))) {
       warnings.push(
-        `the memlawb server at ${url} does not enforce the write precondition, so a save that overwrites a newer version of an entry is accepted silently. ` +
+        `the openrecall server at ${url} does not enforce the write precondition, so a save that overwrites a newer version of an entry is accepted silently. ` +
           'Memory works; upgrade the server to get the stale-write guarantee back.',
       )
     }
