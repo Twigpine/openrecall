@@ -14,7 +14,7 @@ import { probeStore } from './store/probe.ts'
 const probe = await probeStore()
 if (!probe.ok) {
   // Refuse to serve rather than answer 200 over a store we cannot reach.
-  process.stderr.write(`[memlawb] store probe failed: ${probe.detail}\n`)
+  process.stderr.write(`[openrecall] store probe failed: ${probe.detail}\n`)
   process.exit(1)
 }
 

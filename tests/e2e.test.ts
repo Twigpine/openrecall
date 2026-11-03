@@ -24,12 +24,12 @@ const PASSPHRASE = 'correct horse battery staple'
 
 let server: ReturnType<typeof Bun.serve>
 let base: string
-let MemlawbClient: typeof import('../client/index.ts').MemlawbClient
+let OpenRecallClient: typeof import('../client/index.ts').OpenRecallClient
 let namespaceSlug: typeof import('../src/namespace.ts').namespaceSlug
 
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
-  ;({ MemlawbClient } = await import('../client/index.ts'))
+  ;({ OpenRecallClient } = await import('../client/index.ts'))
   ;({ namespaceSlug } = await import('../src/namespace.ts'))
   server = Bun.serve({ port: 0, fetch: handleRequest })
   base = `http://localhost:${server.port}`
@@ -38,7 +38,7 @@ beforeAll(async () => {
 afterAll(() => server?.stop(true))
 afterEach(() => _reset())
 
-const client = (passphrase = PASSPHRASE) => new MemlawbClient({ url: base, passphrase })
+const client = (passphrase = PASSPHRASE) => new OpenRecallClient({ url: base, passphrase })
 
 /** Every file the store holds for a namespace, as raw bytes. */
 function storedBytes(ns: string): { path: string; body: Buffer }[] {
@@ -210,7 +210,7 @@ describe('e2e: operational surfaces', () => {
   test('health reports liveness and reveals nothing about the store', async () => {
     const res = await fetch(`${base}/health`)
     expect(res.status).toBe(200)
-    expect(await res.json()).toEqual({ ok: true, service: 'memlawb' })
+    expect(await res.json()).toEqual({ ok: true, service: 'openrecall' })
   })
 
   test('a namespace whose index is corrupt answers 503 rather than looking empty', async () => {

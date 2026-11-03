@@ -80,6 +80,7 @@ describe('store factory seam', () => {
     const root = resolve(import.meta.dir, '..')
     const seen = new Set<string>()
     const offenders: string[] = []
+    const unreadable: string[] = []
 
     async function walk(file: string): Promise<void> {
       if (seen.has(file)) return
@@ -88,15 +89,17 @@ describe('store factory seam', () => {
       try {
         src = await readFile(file, 'utf8')
       } catch {
+        // Recorded, not skipped. A root that no longer exists (bin/memlawb.ts
+        // after the rename) used to count toward `seen` while covering nothing.
+        unreadable.push(file.slice(root.length + 1))
         return
       }
       if (file !== join(root, 'src/store/index.ts')) {
         if (/\b(setStore|resetStore)\b/.test(src)) offenders.push(file.slice(root.length + 1))
       }
-      // Static imports and dynamic import() alike. Following import() adds no
-      // reach today, since bin/memlawb.ts's only dynamic targets are the two
-      // roots below; it is here so the walk does not silently stop covering
-      // them if those roots are ever dropped.
+      // Static imports and dynamic import() alike. bin/openrecall.ts reaches
+      // src/cli/setup.ts only through import(), so without this the CLI's
+      // setup path would fall outside the walk.
       for (const m of src.matchAll(/(?:from|import)\s*\(?\s*'(\.[^']+)'/g)) {
         await walk(resolve(dirname(file), m[1] as string))
       }
@@ -104,13 +107,15 @@ describe('store factory seam', () => {
 
     await walk(join(root, 'src/index.ts'))
     await walk(join(root, 'src/mcp/server.ts'))
-    await walk(join(root, 'bin/memlawb.ts'))
+    await walk(join(root, 'bin/openrecall.ts'))
+
+    expect(unreadable).toEqual([])
 
     // Positive control: the walk reached every module it claims to cover. This
     // is an exact count, not a floor, because a floor is what let an earlier
     // version of this test lose reach without failing: any module added to or
     // dropped from the production graph should force a look at this number.
-    expect(seen.size).toBe(25)
+    expect(seen.size).toBe(31)
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })

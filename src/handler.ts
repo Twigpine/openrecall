@@ -99,7 +99,7 @@ export async function handleRequest(req: Request): Promise<Response> {
   try {
     res = await respond(req, ctx)
   } catch (err) {
-    console.error(`[memlawb] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
+    console.error(`[openrecall] handler error (${(err as Error)?.constructor?.name ?? 'unknown'})`)
     res = apiError('internal', 'internal error', 500)
   }
   if (res.status >= 400) {

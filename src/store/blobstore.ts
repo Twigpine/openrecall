@@ -31,7 +31,7 @@ export interface BlobStore {
    * promise.
    */
   list(prefix: string): Promise<string[]>
-  /** A short label for logs/health (e.g. "fs:/data", "s3:openrecall"). */
+  /** A short label for logs (e.g. "fs:/data", "s3:openrecall"). */
   describe(): string
   /**
    * Whether `delete` actually removes the bytes. A store that keeps history
