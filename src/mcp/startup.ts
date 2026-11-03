@@ -126,12 +126,18 @@ function isUnexpanded(value: string): boolean {
  */
 const MISEXPANSION_CHECKED = [
   'OPENRECALL_PASSPHRASE',
-  'OPENRECALL_PASSPHRASE_FILE',
   'OPENRECALL_API_KEY',
   'OPENRECALL_NAMESPACE',
 ] as const
 
-const MISEXPANSION_STAKE: Record<(typeof MISEXPANSION_CHECKED)[number], string> = {
+/**
+ * OPENRECALL_PASSPHRASE_FILE shares the refusal but is checked on its own,
+ * before the settings are resolved, because resolving them reads the file.
+ */
+const MISEXPANSION_STAKE: Record<
+  (typeof MISEXPANSION_CHECKED)[number] | 'OPENRECALL_PASSPHRASE_FILE',
+  string
+> = {
   OPENRECALL_PASSPHRASE: 'Starting like this would write memory under a key nobody can reproduce.',
   OPENRECALL_PASSPHRASE_FILE:
     'Without it there is no passphrase to read, and the path in a file error would be the template text rather than anything to go and look at.',
@@ -169,11 +175,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   // "could not be read" about text that is not a path at all.
   const fileVar = read(env, 'OPENRECALL_PASSPHRASE_FILE')
   if (fileVar && isUnexpanded(fileVar)) {
-    return refuse(
-      `OPENRECALL_PASSPHRASE_FILE still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
-        'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
-        MISEXPANSION_STAKE.OPENRECALL_PASSPHRASE_FILE,
-    )
+    return refuseMisexpanded('OPENRECALL_PASSPHRASE_FILE')
   }
   let settings: ReturnType<typeof resolveSettings>
   try {
@@ -200,18 +202,13 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   // one from the launcher's environment.
   const resolved = {
     OPENRECALL_PASSPHRASE: passphrase,
-    OPENRECALL_PASSPHRASE_FILE: undefined,
     OPENRECALL_API_KEY: settings.apiKey,
     OPENRECALL_NAMESPACE: namespace,
   } as const
   for (const name of MISEXPANSION_CHECKED) {
     const value = resolved[name]
     if (value && isUnexpanded(value)) {
-      return refuse(
-        `${name} still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
-          'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
-          MISEXPANSION_STAKE[name],
-      )
+      return refuseMisexpanded(name)
     }
   }
 
@@ -381,6 +378,14 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   }
 
   return { ready: true, client, url, namespace, warnings }
+}
+
+function refuseMisexpanded(name: keyof typeof MISEXPANSION_STAKE): PreflightResult {
+  return refuse(
+    `${name} still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
+      'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
+      MISEXPANSION_STAKE[name],
+  )
 }
 
 function refuse(diagnostic: string): PreflightResult {

@@ -22,8 +22,7 @@ const outdir = process.argv[2] ?? join(root, 'binaries')
 /**
  * The platforms a release ships. Kept here rather than in the workflow so the
  * list is one thing, and so a local run produces what CI produces.
- */
-/**
+ *
  * The musl builds are not fully self-contained: they link against libstdc++ and
  * libgcc, so a bare Alpine cannot load them until `apk add libstdc++`. Measured,
  * not assumed. The glibc builds do run on a stock debian:12-slim with neither
