@@ -16,6 +16,7 @@ import { randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { join, resolve } from 'node:path'
+import { flattenServerText } from '../../client/index.ts'
 import type { ScanMode } from '../../client/secretscan.ts'
 
 export const LOCAL_URL = 'local'
@@ -70,9 +71,7 @@ function clean(v: string | undefined): string | undefined {
 export class PassphraseFileError extends Error {}
 
 function oneLine(text: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
-  const flat = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim()
-  return flat.length > 120 ? `${flat.slice(0, 120)}...` : flat
+  return flattenServerText(text, 120)
 }
 
 /**

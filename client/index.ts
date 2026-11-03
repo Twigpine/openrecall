@@ -154,10 +154,9 @@ type Answer = { ok: boolean; status: number; statusText: string; raw: string }
 /**
  * A refusal from the server, carrying what it actually said.
  *
- * The previous shape flattened every failure into one message string, so a
- * caller could not tell a stale write from a bad key from a quota breach, and
- * an agent surfacing it had nothing to act on. `code` is the server's own error
- * code and `details` its payload, so a stale write names the keys that moved.
+ * `code` is the server's own error code and `details` its payload, so a caller
+ * can tell a stale write from a bad key from a quota breach, and a stale write
+ * names the keys that moved.
  */
 export class OpenRecallHttpError extends Error {
   constructor(
@@ -372,10 +371,9 @@ export class OpenRecallClient {
     try {
       const res = await this.fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) })
       // A body that fails to read for any other reason still yields an Answer,
-      // so a refusal whose body is unreadable stays a OpenRecallHttpError with an
-      // empty text rather than becoming a bare transport throw. That is what
-      // the `.catch(() => '')` in httpError used to do; only the timeout is
-      // allowed past, because typing it is the point.
+      // so a refusal whose body is unreadable stays an OpenRecallHttpError with
+      // an empty text rather than becoming a bare transport throw. Only the
+      // timeout is allowed past, because typing it is the point.
       const raw = await res.text().catch((err: unknown) => {
         if ((err as Error)?.name === 'TimeoutError') throw err
         return ''
@@ -407,12 +405,22 @@ export class OpenRecallClient {
 
   /** Fetch per-key ciphertext checksums (no bodies). Empty if namespace is new. */
   async hashes(namespace: string): Promise<Record<string, string>> {
-    const checksums = (await this.hashesView(namespace)).entryChecksums
+    return (await this.hashesAndSupports(namespace)).checksums
+  }
+
+  /**
+   * `hashes`, plus the capabilities the server advertised on the same read, so
+   * a caller that wants both (the MCP startup check) does not ask twice.
+   */
+  async hashesAndSupports(
+    namespace: string,
+  ): Promise<{ checksums: Record<string, string>; supports: string[] }> {
+    const { entryChecksums: checksums, supports } = await this.hashesView(namespace)
     // Authoritative: these ARE the manifest's checksums, and a base is a
     // ciphertext hash, so this read is exact for the precondition even though
     // it carries no bodies.
     lruSet(this.observed, namespace, { hashes: { ...checksums }, enumerated: true })
-    return checksums
+    return { checksums, supports }
   }
 
   /**
@@ -522,11 +530,11 @@ export class OpenRecallClient {
    *
    * The bounded counterpart to `pull`, for a caller that needs one thing about
    * a namespace and should not have to ship up to 10 MB (roughly 13 MB of
-   * base64) to learn it. The MCP startup preflight is the caller that made this
-   * necessary; every agent session used to pay a full namespace read before its
+   * base64) to learn it. The MCP startup preflight is the caller that needs
+   * this, so an agent session does not pay a full namespace read before its
    * first tool call.
    *
-   * Every refusal reaches the caller as a `OpenRecallHttpError`, including both
+   * Every refusal reaches the caller as an `OpenRecallHttpError`, including both
    * 404s. `pull` translates the server's `empty` into an empty result because a
    * namespace with nothing in it is a legitimate answer to "give me everything";
    * there is no such answer to "give me this key", and returning an empty
@@ -564,9 +572,7 @@ export class OpenRecallClient {
     } catch (err) {
       throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
     }
-    const observed = this.observed.get(namespace) ?? { hashes: {}, enumerated: false }
-    observed.hashes[entryKey] = ciphertextHash(data.entry)
-    lruSet(this.observed, namespace, observed)
+    this.record(namespace, { [entryKey]: data.entry }, [])
     return plaintext
   }
 
@@ -725,10 +731,10 @@ export class OpenRecallClient {
    * Fold a successful write into what this client has observed.
    *
    * Creates the map when there is none: a write is itself knowledge of what the
-   * namespace holds. It used to return early instead, so a client that only
-   * ever wrote never armed the precondition and its SECOND push silently
-   * clobbered whatever had landed in between. The new map is not enumerated,
-   * since a write says nothing about the keys it did not touch.
+   * namespace holds. Without it a client that only ever wrote would never arm
+   * the precondition, and its SECOND push would silently clobber whatever had
+   * landed in between. The new map is not enumerated, since a write says
+   * nothing about the keys it did not touch.
    */
   private record(namespace: string, written: Record<string, string>, deleted: string[]): void {
     let observed = this.observed.get(namespace)
@@ -742,16 +748,15 @@ export class OpenRecallClient {
 /**
  * `sentBase` is what THIS client wrote against, which the server's payload
  * cannot supply: a refusal reports only what each key holds now. Without it a
- * caller can say what changed but not what it was working from, and KTD3 asks
- * the tool text for both.
+ * caller can say what changed but not what it was working from, and the tool
+ * text needs both.
  */
 function httpError(res: Answer, sentBase?: Record<string, string | null>): OpenRecallHttpError {
   let code = 'unknown'
   let details: Record<string, unknown> | undefined
-  // The body was read ONCE, in `request`. This used to call res.json() and then
-  // res.text() on the same Response, so the non-JSON fallback ran against an
-  // already-consumed body and every non-JSON refusal rendered as a bare status
-  // with no detail.
+  // The body was read ONCE, in `request`. Reading a Response twice (json(), then
+  // text() for the non-JSON fallback) hits an already-consumed body and renders
+  // every non-JSON refusal as a bare status with no detail.
   const raw = res.raw
   try {
     const body = JSON.parse(raw) as {
@@ -763,15 +768,12 @@ function httpError(res: Answer, sentBase?: Record<string, string | null>): OpenR
     // Not JSON. The raw text is the only thing there is to report.
   }
   return new OpenRecallHttpError(
-    `openrecall ${res.status} ${safeText(res.statusText)}: ${safeText(raw)}`,
+    `openrecall ${res.status} ${flattenServerText(res.statusText)}: ${flattenServerText(raw)}`,
     res.status,
     code,
     sentBase ? { ...details, sentBase } : details,
   )
 }
-
-/** How much server-supplied text an error message may carry. */
-const MAX_SERVER_TEXT = 200
 
 /**
  * Bound and de-fang text the server chose, before it lands in `Error.message`.
@@ -782,7 +784,7 @@ const MAX_SERVER_TEXT = 200
  * message is treated this way: `code` and `details` stay verbatim, because they
  * are the machine-readable half and a caller matches on them.
  */
-function safeText(text: string): string {
+export function flattenServerText(text: string, max = 200): string {
   const clean = text
     // ANSI sequences whole, so stripping ESC does not leave `[31m` behind.
     // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
@@ -791,7 +793,7 @@ function safeText(text: string): string {
     .replace(/[\u0000-\u001f\u007f-\u009f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim()
-  return clean.length > MAX_SERVER_TEXT ? `${clean.slice(0, MAX_SERVER_TEXT)}...` : clean
+  return clean.length > max ? `${clean.slice(0, max)}...` : clean
 }
 
 export { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'

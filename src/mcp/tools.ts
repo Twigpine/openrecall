@@ -9,7 +9,11 @@
  * these tools do.
  */
 
-import { type OpenRecallClient, OpenRecallHttpError } from '../../client/index.ts'
+import {
+  flattenServerText,
+  type OpenRecallClient,
+  OpenRecallHttpError,
+} from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { validateNamespace } from '../namespace.ts'
 import { rankEntriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
@@ -38,14 +42,12 @@ const byKey = ([a]: [string, unknown], [b]: [string, unknown]) => (a < b ? -1 : 
  * Newlines and escapes are the sharp part: they let that text forge turns or
  * instructions rather than merely be long.
  *
- * Bounding only the unrecognized-failure path, which was the first version of
- * this, left the typed paths carrying it. Those are the ones a server can
- * actually steer, since it chooses the status that selects them.
+ * It covers the typed paths as well as the unrecognized-failure path: those
+ * are the ones a server can actually steer, since it chooses the status that
+ * selects them.
  */
 function bounded(message: string, max = 300): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: stripping them is the point.
-  const clean = message.replace(/[\u0000-\u001f\u007f]+/g, ' ').trim()
-  return clean.length > max ? `${clean.slice(0, max)}...` : clean
+  return flattenServerText(message, max)
 }
 
 /**
@@ -83,10 +85,10 @@ function ownerRoot(namespace: string): string | null {
 /**
  * Render a server refusal as text a model can act on.
  *
- * Every failure used to collapse into one string wrapping the raw JSON body,
- * which tells a model that something went wrong and nothing about what to do
- * next: a stale write, a wrong API key and a rate limit all read the same. Each
- * status now gets its own text with its own recovery move.
+ * One string wrapping the raw JSON body tells a model that something went
+ * wrong and nothing about what to do next: a stale write, a wrong API key and a
+ * rate limit would all read the same. Each status gets its own text with its
+ * own recovery move.
  *
  * The 403 text deliberately does NOT echo the namespace that was refused. A
  * denial is the one moment the caller is provably reaching outside its own

@@ -22,7 +22,7 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
-import { generatePassphrase as generateCardPassphrase, renderSetupCard } from '../client/setup.ts'
+import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
 import {
   configTooOpen,
@@ -179,7 +179,7 @@ function cmdCard(owner: string, url: string | undefined) {
   })
   console.log(card)
   console.log(
-    `Your new passphrase (shown once, back it up now):\n\n  ${generateCardPassphrase()}\n`,
+    `Your new passphrase (shown once, back it up now):\n\n  ${generateRetypablePassphrase()}\n`,
   )
 }
 

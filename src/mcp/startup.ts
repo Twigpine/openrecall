@@ -30,6 +30,7 @@
 
 import type { Erasure } from '../../client/index.ts'
 import {
+  flattenServerText,
   type OpenRecallClient,
   OpenRecallDecryptError,
   OpenRecallHttpError,
@@ -48,6 +49,17 @@ function read(env: Env, name: string): string | undefined {
   const v = env[name]
   return v?.trim() ? v.trim() : undefined
 }
+
+/**
+ * How many entries the passphrase proof may read before giving up.
+ *
+ * One would let a single drifted entry condemn a namespace whose others are
+ * fine; unbounded would put the whole namespace back on the startup path, which
+ * is what this proof exists to avoid. Five keeps the worst case at five small
+ * reads, and a namespace whose first five entries are all unreadable is broken
+ * enough that refusing to start is the honest answer.
+ */
+const PROBE_LIMIT = 5
 
 /**
  * An unexpanded variable reference, in either spelling a launcher can leave
@@ -92,17 +104,6 @@ function read(env: Env, name: string): string | undefined {
  * and nothing else, is recoverable: preflight gates only `openrecall mcp`, so the
  * CLI can still pull that namespace and push it again under a new passphrase.
  */
-/**
- * How many entries the passphrase proof may read before giving up.
- *
- * One would let a single drifted entry condemn a namespace whose others are
- * fine; unbounded would put the whole namespace back on the startup path, which
- * is what this proof exists to avoid. Five keeps the worst case at five small
- * reads, and a namespace whose first five entries are all unreadable is broken
- * enough that refusing to start is the honest answer.
- */
-const PROBE_LIMIT = 5
-
 const UNEXPANDED_BRACED = /\$\{[^}]*\}/
 const UNEXPANDED_BARE = /^\$[A-Z_][A-Z0-9_]*$/
 
@@ -126,12 +127,18 @@ function isUnexpanded(value: string): boolean {
  */
 const MISEXPANSION_CHECKED = [
   'OPENRECALL_PASSPHRASE',
-  'OPENRECALL_PASSPHRASE_FILE',
   'OPENRECALL_API_KEY',
   'OPENRECALL_NAMESPACE',
 ] as const
 
-const MISEXPANSION_STAKE: Record<(typeof MISEXPANSION_CHECKED)[number], string> = {
+/**
+ * OPENRECALL_PASSPHRASE_FILE shares the refusal but is checked on its own,
+ * before the settings are resolved, because resolving them reads the file.
+ */
+const MISEXPANSION_STAKE: Record<
+  (typeof MISEXPANSION_CHECKED)[number] | 'OPENRECALL_PASSPHRASE_FILE',
+  string
+> = {
   OPENRECALL_PASSPHRASE: 'Starting like this would write memory under a key nobody can reproduce.',
   OPENRECALL_PASSPHRASE_FILE:
     'Without it there is no passphrase to read, and the path in a file error would be the template text rather than anything to go and look at.',
@@ -149,9 +156,7 @@ const MISEXPANSION_STAKE: Record<(typeof MISEXPANSION_CHECKED)[number], string> 
  * needs the sentence around it.
  */
 function oneLine(text: string): string {
-  // biome-ignore lint/suspicious/noControlCharactersInRegex: removing them is the point
-  const clean = text.replace(/[\u0000-\u001f\u007f-\u009f]+/g, ' ').trim()
-  return clean.length > 120 ? `${clean.slice(0, 120)}...` : clean
+  return flattenServerText(text, 120)
 }
 
 /**
@@ -160,22 +165,18 @@ function oneLine(text: string): string {
  */
 export async function preflight(env: Env = process.env): Promise<PreflightResult> {
   // Env over config file over defaults, the same resolution the CLI uses. A bad
-  // URL or scan mode throws here; a typo in the scan mode used to be cast
-  // rather than checked, which built a client whose secret scanner was in no
-  // recognized mode and silently weakened the guard that keeps a live
-  // credential from being encrypted and stored. Refusing is the only safe
-  // answer, so the settings error is the diagnostic.
+  // URL or scan mode throws here. A scan mode that is cast rather than checked
+  // builds a client whose secret scanner is in no recognized mode, silently
+  // weakening the guard that keeps a live credential from being encrypted and
+  // stored. Refusing is the only safe answer, so the settings error is the
+  // diagnostic.
   //
   // The passphrase file's path is checked for template text first: resolving the
   // settings reads that file, and an unexpanded path would otherwise surface as
   // "could not be read" about text that is not a path at all.
   const fileVar = read(env, 'OPENRECALL_PASSPHRASE_FILE')
   if (fileVar && isUnexpanded(fileVar)) {
-    return refuse(
-      `OPENRECALL_PASSPHRASE_FILE still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
-        'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
-        MISEXPANSION_STAKE.OPENRECALL_PASSPHRASE_FILE,
-    )
+    return refuseMisexpanded('OPENRECALL_PASSPHRASE_FILE')
   }
   let settings: ReturnType<typeof resolveSettings>
   try {
@@ -197,27 +198,22 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   const namespace = settings.namespace
   const passphrase = settings.passphrase
 
-  // 1. Misexpansion, before anything is sent anywhere. Checked on the resolved
+  // Misexpansion, before anything is sent anywhere. Checked on the resolved
   // values, so a template that came from the config file is caught as well as
   // one from the launcher's environment.
   const resolved = {
     OPENRECALL_PASSPHRASE: passphrase,
-    OPENRECALL_PASSPHRASE_FILE: undefined,
     OPENRECALL_API_KEY: settings.apiKey,
     OPENRECALL_NAMESPACE: namespace,
   } as const
   for (const name of MISEXPANSION_CHECKED) {
     const value = resolved[name]
     if (value && isUnexpanded(value)) {
-      return refuse(
-        `${name} still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
-          'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
-          MISEXPANSION_STAKE[name],
-      )
+      return refuseMisexpanded(name)
     }
   }
 
-  // 2. Missing passphrase. Not a corruption risk (nothing can be read or
+  // Missing passphrase. Not a corruption risk (nothing can be read or
   // written without it), so the server still starts and its tools return the
   // fix; see server.ts.
   if (!passphrase) {
@@ -235,7 +231,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   const timeoutMs = Number(read(env, 'OPENRECALL_TIMEOUT_MS') ?? '') || undefined
   const client = await makeClient(settings, { timeoutMs })
 
-  // 4, 5, 6. One authenticated read of the pinned namespace separates a
+  // One authenticated read of the pinned namespace separates a
   // transport failure from a refusal, and a rejected key from a namespace this
   // key does not own. They are debugged in completely different places.
   // Built once: an unmapped status can surface from either read, and two
@@ -260,8 +256,9 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   const warnings: string[] = []
 
   let checksums: Record<string, string>
+  let supports: string[]
   try {
-    checksums = await client.hashes(namespace)
+    ;({ checksums, supports } = await client.hashesAndSupports(namespace))
   } catch (err) {
     if (err instanceof OpenRecallTimeoutError) return refuseNoAnswer(err)
     if (!(err instanceof OpenRecallHttpError)) {
@@ -289,7 +286,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
     return refuseHttp(err)
   }
 
-  // 7. A non-blocking scan against a store that cannot erase. On fs and s3 a
+  // A non-blocking scan against a store that cannot erase. On fs and s3 a
   // credential the scanner merely warned about can be deleted afterwards. On a
   // retaining store (the node driver) it stays in repository history and in any
   // pin already taken, so `warn` and `off` promise a cleanup this deployment
@@ -309,7 +306,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
     )
   }
 
-  // 8. Undecryptable namespace. This can only run once the read above reports
+  // Undecryptable namespace. This can only run once the read above reports
   // entries: against an empty namespace nothing exists to authenticate, so a
   // wrong passphrase is indistinguishable from a first-run one and starting is
   // the correct answer. Nothing is lost by it, because the first save is what
@@ -359,9 +356,9 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
           }
           return refuseHttp(err)
         }
-        // Everything else that can break this read used to land on the
-        // passphrase diagnostic; acting on that advice after a transient
-        // failure is what creates the mixed-key namespace.
+        // Everything else that can break this read must not be blamed on the
+        // passphrase: acting on that advice after a transient failure is what
+        // creates the mixed-key namespace.
         return refuse(
           `the startup read of namespace "${namespace}" from ${url} failed before anything could be decrypted: ${oneLine((err as Error).message)}. ` +
             'This is a transport or response failure, not a passphrase problem, so do not change OPENRECALL_PASSPHRASE on the strength of it. ' +
@@ -388,26 +385,28 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
     }
   }
 
-  // 8. Whether this deployment enforces the write precondition. Never fatal: a
+  // Whether this deployment enforces the write precondition. Never fatal: a
   // server too old to advertise it is supported, and memory works. But it
   // accepts a save that overwrites a newer entry without saying so, and an
   // operator who thinks the guarantee is in force should hear otherwise once at
-  // startup rather than after losing a write. Costs one bodyless GET, paid
-  // after every refusal path has already returned.
-  try {
-    if (!(await client.preconditionEnforced(namespace))) {
-      warnings.push(
-        `the openrecall server at ${url} does not enforce the write precondition, so a save that overwrites a newer version of an entry is accepted silently. ` +
-          'Memory works; upgrade the server to get the stale-write guarantee back.',
-      )
-    }
-  } catch {
-    // The reads above already succeeded, so a failure here is a blip on an
-    // advisory check. Refusing startup over it would be the tail wagging the
-    // dog.
+  // startup rather than after losing a write. Read off the first hashes read,
+  // so it costs no request.
+  if (!supports.includes('base-precondition')) {
+    warnings.push(
+      `the openrecall server at ${url} does not enforce the write precondition, so a save that overwrites a newer version of an entry is accepted silently. ` +
+        'Memory works; upgrade the server to get the stale-write guarantee back.',
+    )
   }
 
   return { ready: true, client, url, namespace, warnings }
+}
+
+function refuseMisexpanded(name: keyof typeof MISEXPANSION_STAKE): PreflightResult {
+  return refuse(
+    `${name} still holds an unexpanded variable reference, so this server was launched with template text instead of a value. ` +
+      'Set the variable in the environment that launches the MCP server, or put the value itself in the config. ' +
+      MISEXPANSION_STAKE[name],
+  )
 }
 
 function refuse(diagnostic: string): PreflightResult {
