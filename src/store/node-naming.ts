@@ -25,7 +25,7 @@
  *
  * Three fixed labels, one secret, three purposes that must never collide:
  * repo name, wrapping key, entry leaf. Rotating the secret re-paths and
- * re-wraps everything (KTD7), so it is rotatable only by migration.
+ * re-wraps everything, so it is rotatable only by migration.
  *
  * Nothing here moves key material toward the server's crypto-blind boundary.
  * The wrapping key covers the manifest and the usage record, which are stored
@@ -54,7 +54,7 @@ export const META_SCOPE = 'meta'
  */
 export const NODE_STORE_DESCRIPTION = 'node'
 
-const SLUG_RE = /^[0-9a-f]{64}$/
+export const SLUG_RE = /^[0-9a-f]{64}$/
 
 const WRAP_VERSION = 0x01
 const NONCE_LEN = 12

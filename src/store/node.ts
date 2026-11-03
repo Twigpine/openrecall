@@ -7,14 +7,14 @@
  * to be *proved* private rather than assumed. The node's create-repo request
  * defaults to public, so private is a value sent explicitly, and the record is
  * re-read before every push and not only at first use: a repo flipped public
- * mid-process would otherwise publish on the next write (KTD8).
+ * mid-process would otherwise publish on the next write.
  *
  * Reads come from a local clone, which is authoritative because openrecall is the
  * only writer under its identity and runs one instance. A write stages, commits
  * and pushes; if the push fails the commit stays in the clone, so the next write
  * pushes both and nothing is lost to a node outage.
  *
- * No signature code lives here (KTD9). `git` with the node's remote helper does
+ * No signature code lives here. `git` with the node's remote helper does
  * the signing from the identity file, and `gl` does repo creation and the
  * visibility read. The identity is never read into this process: only its path
  * is handed to the subprocess, in an environment built from an allowlist so the
@@ -22,7 +22,7 @@
  *
  * Erasure is `retains`: git history keeps the bytes a delete removes from the
  * tree, and the node's anchors are permanent. The client reads that and refuses
- * a scan mode that would let a secret land somewhere unremovable (KTD10).
+ * a scan mode that would let a secret land somewhere unremovable.
  */
 
 import { spawn } from 'node:child_process'
@@ -89,7 +89,7 @@ function cause(r: CommandResult): string {
 }
 
 /** Refusal to write to a repo the node does not report private. */
-export class NodePublicRepoError extends Error {
+class NodePublicRepoError extends Error {
   constructor(repo: string, found: Visibility) {
     super(
       `node repo ${repo} is ${found}, refusing to write: a public repo on this node is ` +
@@ -272,20 +272,44 @@ export class NodeBlobStore implements BlobStore {
     if (head.code !== 0) await this.git(dir, ['symbolic-ref', 'HEAD', 'refs/heads/main'])
   }
 
-  private async owner(): Promise<string> {
-    if (this.ownerDid) return this.ownerDid
-    const r = await this.command('gl', ['whoami', '--dir', this.identityDir])
-    const m = /did:key:[1-9A-HJ-NP-Za-km-z]+/.exec(r.out)
-    if (r.code !== 0 || !m) throw new Error('node store could not resolve its own identity DID')
-    this.ownerDid = m[0]
-    return this.ownerDid
+  private owner(): Promise<string> {
+    return this.once('owner', async () => {
+      if (this.ownerDid) return this.ownerDid
+      const r = await this.command('gl', ['whoami', '--dir', this.identityDir])
+      const m = /did:key:[1-9A-HJ-NP-Za-km-z]+/.exec(r.out)
+      if (r.code !== 0 || !m) throw new Error('node store could not resolve its own identity DID')
+      this.ownerDid = m[0]
+      return this.ownerDid
+    })
   }
 
-  private async root(): Promise<string> {
-    if (this.workdir) return this.workdir
-    this.workdir = this.workdirOption ?? (await mkdtemp(join(tmpdir(), 'openrecall-node-')))
-    await mkdir(this.workdir, { recursive: true })
-    return this.workdir
+  private root(): Promise<string> {
+    return this.once('root', async () => {
+      if (this.workdir) return this.workdir
+      const dir = this.workdirOption ?? (await mkdtemp(join(tmpdir(), 'openrecall-node-')))
+      await mkdir(dir, { recursive: true })
+      this.workdir = dir
+      return dir
+    })
+  }
+
+  /**
+   * Run a first-use initializer once, even when several calls arrive before the
+   * first settles: two concurrent root() calls would each make a temp directory
+   * and the second would orphan the first's clones, and two owner() calls would
+   * each spawn `gl whoami`. A failure is not cached, so a later call retries.
+   */
+  private readonly inflight = new Map<string, Promise<string>>()
+  private once(name: string, init: () => Promise<string>): Promise<string> {
+    let p = this.inflight.get(name)
+    if (!p) {
+      p = init().finally(() => {
+        // Settled: success is remembered by the field it set, failure is retried.
+        this.inflight.delete(name)
+      })
+      this.inflight.set(name, p)
+    }
+    return p
   }
 
   // ── Commit and push ───────────────────────────────────────────────────────

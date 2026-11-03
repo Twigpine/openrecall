@@ -598,7 +598,7 @@ export class OpenRecallClient {
 
     const key = this.key(namespace)
     const view = await this.hashesView(namespace)
-    // R28. On an erasing store a warned-through credential can be deleted; on a
+    // On an erasing store a warned-through credential can be deleted; on a
     // retaining one it is in history and in any pin already taken, permanently.
     // That is a different bargain than the caller opted into, so refuse rather
     // than warn, and refuse here: nothing has been encrypted or uploaded yet.

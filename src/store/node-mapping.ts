@@ -2,7 +2,7 @@
  * Node store driver: store path -> node repo plus in-repo path.
  *
  * openrecall addresses everything by a flat store path; the node addresses things
- * by repo and path within it. KTD6 fixes the shape of that translation: one
+ * by repo and path within it. The translation has one fixed shape: one
  * private repo per namespace, so a repo is the unit that can be created,
  * verified private and (if it ever came to it) deleted per tenant, and one
  * shared meta repo for the two things that belong to no namespace, the owner
@@ -23,7 +23,7 @@
  * it identifies nothing about the namespace it belongs to.
  */
 
-import { META_SCOPE, type NodeNaming } from './node-naming.ts'
+import { META_SCOPE, type NodeNaming, SLUG_RE } from './node-naming.ts'
 import { PROBE_PREFIX } from './probe.ts'
 
 /** Where one store object lives on the node, and whether the driver wraps it. */
@@ -41,7 +41,6 @@ export type NodeObject = {
   wrap: boolean
 }
 
-const SLUG_RE = /^[0-9a-f]{64}$/
 const NS_PREFIX = 'ns/'
 const OWNERS_PREFIX = 'owners/'
 

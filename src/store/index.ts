@@ -13,8 +13,8 @@ let cached: BlobStore | null = null
 /**
  * Build the driver one name selects. Unknown names refuse rather than falling
  * through to the filesystem: `config.store` is an unvalidated cast of the STORE
- * variable, so `s3x` used to serve local disk silently while every gate,
- * including the startup probe, reported a healthy store (KTD14).
+ * variable, so a typo such as `s3x` would serve local disk silently while every
+ * gate, including the startup probe, reported a healthy store.
  */
 export function createStore(driver: string = config.store): BlobStore {
   switch (driver) {

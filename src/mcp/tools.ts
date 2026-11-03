@@ -707,7 +707,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       const ns = nsOf(namespace)
       try {
         const erasure = await client.delete(ns, key)
-        // R27. On a retaining store the bare success text is a false promise:
+        // On a retaining store the bare success text is a false promise:
         // the entry is out of the namespace, but its prior ciphertext stays in
         // history and in any pin already taken. The agent is what tells the user
         // their memory is gone, so the difference has to reach this text. A

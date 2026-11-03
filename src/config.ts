@@ -26,8 +26,8 @@ function envBool(name: string, fallback: boolean): boolean {
  *
  * Exported so the refusal message and the reader cannot drift: a test sets the
  * exact value the message tells an operator to set and asserts this accepts it.
- * The first version of that message said `=1` while this accepts only `true`,
- * so following it exactly changed nothing.
+ * This accepts only `true`, so a message naming any other value would change
+ * nothing when followed exactly.
  */
 export function readNodeAcknowledgement(): boolean {
   return envBool('GITLAWB_NODE_ACKNOWLEDGE', false)

@@ -32,7 +32,7 @@
 
 import { config } from '../src/config.ts'
 import { namespaceSlug } from '../src/namespace.ts'
-import { blobPrefix, manifestPath } from '../src/store/blobstore.ts'
+import { blobPrefix, entryPath, manifestPath } from '../src/store/blobstore.ts'
 import { NodeBlobStore } from '../src/store/node.ts'
 
 type Args = {
@@ -117,7 +117,7 @@ const next = store(to)
 const prefixes = [
   ...args.namespaces.flatMap(ns => {
     const slug = namespaceSlug(ns)
-    return [blobPrefix(slug), `ns/${slug}/entries/`]
+    return [blobPrefix(slug), entryPath(slug, '')]
   }),
   ...args.owners.map(o => `owners/${o}/`),
 ]
