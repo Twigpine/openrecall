@@ -24,5 +24,11 @@
         "noNonNullAssertion": "off"
       }
     }
-  }
+  },
+  "overrides": [
+    {
+      "includes": [".claude-plugin/plugin.json"],
+      "formatter": { "enabled": false }
+    }
+  ]
 }

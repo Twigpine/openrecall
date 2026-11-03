@@ -9,11 +9,21 @@
   "homepage": "https://github.com/Twigpine/openrecall",
   "repository": "https://github.com/Twigpine/openrecall",
   "license": "MIT",
-  "keywords": ["memory", "mcp", "zero-knowledge", "encryption", "cross-session"],
+  "keywords": [
+    "memory",
+    "mcp",
+    "zero-knowledge",
+    "encryption",
+    "cross-session"
+  ],
   "mcpServers": {
     "openrecall": {
       "command": "npx",
-      "args": ["-y", "@twigpine/openrecall", "mcp"]
+      "args": [
+        "-y",
+        "@twigpine/openrecall",
+        "mcp"
+      ]
     }
   }
 }
