@@ -48,6 +48,7 @@
     "client",
     "src",
     "skills",
+    "docs/assets/brand",
     ".claude-plugin",
     "migrations",
     "*.md",

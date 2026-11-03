@@ -34,6 +34,25 @@ Restart each agent, or start a new session, afterwards.
 `openrecall status` shows the active config and checks that the store
 responds.
 
+## Project memory and shared preferences
+
+The agent starts a project task with `memory_projects` to find its existing ID,
+then `memory_project` to register or reopen it. Use a stable repository identity
+such as `github.com/twigpine/openrecall`, including host and owner. Avoid local
+paths and branch names, which vary across machines and sessions.
+
+The project tool returns two namespaces. Save project decisions, architecture,
+and references in the project namespace; save user preferences and feedback
+that applies everywhere in the shared namespace. `memory_recall` can take both
+as `namespaces: [shared, project]`, producing one ranked, bounded answer with
+the namespace attached to each hit. Follow-up reads and all writes should pass
+their namespace explicitly. Opening a project does not change defaults.
+
+The directory is encrypted and paginated (`limit` defaults to 20, maximum 50;
+`offset` selects the next page). Other agents see it through the same store and
+passphrase. Local stores on different machines remain separate until synced
+to the same remote store. Existing entries are left in their original scopes.
+
 ## What `setup` does for each agent
 
 | Agent | Registers the MCP server | Teaches the memory discipline |

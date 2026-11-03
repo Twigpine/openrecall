@@ -68,6 +68,8 @@ for (const l of launchers) {
           'memory_delete',
           'memory_get',
           'memory_list',
+          'memory_project',
+          'memory_projects',
           'memory_recall',
           'memory_save',
           'memory_search',
@@ -134,6 +136,81 @@ for (const l of launchers) {
         expect(text(r)).toContain('openrecall init')
       } finally {
         await c.close()
+      }
+    }, 30_000)
+
+    test('agents discover projects, recall shared and project facts together, and encrypt the directory', async () => {
+      const home = freshHome()
+      const env = { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'project-probe' }
+      const [agentA, agentB] = await Promise.all([connect(l, env), connect(l, env)])
+      try {
+        const project = 'github.com/twigpine/drawstrike'
+        const opened = text(
+          await agentA.callTool({ name: 'memory_project', arguments: { project } }),
+        )
+        const namespace = opened.match(/^Project namespace: (.+)$/m)?.[1]
+        expect(namespace).toBeDefined()
+        const other = text(
+          await agentB.callTool({
+            name: 'memory_project',
+            arguments: { project: 'github.com/other/drawstrike' },
+          }),
+        ).match(/^Project namespace: (.+)$/m)?.[1]
+        expect(other).toBeDefined()
+        expect(other).not.toBe(namespace)
+        const directory = text(await agentB.callTool({ name: 'memory_projects', arguments: {} }))
+        expect(directory).toContain(project)
+        expect(directory).toContain(namespace!)
+
+        await agentA.callTool({
+          name: 'memory_save',
+          arguments: { key: 'prefs.md', content: 'Release notes must be concise and reviewed.' },
+        })
+        await agentB.callTool({
+          name: 'memory_save',
+          arguments: {
+            key: 'prefs.md',
+            namespace,
+            content: 'Release Drawstrike to the zircon preview cluster.',
+          },
+        })
+        await agentB.callTool({
+          name: 'memory_save',
+          arguments: {
+            key: 'prefs.md',
+            namespace: other,
+            content: 'Release to the forbidden cluster.',
+          },
+        })
+        const result = text(
+          await agentA.callTool({
+            name: 'memory_recall',
+            arguments: { query: 'release', namespaces: ['user:me', namespace] },
+          }),
+        )
+        expect(result).toContain('concise and reviewed')
+        expect(result).toContain('zircon preview cluster')
+        expect(result).not.toContain('forbidden cluster')
+        expect(result).toContain(`### prefs.md (${namespace})`)
+        const shared = text(
+          await agentA.callTool({ name: 'memory_recall', arguments: { query: 'release' } }),
+        )
+        expect(shared).not.toContain('zircon preview cluster')
+        expect(shared).toContain('concise and reviewed')
+
+        const dataDir = join(home, 'data')
+        for (const rel of readdirSync(dataDir, { recursive: true }) as string[]) {
+          try {
+            const stored = readFileSync(join(dataDir, rel), 'utf8')
+            expect(stored).not.toContain(project)
+            expect(stored).not.toContain('zircon preview cluster')
+            expect(stored).not.toContain('concise and reviewed')
+          } catch (err) {
+            if ((err as NodeJS.ErrnoException).code !== 'EISDIR') throw err
+          }
+        }
+      } finally {
+        await Promise.all([agentA.close(), agentB.close()])
       }
     }, 30_000)
   })
