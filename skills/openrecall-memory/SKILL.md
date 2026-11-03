@@ -137,7 +137,7 @@ same tools. If your agent shows MCP tools by name only until you look them up
 (a tool-search step), search for "openrecall" first.
 
 - `memory_save(key, content)` — `key` is a path that mirrors a memory directory
-  layout; `content` is markdown. Saving the same `key` overwrites it.
+  layout; `content` is markdown. Saving the same `key` overwrites it, unless the entry changed since this session last read it. A stale save is refused and names the keys that moved: read each with `memory_get`, merge, and save again.
 - `memory_recall(query, limit?)` — relevance-ranked entries for a query.
 - `memory_recall(query, namespaces: [shared, project], limit?)` — one ranked,
   bounded result across up to eight explicit namespaces. Use `namespace` or

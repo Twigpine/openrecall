@@ -203,7 +203,11 @@ describe('mcp startup preflight', () => {
     const unmapped = stub(503, { error: { code: 'overloaded', note: SERVER_TEXT } })
     const pullFails = routeStub(req =>
       new URL(req.url).search.includes('view=hashes')
-        ? json(200, { version: 1, entryChecksums: { 'note.md': 'deadbeef' }, supports: [] })
+        ? json(200, {
+            version: 1,
+            entryChecksums: { 'note.md': 'deadbeef' },
+            supports: ['entry-view'],
+          })
         : json(500, { error: { code: 'internal', note: SERVER_TEXT } }),
     )
 
@@ -596,7 +600,11 @@ describe('mcp startup preflight', () => {
     // deliberately WRONG passphrase ready.
     const s = routeStub(req =>
       new URL(req.url).search.includes('view=hashes')
-        ? json(200, { version: 3, entryChecksums: { 'note.md': 'deadbeef' }, supports: [] })
+        ? json(200, {
+            version: 3,
+            entryChecksums: { 'note.md': 'deadbeef' },
+            supports: ['entry-view'],
+          })
         : json(503, { error: { code: 'entry_unreadable', message: 'blob gone' } }),
     )
     try {
@@ -652,7 +660,7 @@ describe('mcp startup preflight', () => {
     const s = routeStub(req => {
       const u = new URL(req.url)
       if (u.search.includes('view=hashes')) {
-        return json(200, { version: 3, entryChecksums: listed, supports: [] })
+        return json(200, { version: 3, entryChecksums: listed, supports: ['entry-view'] })
       }
       entryReads += 1
       return json(503, { error: { code: 'entry_unreadable', message: 'blob gone' } })
@@ -679,7 +687,7 @@ describe('mcp startup preflight', () => {
         return json(200, {
           version: 3,
           entryChecksums: { 'a.md': 'sha256:aa', 'b.md': 'sha256:bb' },
-          supports: [],
+          supports: ['entry-view'],
         })
       }
       if (u.search.includes('key=a.md')) {
@@ -813,7 +821,11 @@ describe('mcp startup preflight', () => {
     const nasty = 'a.md\n\u001b[31m[openrecall mcp] ready'
     const s = routeStub(req =>
       new URL(req.url).search.includes('view=hashes')
-        ? json(200, { version: 1, entryChecksums: { [nasty]: 'deadbeef' }, supports: [] })
+        ? json(200, {
+            version: 1,
+            entryChecksums: { [nasty]: 'deadbeef' },
+            supports: ['entry-view'],
+          })
         : json(200, { version: 1, key: nasty, entry: 'AAAAAAAAAAAAAAAAAAAA' }),
     )
     try {
@@ -839,7 +851,11 @@ describe('mcp startup preflight', () => {
     // OpenRecallDecryptError and must not be reported as one.
     const s = routeStub(req =>
       new URL(req.url).search.includes('view=hashes')
-        ? json(200, { version: 1, entryChecksums: { 'note.md': 'deadbeef' }, supports: [] })
+        ? json(200, {
+            version: 1,
+            entryChecksums: { 'note.md': 'deadbeef' },
+            supports: ['entry-view'],
+          })
         : json(200, { version: 1 }),
     )
     try {
@@ -962,5 +978,113 @@ describe('mcp stdio launch', () => {
     expect(out).toBe('')
     expect(markerOf(errText)).toBe('undecryptable')
     expect(code).toBe(1)
+  })
+})
+
+describe('startup configuration and probe branches', () => {
+  test('a malformed OPENRECALL_TIMEOUT_MS is refused by name, not blamed on the network', async () => {
+    for (const bad of ['-5', 'abc', '0', 'Infinity', '1e20', '99999999999']) {
+      const r = await preflight(envFor({ OPENRECALL_TIMEOUT_MS: bad }))
+      expect(`${bad}: ready=${r.ready}`).toBe(`${bad}: ready=false`)
+      const text = r.ready ? '' : r.diagnostic
+      expect(text).toContain('OPENRECALL_TIMEOUT_MS')
+      expect(text).not.toContain('cannot reach')
+    }
+    // Control: a sane value starts.
+    const ok = await preflight(
+      envFor({ OPENRECALL_NAMESPACE: 'user:pf-timeout-ok', OPENRECALL_TIMEOUT_MS: '5000' }),
+    )
+    expect(ok.ready).toBe(true)
+  })
+
+  test('the setup card placeholder is refused as template text, not used as the passphrase', async () => {
+    for (const placeholder of ['<paste your passphrase here>', '<your passphrase>']) {
+      const r = await preflight(envFor({ OPENRECALL_PASSPHRASE: placeholder }))
+      expect(r.ready).toBe(false)
+      expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('misexpansion')
+    }
+    // Control: an angle bracket inside a real passphrase is not a placeholder.
+    const ok = await preflight(
+      envFor({ OPENRECALL_PASSPHRASE: 'a<b>c d', OPENRECALL_NAMESPACE: 'user:pf-angle' }),
+    )
+    expect(ok.ready).toBe(true)
+  })
+
+  test('a server that does not advertise entry-view is probed with the full read and still starts', async () => {
+    const ns = 'user:pf-old-server'
+    await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'hi' })
+    const seen: string[] = []
+    const s = routeStub(req => {
+      const u = new URL(req.url)
+      seen.push(u.search)
+      if (u.search.includes('view=hashes')) {
+        // What an older server would say: no capabilities.
+        return json(200, { version: 1, entryChecksums: { 'a.md': 'sha256:aa' }, supports: [] })
+      }
+      return fetch(`${url}${u.pathname}${u.search}`)
+    })
+    try {
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: ns }))
+      expect(r.ready).toBe(true)
+      expect(seen.filter(q => q.includes('view=entry')).length).toBe(0)
+      expect(seen.some(q => q === '')).toBe(true)
+      // And it says the precondition is not enforced, since it advertised nothing.
+      expect(r.ready ? r.warnings.some(w => w.includes('write precondition')) : false).toBe(true)
+    } finally {
+      s.stop()
+    }
+  })
+
+  test('an entry read that never answers is a no-answer refusal, an unmapped status is a server refusal', async () => {
+    const listed = { 'a.md': 'sha256:aa' }
+    const hang = routeStub(req => {
+      if (new URL(req.url).search.includes('view=hashes')) {
+        return json(200, { version: 1, entryChecksums: listed, supports: ['entry-view'] })
+      }
+      return new Promise<Response>(() => {})
+    })
+    const boom = routeStub(req => {
+      if (new URL(req.url).search.includes('view=hashes')) {
+        return json(200, { version: 1, entryChecksums: listed, supports: ['entry-view'] })
+      }
+      return json(500, { error: { code: 'internal', message: 'boom' } })
+    })
+    try {
+      const slow = await preflight(
+        envFor({ OPENRECALL_URL: hang.url, OPENRECALL_TIMEOUT_MS: '250' }),
+      )
+      expect(markerOf(slow.ready ? '' : slow.diagnostic)).toBe('no-answer')
+      const bad = await preflight(envFor({ OPENRECALL_URL: boom.url }))
+      expect(markerOf(bad.ready ? '' : bad.diagnostic)).toBe('server-refused')
+    } finally {
+      hang.stop()
+      boom.stop()
+    }
+  })
+
+  test('entry_not_found for a listed key is drift: it starts with a warning only when another entry decrypts', async () => {
+    const ns = 'user:pf-notfound'
+    await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'b.md': 'readable' })
+    const s = routeStub(req => {
+      const u = new URL(req.url)
+      if (u.search.includes('view=hashes')) {
+        return json(200, {
+          version: 2,
+          entryChecksums: { 'a.md': 'sha256:aa', 'b.md': 'sha256:bb' },
+          supports: ['entry-view'],
+        })
+      }
+      if (u.search.includes('key=a.md')) {
+        return json(404, { error: { code: 'entry_not_found', message: 'gone' } })
+      }
+      return fetch(`${url}${u.pathname}${u.search}`)
+    })
+    try {
+      const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: ns }))
+      expect(r.ready).toBe(true)
+      expect(r.ready ? r.warnings.some(w => w.includes('a.md')) : false).toBe(true)
+    } finally {
+      s.stop()
+    }
   })
 })

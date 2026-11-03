@@ -245,11 +245,13 @@ describe('precondition advertisement', () => {
         }),
     })
     const c = new OpenRecallClient({ url: `http://localhost:${s.port}`, passphrase: 'pw' })
-    expect(await c.preconditionEnforced('user:x')).toBe(false)
+    expect((await c.hashesAndSupports('user:x')).supports).not.toContain('base-precondition')
     s.stop(true)
 
     // Control: the real server does advertise it.
-    expect(await client().preconditionEnforced('user:cb-adv')).toBe(true)
+    expect((await client().hashesAndSupports('user:cb-adv')).supports).toContain(
+      'base-precondition',
+    )
   })
 })
 
