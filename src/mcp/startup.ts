@@ -105,9 +105,13 @@ const PROBE_LIMIT = 5
  */
 const UNEXPANDED_BRACED = /\$\{[^}]*\}/
 const UNEXPANDED_BARE = /^\$[A-Z_][A-Z0-9_]*$/
+// A whole-value `<...>` is a fill-in-the-blank, such as the setup card's own
+// `<paste your passphrase here>`. Left unrefused it would pass every check and
+// key the namespace to text that is printed in the documentation.
+const PLACEHOLDER = /^<[^<>]*>$/
 
 function isUnexpanded(value: string): boolean {
-  return UNEXPANDED_BRACED.test(value) || UNEXPANDED_BARE.test(value)
+  return UNEXPANDED_BRACED.test(value) || UNEXPANDED_BARE.test(value) || PLACEHOLDER.test(value)
 }
 
 /**
@@ -227,7 +231,19 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
 
   // A hung server would otherwise block startup for the client default, which
   // is sized for a full 10 MB pull rather than for the small reads this makes.
-  const timeoutMs = Number(read(env, 'OPENRECALL_TIMEOUT_MS') ?? '') || undefined
+  const rawTimeout = read(env, 'OPENRECALL_TIMEOUT_MS')
+  let timeoutMs: number | undefined
+  if (rawTimeout !== undefined) {
+    // AbortSignal.timeout throws on a negative or enormous value, and that throw
+    // would otherwise be reported as an unreachable server.
+    timeoutMs = /^[0-9]+$/.test(rawTimeout) ? Number(rawTimeout) : Number.NaN
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 2 ** 31 - 1) {
+      return refuse(
+        `OPENRECALL_TIMEOUT_MS is "${oneLine(rawTimeout)}", which is not a number of milliseconds. ` +
+          'Set it to a whole number between 1 and 2147483647, or leave it unset for the default.',
+      )
+    }
+  }
   const client = await makeClient(settings, { timeoutMs })
 
   // One authenticated read of the pinned namespace separates a
@@ -257,7 +273,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
   let checksums: Record<string, string>
   let supports: string[]
   try {
-    ;({ checksums, supports } = await client.hashesAndSupports(namespace))
+    ;({ checksums, supports } = await client.hashesAndSupports(namespace, { observe: false }))
   } catch (err) {
     if (err instanceof OpenRecallTimeoutError) return refuseNoAnswer(err)
     if (!(err instanceof OpenRecallHttpError)) {
@@ -312,7 +328,12 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
     let proven = false
     for (const key of listed.slice(0, PROBE_LIMIT)) {
       try {
-        await client.entry(namespace, key)
+        // An older server ignores view=entry and answers with the whole
+        // namespace, which the client cannot read as one entry. It does not
+        // advertise `entry-view`, so prove the passphrase with the full read
+        // instead of refusing to start against a server that works.
+        if (supports.includes('entry-view')) await client.entry(namespace, key)
+        else await client.pull(namespace)
         proven = true
         break
       } catch (err) {

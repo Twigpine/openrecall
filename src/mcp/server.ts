@@ -62,7 +62,7 @@ export async function main(): Promise<void> {
   } else if (config.unconfigured) {
     setupError =
       `OpenRecall is not set up: ${config.diagnostic}\n` +
-      'Tell the user to run `npx -y @twigpine/openrecall init`, then restart this MCP server.'
+      'Tell the user to run `npx -y @twigpine/openrecall init` (or, for a hosted service, `openrecall card <owner> <url>`), then restart this MCP server. Do not retry the memory tools until then.'
     process.stderr.write(`[openrecall mcp] ${setupError}\n`)
   } else {
     process.stderr.write(`openrecall mcp: ${config.diagnostic}\n`)
@@ -96,7 +96,7 @@ export async function main(): Promise<void> {
     {
       title: 'Save a memory',
       description:
-        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`.',
+        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`, unless it changed since this session last read it: then the save is refused as stale, and you should read the key with memory_get, merge, and save again.',
       inputSchema: {
         key: z
           .string()

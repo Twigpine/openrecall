@@ -363,9 +363,22 @@ export class OpenRecallClient {
     }
   }
 
-  /** Fetch per-key ciphertext checksums (no bodies). Empty if namespace is new. */
-  async hashes(namespace: string): Promise<Record<string, string>> {
-    return (await this.hashesAndSupports(namespace)).checksums
+  /**
+   * Fetch per-key ciphertext checksums (no bodies). Empty if namespace is new.
+   *
+   * By default the checksums become this client's base for later writes: they
+   * ARE the manifest's checksums, and a base is a ciphertext hash, so the read
+   * is exact for the precondition even though it carries no bodies. A caller
+   * that only wants the key names (a listing shown to a model) passes
+   * `observe: false`. Rebasing there would let a save computed from an older
+   * read pass the precondition against whatever landed since, which is the lost
+   * update the precondition exists to refuse.
+   */
+  async hashes(
+    namespace: string,
+    opts: { observe?: boolean } = {},
+  ): Promise<Record<string, string>> {
+    return (await this.hashesAndSupports(namespace, opts)).checksums
   }
 
   /**
@@ -374,12 +387,12 @@ export class OpenRecallClient {
    */
   async hashesAndSupports(
     namespace: string,
+    opts: { observe?: boolean } = {},
   ): Promise<{ checksums: Record<string, string>; supports: string[] }> {
     const { entryChecksums: checksums, supports } = await this.hashesView(namespace)
-    // Authoritative: these ARE the manifest's checksums, and a base is a
-    // ciphertext hash, so this read is exact for the precondition even though
-    // it carries no bodies.
-    lruSet(this.observed, namespace, { hashes: { ...checksums }, enumerated: true })
+    if (opts.observe !== false) {
+      lruSet(this.observed, namespace, { hashes: { ...checksums }, enumerated: true })
+    }
     return { checksums, supports }
   }
 
@@ -413,15 +426,6 @@ export class OpenRecallClient {
       entryChecksums: data.entryChecksums ?? {},
       supports: data.supports ?? [],
     }
-  }
-
-  /**
-   * Whether this server enforces the write precondition. A server that ignores
-   * an unknown body field accepts a stale write silently, so a caller relying
-   * on the guarantee needs to know it is not in force rather than assume it.
-   */
-  async preconditionEnforced(namespace: string): Promise<boolean> {
-    return (await this.hashesView(namespace)).supports.includes('base-precondition')
   }
 
   /** Pull and decrypt all entries for a namespace. */
@@ -615,7 +619,8 @@ export class OpenRecallClient {
   /** Delete one entry. */
   async delete(namespace: string, entryKey: string): Promise<void> {
     const observed = this.observed.get(namespace)
-    const seen = observed?.hashes[entryKey]
+    const seen =
+      observed && Object.hasOwn(observed.hashes, entryKey) ? observed.hashes[entryKey] : undefined
     if (!seen && observed?.enumerated) {
       // This client has enumerated the namespace and the key was not in it, so
       // the delete must assert that absence exactly as a push would. DELETE
@@ -630,6 +635,19 @@ export class OpenRecallClient {
         body: JSON.stringify({ entries: {}, deletions: [entryKey], base: sent }),
       })
       if (!res.ok) throw httpError(res, sent)
+      // The PUT route answers 200 and lists a key it refused in `skipped`, where
+      // the DELETE route answers with an error. Report it the same way.
+      const refused = (
+        JSON.parse(res.raw) as { skipped?: { key: string; reason: string }[] }
+      ).skipped?.find(s => s.key === entryKey)
+      if (refused) {
+        throw new OpenRecallHttpError(
+          `openrecall 400: ${flattenServerText(refused.reason, 80)}`,
+          400,
+          'invalid_key',
+          { sentBase: sent },
+        )
+      }
       this.record(namespace, {}, [entryKey])
       return
     }
@@ -663,7 +681,7 @@ export class OpenRecallClient {
     if (!observed || keys.length === 0) return null
     const base: Record<string, string | null> = {}
     for (const k of keys) {
-      const hash = observed.hashes[k]
+      const hash = Object.hasOwn(observed.hashes, k) ? observed.hashes[k] : undefined
       if (hash !== undefined) base[k] = hash
       else if (observed.enumerated) base[k] = null
     }
