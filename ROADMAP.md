@@ -34,7 +34,7 @@ release, and what comes after. Open an issue or discussion to weigh in.
 ## First public release (v0.2)
 
 - [ ] Publish `@twigpine/openrecall` to npm and the server image to GHCR
-      (release-please plus the `NPM_TOKEN` secret).
+      (release-please; npm through trusted publishing, so no token).
 - [ ] Hosted beta at `memory.twigpine.com`:
   - [ ] Twigpine Supabase project with `migrations/0001_init.sql` applied.
   - [ ] Fly app `openrecall` with `STORE=s3` and its secrets set.
