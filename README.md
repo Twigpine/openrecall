@@ -1,62 +1,61 @@
-```text
-    ___    ___   ___   _  _   ___   ___    ___     _     _      _
-   / _ \  | _ \ | __| | \| | | _ \ | __|  / __|   /_\   | |    | |
-  | (_) | |  _/ | _|  | .` | |   / | _|  | (__   / _ \  | |__  | |__
-   \___/  |_|   |___| |_|\_| |_|_\ |___|  \___| /_/ \_\ |____| |____|
+<p align="center">
+  <picture>
+    <source media="(max-width: 640px)" srcset="docs/assets/brand/openrecall-banner-mobile.svg" />
+    <img src="docs/assets/brand/openrecall-banner.svg" alt="OpenRecall — Your agents change. Your memory stays. One encrypted memory across projects, agents, and sessions." width="100%" />
+  </picture>
+</p>
 
-             one memory for every agent and every session
-             open source · self-hostable · zero-knowledge
-```
+<h1 align="center">One memory. Every agent.</h1>
 
-OpenRecall is the memory layer of the agent stack. Claude Code, Zero,
-OpenClaude, Codex, Cursor, and your own SDK agents read and write the same
-durable memory, carried across sessions and stored where no one but you can
-read it: entries are encrypted on your machine, and whatever holds them, a
-local directory or a server, only ever sees ciphertext.
+<p align="center">
+  Persistent context for your whole agent stack.<br />
+  Open source. Local by default. Encrypted before storage.
+</p>
 
-[![CI](https://github.com/Twigpine/openrecall/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/Twigpine/openrecall/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/tag/Twigpine/openrecall?label=release&color=0ea5e9)](https://github.com/Twigpine/openrecall/tags)
-[![npm](https://img.shields.io/npm/v/@twigpine/openrecall?color=cb3837)](https://www.npmjs.com/package/@twigpine/openrecall)
-[![npm downloads](https://img.shields.io/npm/dm/@twigpine/openrecall)](https://www.npmjs.com/package/@twigpine/openrecall)
-[![Discussions](https://img.shields.io/badge/discussions-open-7c3aed)](https://github.com/Twigpine/openrecall/discussions)
-[![Discord](https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white)](https://discord.gg/k68zFR6AcB)
-[![X](https://img.shields.io/badge/X-@twigpine-000000?logo=x&logoColor=white)](https://x.com/twigpine)
-[![Security Policy](https://img.shields.io/badge/security-policy-0f766e)](SECURITY.md)
-[![License](https://img.shields.io/badge/license-MIT-2563eb)](LICENSE)
+<p align="center">
+  <a href="https://github.com/Twigpine/openrecall/actions/workflows/ci.yml"><img src="https://github.com/Twigpine/openrecall/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
+  <a href="https://www.npmjs.com/package/@twigpine/openrecall"><img src="https://img.shields.io/npm/v/@twigpine/openrecall?color=40866a" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@twigpine/openrecall"><img src="https://img.shields.io/npm/dm/@twigpine/openrecall?color=40866a" alt="Monthly npm downloads" /></a>
+  <a href="SECURITY.md"><img src="https://img.shields.io/badge/storage-end--to--end_encrypted-40866a" alt="Storage is end-to-end encrypted" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-40866a" alt="MIT license" /></a>
+</p>
 
-OpenRecall is by [Twigpine](https://twigpine.com), next to
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#memory-across-projects">Project memory</a> ·
+  <a href="#use-from-any-agent">Agent setup</a> ·
+  <a href="#self-host-a-server">Self-host</a> ·
+  <a href="#security-model">Security</a> ·
+  <a href="#community">Community</a>
+</p>
+
+Switch agents. Come back to a project next week. Keep the useful context.
+
+**OpenRecall is the memory layer for your agents:** shared preferences, project
+decisions, and durable notes that Claude Code, Codex, Cursor, Zero, OpenClaude,
+and your own agents can reuse. Memory is encrypted on your machine; the local
+store or sync server holds ciphertext. Start locally, then self-host when you
+want the same memory on more than one machine.
+
+Built by [Twigpine](https://twigpine.com), alongside
 [Zero](https://github.com/Twigpine/zero) and
-[OpenClaude](https://github.com/Twigpine/openclaude) (agents), OpenGateway
-(inference), and the Twigpine Network (code).
-
-[Quick Start](#quick-start) | [Use from any agent](#use-from-any-agent) | [Self-host](#self-host-a-server) | [Library](#use-as-a-library) | [Security](#security-model) | [Development](#development) | [Community](#community)
+[OpenClaude](https://github.com/Twigpine/openclaude).
 
 ## Why OpenRecall
 
-Agents forget everything between sessions, and what one agent learns the next
-one never sees. The usual fix, syncing memory to a vendor's cloud, ties that
-memory to one tool and lets a third party read everything your agents learn
-about you and your code.
-
-- **One memory, every agent.** A built-in MCP server gives every agent the same
-  memory tools over the same store, and `openrecall setup` connects the
-  agents on your machine for you.
-- **Private by construction.** Memory is encrypted with a key derived from your
-  passphrase before it leaves the process. A server stores and serves
-  ciphertext only; we can host it and still cannot read it.
-- **No server required.** Local mode keeps ciphertext in `~/.openrecall` and
-  lets every agent on the machine share it safely. Add a server when you want
-  the same memory on every machine.
-- **Self-hostable, with delta sync.** One server, pluggable storage (filesystem
-  or S3-compatible). Deterministic encryption means only changed entries are
-  uploaded, even though the server never sees plaintext.
-- **Secret-aware.** A client-side scanner refuses to save entries that look like
-  live credentials, before they are encrypted or sent anywhere.
+| What you need | What OpenRecall gives you |
+|---|---|
+| Context that survives a new session | Durable notes your connected agents can recall and update |
+| Preferences shared across tools | One MCP memory interface for every connected agent |
+| Projects that stay organized | Discoverable project scopes, with shared preferences recalled alongside project facts |
+| Control over your data | Encryption on your machine, with local storage or a server you run |
+| A small first step | Install, initialize, connect your agents; local mode needs no server |
+| Memory worth keeping | A shared agent guide for recall, deduplication, and pruning, plus a scanner that blocks likely secrets |
 
 ## Quick start
 
 ```bash
-npm i -g @twigpine/openrecall     # Node 24+
+npm i -g @twigpine/openrecall     # Node 24.22.1+
 openrecall init                   # one passphrase, kept owner-only in ~/.openrecall
 openrecall setup all --write      # connect every agent found on this machine
 openrecall status                 # check the config and the store
@@ -118,6 +117,8 @@ MCP server and the memory skill:
 | `memory_projects(limit?, offset?)` | discover projects in the encrypted directory |
 
 ### Memory across projects
+
+Project tools and multi-namespace recall require a version newer than `0.2.0`.
 
 Keep standing preferences and general feedback in your configured shared
 namespace. Keep project decisions and references in a separate project scope.
@@ -315,3 +316,5 @@ principles, Conventional Commits, and DCO sign-off, and our
 
 Released under the [MIT License](./LICENSE). Contributions are accepted under
 the same license.
+
+The [logo and brand assets](./docs/assets/brand/README.md) are included as editable SVGs.
