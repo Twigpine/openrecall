@@ -52,13 +52,19 @@ describe('rejection log', () => {
 
     // A refusal that is not the rate limiter, to prove the allowlist holds for
     // an ordinary line and to have something to compare the 429 against.
-    const missing = await handleRequest(new Request('http://x/api/memory/user:local'))
+    //
+    // The 404 needs a namespace no suite writes to. The data directory is
+    // shared by every file in the process too, and tests/integration.test.ts
+    // leaves entries in `user:local`, so asking for that one answered 200
+    // whenever integration ran first, which is the order CI's Bun 1.2 picked.
+    const url = 'http://x/api/memory/user:rejection-log'
+    const missing = await handleRequest(new Request(url))
     expect(missing.status).toBe(404)
 
     // Spend the rest of the bucket directly rather than through the server, so
     // the next request is rate limited no matter what else is running.
     while (take('local', Date.now()).ok) {}
-    const last = await handleRequest(new Request('http://x/api/memory/user:local'))
+    const last = await handleRequest(new Request(url))
     expect(last.status).toBe(429)
 
     expect(lines.length).toBeGreaterThan(1)
