@@ -35,7 +35,9 @@ export function makeStubClient(entries: Record<string, string> = {}) {
     },
     async pull(namespace: string): Promise<PullResult> {
       if (pullError) throw pullError
-      return { namespace, version: 1, entries: { ...store } }
+      // Empty, as the real client returns for a server that sends no
+      // timestamps. Nothing the tools do reads it yet.
+      return { namespace, version: 1, entries: { ...store }, updatedAt: {} }
     },
     async push(namespace: string, next: Record<string, string>): Promise<PushResult> {
       Object.assign(store, next)
