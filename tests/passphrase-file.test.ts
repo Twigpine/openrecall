@@ -94,3 +94,12 @@ describe('the CLI honours the file', () => {
     expect(r.err + r.out).not.toContain('fallback-must-not-be-used')
   })
 })
+
+describe('a relative passphrase file path', () => {
+  test('is refused, not resolved against the launcher directory', () => {
+    write('rel', 'secret\n')
+    expect(() => resolveSettings(env({ OPENRECALL_PASSPHRASE_FILE: 'rel' }))).toThrow(
+      PassphraseFileError,
+    )
+  })
+})

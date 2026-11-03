@@ -15,7 +15,7 @@
 import { randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
 import { flattenServerText } from '../../client/index.ts'
 import type { ScanMode } from '../../client/secretscan.ts'
 
@@ -93,6 +93,15 @@ function oneLine(text: string): string {
 function passphraseFromFile(env: Env): string | undefined {
   const path = clean(env.OPENRECALL_PASSPHRASE_FILE)
   if (!path) return undefined
+  // An agent host launches the MCP server from an arbitrary working directory,
+  // so a relative path would name a different file (or none) depending on who
+  // started the process.
+  if (!isAbsolute(path)) {
+    throw new PassphraseFileError(
+      `OPENRECALL_PASSPHRASE_FILE is "${oneLine(path)}", which is not an absolute path. ` +
+        'Use the full path: a relative one resolves against whatever directory the agent happened to launch from.',
+    )
+  }
   let contents: string
   try {
     contents = readFileSync(path, 'utf8')
