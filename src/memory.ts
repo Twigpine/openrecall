@@ -83,6 +83,29 @@ export async function getHashes(namespace: string, nsSlug: string): Promise<Memo
   }
 }
 
+/**
+ * One entry's ciphertext: the content-addressed blob first, then the path from
+ * before content addressing. Null when neither exists (manifest/blob drift).
+ * Both reads go through here so the fallback and the drift handling cannot
+ * diverge between the full view and the single-entry view.
+ */
+async function readEntryBytes(
+  store: ReturnType<typeof getStore>,
+  nsSlug: string,
+  key: string,
+  hash: string,
+): Promise<Uint8Array | null> {
+  let bytes: Uint8Array | null = null
+  try {
+    bytes = (await store.get(contentPath(nsSlug, hash))) ?? null
+  } catch {
+    // A hash that is not a digest cannot name a blob. Fall through to the older
+    // path, the same way a missing blob does: one unreadable entry must not take
+    // the whole read down with it.
+  }
+  return bytes ?? (await store.get(entryPath(nsSlug, sha256Hex(key)))) ?? null
+}
+
 /** Full view: fetch every ciphertext entry blob. */
 export async function getData(namespace: string, nsSlug: string): Promise<MemoryData> {
   const m = await readManifest(nsSlug)
@@ -97,15 +120,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   await Promise.all(
     Object.entries(m.entries).map(async ([key, meta]) => {
-      let bytes: Uint8Array | null = null
-      try {
-        bytes = (await store.get(contentPath(nsSlug, meta.hash))) ?? null
-      } catch {
-        // A hash that is not a digest cannot name a blob. Skip this entry the
-        // same way a missing one is skipped: one unreadable entry must not take
-        // the whole namespace's read down with it.
-      }
-      bytes ??= await store.get(entryPath(nsSlug, sha256Hex(key)))
+      const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
       if (!bytes) return // manifest/blob drift — skip rather than 500
       entries[key] = Buffer.from(bytes).toString('base64')
       entryChecksums[key] = meta.hash
@@ -148,14 +163,7 @@ export async function getEntry(namespace: string, nsSlug: string, key: string): 
   }
 
   const store = getStore()
-  let bytes: Uint8Array | null = null
-  try {
-    bytes = (await store.get(contentPath(nsSlug, meta.hash))) ?? null
-  } catch {
-    // A hash that is not a digest cannot name a blob; fall through to the
-    // pre-content-addressing path below rather than failing the read here.
-  }
-  bytes ??= await store.get(entryPath(nsSlug, sha256Hex(key)))
+  const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
   if (!bytes) return { status: 'unreadable' }
 
   return {

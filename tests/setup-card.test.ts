@@ -16,7 +16,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import {
   assertServiceUrl,
-  generatePassphrase,
+  generateRetypablePassphrase,
   ownerNamespace,
   PASSPHRASE_ALPHABET,
   PASSPHRASE_LENGTH,
@@ -227,7 +227,7 @@ describe('setup card: passphrase entropy (AE10, R20)', () => {
   })
 
   test('a generated passphrase matches the declared alphabet and length', () => {
-    const p = generatePassphrase()
+    const p = generateRetypablePassphrase()
     expect(p.length).toBe(PASSPHRASE_LENGTH)
     for (const ch of p)
       expect(`${ch} in alphabet: ${PASSPHRASE_ALPHABET.includes(ch)}`).toBe(
@@ -239,12 +239,12 @@ describe('setup card: passphrase entropy (AE10, R20)', () => {
     // A generator drawing from a subset would still pass the charset check
     // above while carrying far fewer bits than PASSPHRASE_LENGTH * log2(n).
     const seen = new Set<string>()
-    for (let i = 0; i < 300; i++) for (const ch of generatePassphrase()) seen.add(ch)
+    for (let i = 0; i < 300; i++) for (const ch of generateRetypablePassphrase()) seen.add(ch)
     expect(seen.size).toBe(PASSPHRASE_ALPHABET.length)
   })
 
   test('two generations differ', () => {
-    const runs = new Set(Array.from({ length: 50 }, () => generatePassphrase()))
+    const runs = new Set(Array.from({ length: 50 }, () => generateRetypablePassphrase()))
     expect(runs.size).toBe(50)
   })
 })

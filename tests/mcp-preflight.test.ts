@@ -549,9 +549,9 @@ describe('mcp startup preflight', () => {
     try {
       const r = await preflight(envFor({ OPENRECALL_URL: s.url, OPENRECALL_NAMESPACE: ns }))
       expect(r.ready).toBe(true)
-      // Two bodyless hashes views: one to list the namespace for the proof, one
-      // for the precondition advertisement. Never the full read.
-      expect(seen.filter(q => q.includes('view=hashes')).length).toBe(2)
+      // One bodyless hashes view, which both lists the namespace for the proof
+      // and carries the precondition advertisement. Never the full read.
+      expect(seen.filter(q => q.includes('view=hashes')).length).toBe(1)
       expect(seen.filter(q => q.includes('view=entry')).length).toBeGreaterThan(0)
       expect(seen.filter(q => q === '' || !q.includes('view='))).toEqual([])
       // Control: it stopped at the first entry that decrypted rather than
