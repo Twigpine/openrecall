@@ -43,6 +43,8 @@ jobs:
       id-token: write # what npm's trusted publishing authenticates with
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.2'
@@ -60,7 +62,8 @@ jobs:
       # already on the registry is skipped rather than failed, so a re-run of
       # this job (after a GHCR failure, say) and the one-time manual publish
       # that first creates the package both pass through here.
-      - run: |
+      - name: Publish to npm (trusted publishing)
+        run: |
           v=$(node -p "require('./package.json').version")
           if npm view "@twigpine/openrecall@$v" version >/dev/null 2>&1; then
             echo "@twigpine/openrecall@$v is already on npm; skipping publish"
