@@ -197,8 +197,10 @@ await memory.push('user:me', { 'MEMORY.md': '# what I know about the user...' })
 const { entries } = await memory.pull('user:me')
 ```
 
-The library entry points are TypeScript sources — use them from Bun or through
-a bundler.
+The entry points (`@twigpine/openrecall`, `/crypto`, `/secretscan`) ship as
+plain ESM with type declarations, so they work from Node 24+, Bun, or any
+bundler. An agent that only needs memory tools is better served by the MCP
+server above; the library is for code that wants the sync protocol itself.
 
 ## API
 

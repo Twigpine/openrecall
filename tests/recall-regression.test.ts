@@ -42,6 +42,7 @@
 
 import { afterAll, describe, expect, test } from 'bun:test'
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -516,7 +517,7 @@ describe('search output (pinned baseline)', () => {
 /** package.json, read once so a self-referencing bare specifier can be resolved. */
 const PKG = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as {
   name: string
-  exports: Record<string, string>
+  exports: Record<string, string | Record<string, string>>
   /** Never present: a subpath-imports map is a second way a bare specifier
    * resolves into the repo, and `resolveSelf` only follows `exports`. */
   imports?: unknown
@@ -887,8 +888,25 @@ function edgesOfSource(raw: string): { specs: string[]; opaque: number } {
 function resolveSelf(spec: string): string | null {
   if (spec !== PKG.name && !spec.startsWith(`${PKG.name}/`)) return null
   const subpath = spec === PKG.name ? '.' : `.${spec.slice(PKG.name.length)}`
-  const target = PKG.exports[subpath]
-  return target ? resolve(REPO_ROOT, target) : null
+  const source = exportSource(PKG.exports[subpath])
+  return source ? resolve(REPO_ROOT, source) : null
+}
+
+/**
+ * The source an export is built from. `exports` points at dist/client/*.js,
+ * which is what bun loads for a bare self-import, but the walk reasons about
+ * sources, and tsconfig.client.json emits each client/*.ts as exactly one file
+ * of the same name, so the mapping is by basename. Anything else, a target
+ * outside that layout or a built file with no source behind it, returns null,
+ * which `moduleRisks` reports as an unvetted bare specifier rather than the
+ * walk following nothing.
+ */
+function exportSource(entry: string | Record<string, string> | undefined): string | null {
+  const target = typeof entry === 'string' ? entry : entry?.default
+  const m = target?.match(/^\.\/dist\/client\/([^/]+)\.js$/)
+  if (!m) return null
+  const source = `client/${m[1]}.ts`
+  return existsSync(join(REPO_ROOT, source)) ? source : null
 }
 
 /**
@@ -1969,6 +1987,25 @@ describe('guard positive controls', () => {
       } finally {
         rmSync(dir, { recursive: true, force: true })
       }
+    })
+  })
+
+  describe('self-resolution through exports', () => {
+    test('a built export maps to the source it was emitted from', () => {
+      expect(
+        exportSource({ types: './dist/client/crypto.d.ts', default: './dist/client/crypto.js' }),
+      ).toBe('client/crypto.ts')
+      expect(exportSource('./dist/client/crypto.js')).toBe('client/crypto.ts')
+      expect(resolveSelf(`${PKG.name}/crypto`)).toBe(join(REPO_ROOT, 'client/crypto.ts'))
+    })
+
+    test('an export outside the client layout, or with no source behind it, is reported', () => {
+      expect(exportSource({ default: './dist/openrecall.js' })).toBeNull()
+      expect(exportSource({ default: './dist/client/nope.js' })).toBeNull()
+      expect(exportSource({ types: './dist/client/index.d.ts' })).toBeNull()
+      expect(moduleRisks(`import { x } from '${PKG.name}/nope'\n`)).toEqual([
+        `imports unvetted bare specifier \`${PKG.name}/nope\``,
+      ])
     })
   })
 

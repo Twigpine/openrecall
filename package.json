@@ -66,9 +66,18 @@
     "lint": "biome lint"
   },
   "exports": {
-    ".": "./client/index.ts",
-    "./crypto": "./client/crypto.ts",
-    "./secretscan": "./client/secretscan.ts"
+    ".": {
+      "types": "./dist/client/index.d.ts",
+      "default": "./dist/client/index.js"
+    },
+    "./crypto": {
+      "types": "./dist/client/crypto.d.ts",
+      "default": "./dist/client/crypto.js"
+    },
+    "./secretscan": {
+      "types": "./dist/client/secretscan.d.ts",
+      "default": "./dist/client/secretscan.js"
+    }
   },
   "devDependencies": {
     "@biomejs/biome": "^2.5.1",
