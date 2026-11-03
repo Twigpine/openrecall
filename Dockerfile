@@ -11,6 +11,11 @@
 # @gitlawb/gl@<version> pins to that exact version, so the pin reaches the
 # binaries and not just the wrapper around them.
 #
+# The source for gl, git-remote-gitlawb and the node itself is
+# https://github.com/Twigpine/node (formerly Gitlawb/node, which redirects). The
+# npm package, the binary names and the gitlawb:// scheme are unchanged, so the
+# names below stay as they are.
+#
 # node and npm exist only to run that install, so it happens in a stage that is
 # thrown away and only the two binaries are copied forward.
 FROM oven/bun:1.2-alpine AS glbin
