@@ -6,7 +6,7 @@
 
 import { sha256Hex } from '../hash.ts'
 import { validateNamespace } from '../namespace.ts'
-import type { MemoryClient, ToolResult } from './tools.ts'
+import { bounded, denial, type MemoryClient, type ToolResult } from './tools.ts'
 
 export function projectId(value: string): string {
   const id = value
@@ -55,7 +55,14 @@ export function makeProjects(client: MemoryClient, sharedNamespace: string) {
             'Opening a project does not change any tool defaults or move existing memories.',
         }
       } catch (err) {
-        return { text: `project failed: ${(err as Error).message}`, isError: true }
+        const d = denial(
+          'Opening the project',
+          catalog(),
+          sharedNamespace,
+          'The project was not registered.',
+          err,
+        )
+        return { text: d ?? `project failed: ${bounded((err as Error).message)}`, isError: true }
       }
     },
 
@@ -101,7 +108,14 @@ export function makeProjects(client: MemoryClient, sharedNamespace: string) {
             (invalid ? `\n${invalid} invalid catalog entry/entries skipped in ${catalog()}.` : ''),
         }
       } catch (err) {
-        return { text: `projects failed: ${(err as Error).message}`, isError: true }
+        const d = denial(
+          'Listing projects',
+          catalog(),
+          sharedNamespace,
+          'No projects were read.',
+          err,
+        )
+        return { text: d ?? `projects failed: ${bounded((err as Error).message)}`, isError: true }
       }
     },
   }

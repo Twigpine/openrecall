@@ -38,7 +38,7 @@ import {
  * server that enforces the write precondition from one that ignores an unknown
  * body field, so it would report a guarantee it is not getting.
  */
-const SUPPORTS = ['base-precondition']
+const SUPPORTS = ['base-precondition', 'entry-view']
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
 async function readManifest(nsSlug: string): Promise<Manifest> {
@@ -153,8 +153,10 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
  * body is its own refusal (`unreadable`) and an operator can see it.
  */
 export async function getEntry(namespace: string, nsSlug: string, key: string): Promise<EntryRead> {
-  const m = await readManifest(nsSlug)
-  const meta = m.entries[key]
+  let m = await readManifest(nsSlug)
+  // Own property only: a key such as `constructor` must miss, not resolve to
+  // something off the prototype and then fail as an unreadable body.
+  let meta = Object.hasOwn(m.entries, key) ? m.entries[key] : undefined
   if (!meta) {
     // The same test the full read uses to answer `empty`, so the two reads
     // agree on what "this namespace does not exist yet" means.
@@ -163,8 +165,18 @@ export async function getEntry(namespace: string, nsSlug: string, key: string): 
   }
 
   const store = getStore()
-  const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
-  if (!bytes) return { status: 'unreadable' }
+  let bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+  if (!bytes) {
+    // This read takes no namespace lock, so a write that lands between the
+    // manifest read and the blob read can move the key to a new hash. Look once
+    // more before calling it drift, which tells an operator to restore a backup.
+    m = await readManifest(nsSlug)
+    const again = Object.hasOwn(m.entries, key) ? m.entries[key] : undefined
+    if (!again) return { status: 'no_entry' }
+    meta = again
+    bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+    if (!bytes) return { status: 'unreadable' }
+  }
 
   return {
     status: 'ok',
