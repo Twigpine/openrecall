@@ -65,7 +65,7 @@ describe('the clone of a repository the node serves', () => {
     )
     const calls = readFileSync(argv, 'utf8')
     expect(calls).toContain('clone')
-    expect(calls).toContain('core.symlinks=false')
+    expect(calls).toContain('--config core.symlinks=false')
   })
 })
 

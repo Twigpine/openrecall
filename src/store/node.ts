@@ -273,12 +273,15 @@ export class NodeBlobStore implements BlobStore {
     await mkdir(dirname(dir), { recursive: true })
     const url = `gitlawb://${await this.owner()}/${repo}`
     const r = await this.command('git', [
-      '-c',
+      'clone',
       // The node serves this repository, so it is untrusted input. A symlink in
       // it would otherwise be checked out as a link, and the driver's writes to
-      // manifest.json or paths.idx would follow it out of the clone.
+      // manifest.json or paths.idx would follow it out of the clone. `--config`
+      // writes the setting into the clone's own config, so every later command
+      // in it (reset, checkout) honours it too; a top-level `-c` would cover
+      // only the clone process itself.
+      '--config',
       'core.symlinks=false',
-      'clone',
       '--quiet',
       url,
       dir,
