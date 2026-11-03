@@ -54,7 +54,7 @@ export const PASSPHRASE_LENGTH = 26
  * Generate a passphrase from platform randomness. Local only, and the caller
  * is the only thing that ever sees the return value.
  */
-export function generatePassphrase(): string {
+export function generateRetypablePassphrase(): string {
   const bytes = new Uint8Array(PASSPHRASE_LENGTH)
   globalThis.crypto.getRandomValues(bytes)
   let out = ''

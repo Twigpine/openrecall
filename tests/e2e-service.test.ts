@@ -24,7 +24,7 @@ let makeTools: typeof import('../src/mcp/tools.ts').makeTools
 let preflight: typeof import('../src/mcp/startup.ts').preflight
 let renderSetupCard: typeof import('../client/setup.ts').renderSetupCard
 let authorizeNamespace: typeof import('../src/auth.ts').authorizeNamespace
-let generatePassphrase: typeof import('../client/setup.ts').generatePassphrase
+let generateRetypablePassphrase: typeof import('../client/setup.ts').generateRetypablePassphrase
 let namespaceSlug: typeof import('../src/namespace.ts').namespaceSlug
 
 beforeAll(async () => {
@@ -32,7 +32,7 @@ beforeAll(async () => {
   ;({ OpenRecallClient } = await import('../client/index.ts'))
   ;({ makeTools } = await import('../src/mcp/tools.ts'))
   ;({ preflight } = await import('../src/mcp/startup.ts'))
-  ;({ renderSetupCard, generatePassphrase } = await import('../client/setup.ts'))
+  ;({ renderSetupCard, generateRetypablePassphrase } = await import('../client/setup.ts'))
   ;({ authorizeNamespace } = await import('../src/auth.ts'))
   ;({ namespaceSlug } = await import('../src/namespace.ts'))
   server = Bun.serve({ port: 0, fetch: handleRequest })
@@ -60,7 +60,7 @@ describe('e2e: the path a new user actually walks', () => {
     // and a real recall against a real server with no edits in between. A
     // string check on the card cannot prove this: every other reason a first
     // save is refused is invisible to one.
-    const passphrase = generatePassphrase()
+    const passphrase = generateRetypablePassphrase()
     const card = renderSetupCard('openclaude', {
       owner: 'e2euser',
       repo: 'openrecall',
