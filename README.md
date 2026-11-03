@@ -1,10 +1,12 @@
-<div align="center">
-  <h1>OpenRecall</h1>
-  <p>
-    <strong>One memory for every agent and every session.</strong><br>
-    Open source · self-hostable · zero-knowledge
-  </p>
-</div>
+```text
+    ___    ___   ___   _  _   ___   ___    ___     _     _      _
+   / _ \  | _ \ | __| | \| | | _ \ | __|  / __|   /_\   | |    | |
+  | (_) | |  _/ | _|  | .` | |   / | _|  | (__   / _ \  | |__  | |__
+   \___/  |_|   |___| |_|\_| |_|_\ |___|  \___| /_/ \_\ |____| |____|
+
+             one memory for every agent and every session
+             open source · self-hostable · zero-knowledge
+```
 
 OpenRecall is the memory layer of the agent stack. Claude Code, Zero,
 OpenClaude, Codex, Cursor, and your own SDK agents read and write the same
