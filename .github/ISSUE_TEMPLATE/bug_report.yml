@@ -30,7 +30,8 @@ body:
       options:
         - Server (src/)
         - Client / CLI (client/, bin/)
-        - MCP server (memlawb mcp)
+        - MCP server (openrecall mcp)
+        - Agent setup (openrecall init / setup) or plugin
         - Self-host / deploy
         - Other / not sure
     validations:
@@ -38,7 +39,7 @@ body:
   - type: input
     id: version
     attributes:
-      label: memlawb version
+      label: OpenRecall version
       placeholder: 0.1.0 (or commit SHA)
     validations:
       required: true

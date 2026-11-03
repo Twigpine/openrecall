@@ -1,0 +1,20 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="420" viewBox="0 0 640 420" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">OpenRecall — Your agents change. Your memory stays.</title>
+  <desc id="desc">One encrypted memory across projects, agents, and sessions. Open source, self-hostable, and zero-knowledge.</desc>
+  <rect width="640" height="420" rx="24" fill="#102C29"/>
+  <rect x=".5" y=".5" width="639" height="419" rx="23.5" stroke="#AEF4CE" stroke-opacity=".15"/>
+  <g transform="translate(40 34) scale(.4)">
+    <rect width="128" height="128" rx="32" fill="#AEF4CE"/>
+    <path d="M78 29H55C38 29 29 38 29 55V73C29 90 38 99 55 99H73C90 99 99 90 99 73V48" stroke="#102C29" stroke-width="10" stroke-linecap="round"/>
+    <path d="M84 48H99V33" stroke="#102C29" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M50 58H77M50 73H68" stroke="#102C29" stroke-width="8" stroke-linecap="round"/>
+  </g>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="106" y="70" fill="#EEF8F2" font-size="30" font-weight="700" letter-spacing="-1">OpenRecall</text>
+    <text x="40" y="174" fill="#EEF8F2" font-size="50" font-weight="700" letter-spacing="-2">Your agents change.</text>
+    <text x="40" y="234" fill="#AEF4CE" font-size="50" font-weight="700" letter-spacing="-2">Your memory stays.</text>
+    <text x="43" y="284" fill="#B1C9C0" font-size="21">One encrypted memory across projects,</text>
+    <text x="43" y="314" fill="#B1C9C0" font-size="21">agents, and sessions.</text>
+    <text x="43" y="378" fill="#89AEA0" font-size="12" font-weight="700" letter-spacing="1.4">OPEN SOURCE · SELF-HOSTABLE · ZERO-KNOWLEDGE</text>
+  </g>
+</svg>

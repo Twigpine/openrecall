@@ -1,295 +1,352 @@
-```
-╭──────────────────────────────────────────────────────────────────────╮
-│  ● ● ●            memlawb — ~/memory                          ⌘ + T    │
-├──────────────────────────────────────────────────────────────────────┤
+<p align="center">
+  <picture>
+    <source media="(max-width: 640px)" srcset="docs/assets/brand/openrecall-banner-mobile.svg" />
+    <img src="docs/assets/brand/openrecall-banner.svg" alt="OpenRecall — Your agents change. Your memory stays. One encrypted memory across projects, agents, and sessions." width="100%" />
+  </picture>
+</p>
 
-    ███╗   ███╗ ███████╗ ███╗   ███╗ ██╗      █████╗ ██╗    ██╗ ██████╗
-    ████╗ ████║ ██╔════╝ ████╗ ████║ ██║     ██╔══██╗██║    ██║ ██╔══██╗
-    ██╔████╔██║ █████╗   ██╔████╔██║ ██║     ███████║██║ █╗ ██║ ██████╔╝
-    ██║╚██╔╝██║ ██╔══╝   ██║╚██╔╝██║ ██║     ██╔══██║██║███╗██║ ██╔══██╗
-    ██║ ╚═╝ ██║ ███████╗ ██║ ╚═╝ ██║ ███████╗██║  ██║╚███╔███╔╝ ██████╔╝
-    ╚═╝     ╚═╝ ╚══════╝ ╚═╝     ╚═╝ ╚══════╝╚═╝  ╚═╝ ╚══╝╚══╝  ╚═════╝
+<h1 align="center">One memory. Every agent.</h1>
 
-      zero-knowledge agent memory · the host cannot read it
+<p align="center">
+  Persistent context for your whole agent stack.<br />
+  Open source. Local by default. Encrypted before storage.
+</p>
 
-    $ memlawb push ./memories user:me
-      ⠿ scan secrets    ✓  0 leaked
-      ⠿ encrypt  12     ✓  aes-256-gcm · key derived locally, never sent
-      ⠿ delta sync   →  memory.gitlawb.com
-        ↑ 3 changed   · 9 unchanged   ✓ server saw only ciphertext
-    $ ▮
+<p align="center">
+  <a href="https://github.com/Twigpine/openrecall/actions/workflows/ci.yml"><img src="https://github.com/Twigpine/openrecall/actions/workflows/ci.yml/badge.svg?branch=main" alt="CI status" /></a>
+  <a href="https://www.npmjs.com/package/@twigpine/openrecall"><img src="https://img.shields.io/npm/v/@twigpine/openrecall?color=40866a" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@twigpine/openrecall"><img src="https://img.shields.io/npm/dm/@twigpine/openrecall?color=40866a" alt="Monthly npm downloads" /></a>
+  <a href="SECURITY.md"><img src="https://img.shields.io/badge/storage-end--to--end_encrypted-40866a" alt="Storage is end-to-end encrypted" /></a>
+  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-40866a" alt="MIT license" /></a>
+  <a href="https://github.com/Twigpine/openrecall/tags"><img src="https://img.shields.io/github/v/tag/Twigpine/openrecall?label=release&color=40866a" alt="Latest release" /></a>
+  <a href="https://github.com/Twigpine/openrecall/discussions"><img src="https://img.shields.io/badge/discussions-open-40866a" alt="GitHub Discussions" /></a>
+  <a href="https://discord.gg/k68zFR6AcB"><img src="https://img.shields.io/badge/Discord-join-5865F2?logo=discord&logoColor=white" alt="Discord" /></a>
+  <a href="https://x.com/twigpine"><img src="https://img.shields.io/badge/X-@twigpine-000000?logo=x&logoColor=white" alt="Twigpine on X" /></a>
+</p>
 
-╰──────────────────────────────────────────────────────────────────────╯
-```
+<p align="center">
+  <a href="#quick-start">Quick start</a> ·
+  <a href="#memory-across-projects">Project memory</a> ·
+  <a href="#use-from-any-agent">Agent setup</a> ·
+  <a href="#self-host-a-server">Self-host</a> ·
+  <a href="#security-model">Security</a> ·
+  <a href="#community">Community</a>
+</p>
 
-<div align="center">
+Switch agents. Come back to a project next week. Keep the useful context.
 
-[![CI](https://github.com/Gitlawb/memlawb/actions/workflows/ci.yml/badge.svg)](https://github.com/Gitlawb/memlawb/actions/workflows/ci.yml)
-[![npm](https://img.shields.io/npm/v/@gitlawb/memlawb.svg)](https://www.npmjs.com/package/@gitlawb/memlawb)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](#license)
-[![Bun](https://img.shields.io/badge/bun-%3E%3D1.2-black?logo=bun)](https://bun.sh)
+**OpenRecall is the memory layer for your agents:** shared preferences, project
+decisions, and durable notes that Claude Code, Codex, Cursor, Zero, OpenClaude,
+and your own agents can reuse. Memory is encrypted on your machine; the local
+store or sync server holds ciphertext. Start locally, then self-host when you
+want the same memory on more than one machine.
 
-</div>
+Built by [Twigpine](https://twigpine.com), alongside
+[Zero](https://github.com/Twigpine/zero) and
+[OpenClaude](https://github.com/Twigpine/openclaude).
 
-**Open-source, self-hostable, zero-knowledge agent memory.**
-The memory layer of the agent stack — give any agent durable memory it can
-carry across sessions, stored on a server that *cannot read it*.
+## Why OpenRecall
 
-> Part of the [Gitlawb](https://gitlawb.com) stack: opengateway (inference) ·
-> node (code) · openclaude (agent) · **memlawb (memory)**.
+| What you need | What OpenRecall gives you |
+|---|---|
+| Context that survives a new session | Durable notes your connected agents can recall and update |
+| Preferences shared across tools | One MCP memory interface for every connected agent |
+| Projects that stay organized | Discoverable project scopes, with shared preferences recalled alongside project facts |
+| Control over your data | Encryption on your machine, with local storage or a server you run |
+| A small first step | Install, initialize, connect your agents; local mode needs no server |
+| Memory worth keeping | A shared agent guide for recall, deduplication, and pruning, plus a scanner that blocks likely secrets |
 
----
-
-## Why
-
-Agents forget everything between sessions. The existing fix — syncing memory to
-a vendor's cloud — means a third party can read everything your agent learns
-about you and your code. memlawb is the alternative:
-
-- **Zero-knowledge.** Memory is encrypted on your machine before upload. The
-  server stores and serves only ciphertext (AES-256-GCM, key derived from your
-  passphrase). We host it but we cannot read it.
-- **Self-hostable.** One binary, pluggable storage (filesystem, S3/Tigris/R2,
-  more coming). Run it on our cloud or your own.
-- **Provider-neutral.** A built-in **MCP server** gives Claude Code, Cursor,
-  opencode, and SDK agents memory tools (`memory_save`/`recall`/`search`/
-  `list`/`delete`); a simple sync API any agent can speak is underneath.
-- **Delta sync.** Deterministic encryption means only changed entries upload,
-  even though the server never sees plaintext.
-- **Secret-aware.** A client-side scanner refuses to upload entries that look
-  like they contain live credentials — before they're ever encrypted or sent.
-
-## How it works
-
-```
-agent / CLI / MCP
-   │   plaintext in, plaintext out
-   ▼  [ client/crypto.ts — encrypt with key derived from your passphrase ]
-   │   ciphertext
-   ▼
-memlawb server  (crypto-blind — only ever sees ciphertext)
-   ▼
-BlobStore: fs | s3 (Tigris/R2/AWS) | ipfs/git (planned)
-```
-
-The server is **crypto-blind**: it does delta sync, dedup, and storage entirely
-over ciphertext. The encryption key never leaves the client.
-
-## Quick start (self-host)
+## Quick start
 
 ```bash
-bun install
-
-# 1. run the server (filesystem storage, single-user open mode)
-ALLOW_UNAUTHENTICATED=true STORE=fs DATA_DIR=./data bun run src/index.ts
-
-# 2. sync a memory directory, end-to-end encrypted
-export MEMLAWB_URL=http://localhost:8080
-export MEMLAWB_PASSPHRASE='your-zero-knowledge-passphrase'   # never sent to the server
-
-bun run bin/memlawb.ts push ./my-memories user:me   # encrypt + upload
-bun run bin/memlawb.ts pull ./restored      user:me   # download + decrypt
+npm i -g @twigpine/openrecall     # Node 24.22.1+
+openrecall init                   # one passphrase, kept owner-only in ~/.openrecall
+openrecall setup all --write      # connect every agent found on this machine
+openrecall status                 # check the config and the store
 ```
 
-To configure an agent rather than sync a directory, generate the block to paste:
+Restart your agents and they share one memory. No server is involved: this is
+local mode. `setup` without `--write` is a dry run that prints every change
+first; where an agent has its own `mcp add`, that is what it uses, and any JSON
+file it edits is backed up. Per-agent notes, including Zero's sandbox and the
+Claude Code / OpenClaude plugin, are in [docs/agents.md](./docs/agents.md).
+
+To point an agent at a hosted service instead, print the block to paste:
 
 ```bash
 # prints the MCP config block, plus a fresh passphrase shown once
-MEMLAWB_API_KEY=<your key> bun run bin/memlawb.ts setup <owner> https://memory.gitlawb.com
+OPENRECALL_API_KEY=<your key> openrecall card <owner> https://memory.gitlawb.com
 ```
 
 The passphrase is generated locally and never leaves the machine: it is printed
 for you to store, and the block carries a placeholder rather than the value. The
 URL must be `https` unless it points at a loopback host.
 
-What lands on the server is ciphertext — `grep` your data dir for any plaintext
-and you'll find nothing.
+> **Zero-knowledge means no recovery.** The passphrase in
+> `~/.openrecall/config.json` is the only key to your memory. Back that file up;
+> nobody, including the host, can recover it.
 
-> ⚠️ **Zero-knowledge means no recovery.** If you lose your passphrase, the host
-> cannot help you — the data is unreadable to everyone but the key holder. Back
-> up your passphrase.
+## Three ways to use it
 
-## Use as a library
+| | You run | Good for |
+|---|---|---|
+| **Local** | `npm i -g @twigpine/openrecall`, then `init` and `setup` | one machine, every agent on it, no server |
+| **Server** | `openrecall serve`, or the Docker image | the same memory on every machine, or a team |
+| **Library** | `import { OpenRecallClient } from '@twigpine/openrecall'` | agents you write yourself |
 
-```ts
-import { MemlawbClient } from '@gitlawb/memlawb'
+One rule ties them together: **the MCP server runs wherever the passphrase is.**
+Recall ranks over plaintext after decryption, so it has to run on your machine.
+A server only stores and syncs ciphertext; it is what makes memory follow you
+across machines, never a place that can read it.
 
-const memory = new MemlawbClient({
-  url: 'https://memory.gitlawb.com',
-  apiKey: process.env.MEMLAWB_API_KEY,
-  passphrase: process.env.MEMLAWB_PASSPHRASE, // stays local
-})
+## Use from any agent
 
-await memory.push('user:me', { 'MEMORY.md': '# what I know about the user...' })
-const { entries } = await memory.pull('user:me')
-```
-
-## Use from any agent (MCP)
-
-memlawb ships an MCP server in the same package, so any MCP-capable agent gets
-durable encrypted memory by adding one config block. Add to your client's MCP
-config (Claude Code shown):
+`openrecall setup` covers Claude Code, Zero, OpenClaude, Codex, Cursor, Gemini
+CLI, opencode, Windsurf, Claude Desktop, and VS Code. For anything else that
+speaks MCP, register a stdio server. The agent's config holds no secrets:
 
 ```json
 {
   "mcpServers": {
-    "memlawb": {
-      "command": "bunx",
-      "args": ["-y", "@gitlawb/memlawb", "mcp"],
-      "env": {
-        "MEMLAWB_URL": "https://memory.gitlawb.com",
-        "MEMLAWB_API_KEY": "mk_live_...",
-        "MEMLAWB_PASSPHRASE": "your-zero-knowledge-passphrase",
-        "MEMLAWB_NAMESPACE": "user:me"
-      }
-    }
+    "openrecall": { "command": "npx", "args": ["-y", "@twigpine/openrecall", "mcp"] }
   }
 }
 ```
 
-The MCP server runs **locally**, holds the passphrase, and encrypts/decrypts
-in-process — so the remote server still only ever sees ciphertext. Tools:
+Claude Code and OpenClaude can install the plugin instead, which bundles the
+MCP server and the memory skill:
+
+```text
+/plugin install openrecall --marketplace Twigpine/openrecall
+```
 
 | Tool | Purpose |
 |---|---|
 | `memory_save(key, content)` | persist a durable fact |
-| `memory_recall(query)` | rank stored memories by relevance (local) |
-| `memory_search(query)` | literal keyword/substring search |
+| `memory_recall(query)` | rank stored memories by relevance (locally) and return the matching part of each |
+| `memory_search(query)` | literal keyword or substring search |
+| `memory_get(key)` | read one entry in full |
 | `memory_list()` | list entry keys |
 | `memory_delete(key)` | remove an entry |
+| `memory_project(project)` | register or reopen a stable project memory scope |
+| `memory_projects(limit?, offset?)` | discover projects in the encrypted directory |
 
-For self-host, omit `MEMLAWB_API_KEY` and point `MEMLAWB_URL` at your server.
+### Memory across projects
 
-### Teaching the agent to use memory
+Project tools and multi-namespace recall need `0.2.1` or later.
 
-Tools alone don't make an agent use memory well — it needs the *discipline*
-(recall before answering, save only durable facts, don't duplicate). That lives
-in one place, [`skills/memlawb-memory/SKILL.md`](./skills/memlawb-memory/SKILL.md):
+Keep standing preferences and general feedback in your configured shared
+namespace. Keep project decisions and references in a separate project scope.
+The agent can discover and reuse those scopes:
 
-- **Claude Code:** install it as a skill (drop the folder in your skills dir) and
-  the agent reads it when memory is relevant.
-- **Any MCP client:** the server exposes the same text as the `memory_guide`
-  prompt and a short version in its startup `instructions`, so Cursor / opencode
-  / SDK agents get the protocol without a separate file.
+1. `memory_projects()` lists known project IDs and their namespaces (20 per
+   page; use `offset` for more).
+2. `memory_project(project: "github.com/twigpine/openrecall")` registers or
+   reopens that ID and returns its project namespace and the shared namespace.
+   Use the same `host/owner/repo` ID across agents and machines; IDs are
+   case-insensitive and ignore a trailing `.git`.
+3. `memory_recall` accepts `namespaces: [shared, project]` to rank both scopes
+   together with one result limit and size cap. Every hit names its source
+   namespace. Include only the projects relevant to the task.
 
-## API
+Pass the returned namespace explicitly to `memory_save`, `memory_get`,
+`memory_list`, `memory_search`, and `memory_delete`. Opening a project does not
+change defaults or move existing memories. Existing shared memories remain
+available, and callers that use a single `namespace` keep their current behavior.
+Project IDs live in the encrypted directory; their namespaces use hashed IDs.
 
-All bodies are ciphertext; the server validates sizes/hashes without decrypting.
+Tools alone do not make an agent use memory well; it also needs the discipline
+to recall before answering, save only durable facts, and never duplicate. That
+lives in one place, [`skills/openrecall-memory/SKILL.md`](./skills/openrecall-memory/SKILL.md).
+`setup` installs it where an agent loads skills, and the MCP server exposes the
+same text as its `memory_guide` prompt and in its startup instructions, so every
+client gets it.
+
+## Self-host a server
+
+A server lets several machines share one memory. Install [Bun](https://bun.sh)
+and ensure `bun` is on your PATH. The npm-installed `openrecall serve` launches
+Bun automatically; everything else in the package runs on Node. For local
+memory on one machine, use `init` and `setup` from the quick start above.
+
+```bash
+npm i -g @twigpine/openrecall
+export STATIC_API_KEYS="me:$(openssl rand -hex 24)"   # owner:key, note the key
+STORE=fs DATA_DIR=./data openrecall serve
+
+# on each machine, the same passphrase everywhere (copy it from the first)
+openrecall init --url https://memory.example.com --api-key <key> --namespace user:me
+```
+
+Each API key owns the `user:<owner>` namespace subtree. For many users, use the
+Supabase key table in [`migrations/`](./migrations) instead of static keys.
+`ALLOW_UNAUTHENTICATED=true` skips auth entirely, for a server bound to
+localhost only. A Docker image (`ghcr.io/twigpine/openrecall`) and a
+[`fly.toml`](./fly.toml) are included; configuration is in
+[`.env.example`](./.env.example). What lands on the server is ciphertext: grep
+its data directory for any plaintext and you will find nothing.
+
+## Use as a library
+
+```ts
+import { OpenRecallClient } from '@twigpine/openrecall'
+
+const memory = new OpenRecallClient({
+  url: 'https://memory.example.com',            // your server
+  apiKey: process.env.OPENRECALL_API_KEY,
+  passphrase: process.env.OPENRECALL_PASSPHRASE, // never leaves this process
+})
+
+await memory.push('user:me', { 'MEMORY.md': '# what I know about the user' })
+const { entries } = await memory.pull('user:me')
+```
+
+The entry points (`@twigpine/openrecall`, `/crypto`, `/secretscan`) ship as
+plain ESM with type declarations, for Node 24+, Bun, or any bundler. An agent
+that only needs memory tools is better served by the MCP server; the library is
+for code that wants the sync protocol itself.
+
+## How it works
+
+```
+agent (Claude Code · Zero · OpenClaude · Codex · Cursor · …)
+   │   MCP tools: plaintext in, plaintext out
+   ▼  openrecall mcp — runs on your machine, holds the passphrase
+   │  [ client/crypto.ts — encrypt with a key derived from your passphrase ]
+   │   ciphertext
+   ▼
+local store (~/.openrecall/data)   or   openrecall server (crypto-blind)
+                                            ▼
+                                  BlobStore: fs | s3 (Tigris/R2/AWS)
+```
+
+## Security model
+
+- **Encryption.** AES-256-GCM with
+  `key = scrypt(passphrase, salt = sha256("openrecall:" + namespace))`.
+- **Integrity.** The entry key is GCM additional authenticated data, so a blob
+  is bound to its key and cannot be swapped or replayed.
+- **Determinism.** A synthetic-IV nonce enables delta sync; the only leak is
+  whether two entries are byte-identical.
+- **Key custody.** The passphrase lives only in `~/.openrecall/config.json`
+  (mode 0600) or your environment, and only the local MCP/CLI process reads it.
+  Agent configs never contain it.
+- **Defense in depth.** The client-side secret scanner runs before encryption
+  and blocks saves containing live-looking credentials by default
+  (`OPENRECALL_SCAN=warn|off` to relax it).
+- **Startup refusal.** The MCP server checks its configuration against the
+  pinned namespace before serving a tool, and exits rather than start on one
+  that would corrupt stored memory: unexpanded template text in a secret, a
+  passphrase that cannot decrypt what is stored, a rejected key, an unauthorized
+  namespace, or a scan mode it does not recognize. Every wait is bounded;
+  `OPENRECALL_TIMEOUT_MS` raises the limit on a slow link.
+- **Tenancy.** Each API key maps to an owner who controls exactly their own
+  `user:<owner>` subtree, with per-account quotas and per-owner rate limits
+  enforced server-side.
+- **Upgrade path.** A version byte on every blob allows a move to
+  XChaCha20-Poly1305 and Argon2id without breaking existing data.
+
+Report vulnerabilities privately; see [SECURITY.md](./SECURITY.md) for the
+process and the threat model.
+
+## HTTP API
+
+All bodies are ciphertext; the server validates sizes and hashes without
+decrypting anything.
 
 | Method | Route | Purpose |
 |---|---|---|
-| `GET`  | `/health` | liveness |
-| `GET`  | `/api/memory/:ns` | full data (ciphertext entries + checksums) |
-| `GET`  | `/api/memory/:ns?view=hashes` | per-key checksums only (for delta) |
-| `GET`  | `/api/memory/:ns?view=entry&key=<entryKey>` | one entry's ciphertext, without fetching the rest |
-| `PUT`  | `/api/memory/:ns` | delta upsert `{ entries, deletions?, base? }` |
+| `GET` | `/health` | liveness |
+| `GET` | `/api/memory/:ns` | full data (ciphertext entries + checksums) |
+| `GET` | `/api/memory/:ns?view=hashes` | per-key checksums only, for delta sync |
+| `GET` | `/api/memory/:ns?view=entry&key=<entryKey>` | one entry's ciphertext, without fetching the rest |
+| `PUT` | `/api/memory/:ns` | delta upsert `{ entries, deletions?, base? }` |
 | `DELETE` | `/api/memory/:ns?key=<entryKey>[&base=sha256:<hex>]` | remove one entry |
 
 A *namespace* (`user:me`, `repo:owner/name`, `agent:intern`) is the unit of
-scoping. Entry keys mirror the memdir layout (`MEMORY.md`, `feedback/x.md`).
+scoping, and entry keys mirror a memory directory (`MEMORY.md`,
+`feedback/x.md`). The hashes view also reports `supports` (capabilities a client
+can rely on) and `erasure` (whether this deployment's store really removes
+bytes on delete).
 
-The hashes view also reports `supports` (server capabilities a client can rely
-on) and `erasure` (whether this deployment's store actually removes bytes on
-delete); write responses carry `erasure` too.
+`base` is an optional per-entry precondition: the ciphertext hash the caller
+believes a key holds, or `null` for "should not exist". A disagreement is
+refused with `409 stale_base_version` and a `details.conflicts` map naming what
+each key actually holds; omitting `base` writes unconditionally. A namespace
+whose manifest cannot be parsed answers `503 manifest_unreadable` rather than
+appearing empty.
 
 The entry view answers with that key's base64 ciphertext and checksum, byte for
-byte what the full read returns under the same key. It exists so a caller can
-check one entry without downloading a namespace, and it distinguishes three
+byte what the full read returns under the same key. It distinguishes three
 answers a single status would blur: `404 empty` (no such namespace),
 `404 entry_not_found` (the namespace exists, the key does not), and
 `503 entry_unreadable` (the manifest names the key and the store cannot produce
 its body).
 
-A write may be sent with a `base` mapping each touched key to the ciphertext
-hash the client last saw, or `null` to assert the key must not exist. The server
-answers `409 stale_base_version` when that disagrees with its manifest, naming
-the keys that moved. A write with no `base` is unconditional, so a client that
-predates this keeps working.
-
-`base` is an optional precondition: a map of entry key to the ciphertext hash
-the caller believes that key holds, or `null` for "should not exist". A request
-that disagrees with the stored manifest is refused with `409 stale_base_version`
-and a `details.conflicts` map naming what each key actually holds. Omitting
-`base` writes unconditionally, which is what a client that has not adopted it
-still does. This guards the caller's own turn, not the moment between its last
-read and its write, which is why the check is per entry rather than a namespace
-version. A namespace whose manifest cannot be parsed answers
-`503 manifest_unreadable` rather than appearing empty.
-
 ## Configuration
 
-See [`.env.example`](./.env.example). Key knobs: `STORE` (`fs`|`s3`),
-`ALLOW_UNAUTHENTICATED`, `STATIC_API_KEYS` / Supabase auth, and per-namespace
-size/count limits.
-
-## Security model
-
-- **Encryption:** AES-256-GCM; key = `scrypt(passphrase, salt=sha256("memlawb:"+namespace))`.
-- **Integrity:** the entry key is GCM additional-authenticated-data, so a blob
-  is bound to its key and can't be swapped or replayed.
-- **Determinism:** synthetic-IV nonce enables delta sync; the only leak is
-  whether two entries are byte-identical.
-- **Defense in depth:** a client-side secret scanner runs before encryption and
-  (by default) blocks uploads containing live-looking credentials. Override with
-  `MEMLAWB_SCAN=warn|off`.
-- **Startup refusal:** the MCP server checks its configuration against the
-  pinned namespace before serving a tool, and exits rather than start on one
-  that would corrupt stored memory: unexpanded template text in a secret, a
-  passphrase that cannot decrypt what is stored, a rejected key, an unauthorized
-  namespace, or a scan mode it does not recognize. Every wait is bounded;
-  `MEMLAWB_TIMEOUT_MS` raises the limit on a slow link.
-- **Tenancy:** each API key maps to an owner who controls exactly their own
-  `user:<owner>` namespace subtree (strict segment match, no substring escapes);
-  per-account quotas and per-owner rate limits are enforced server-side.
-- **Upgrade path:** a version byte on every blob allows migrating to
-  XChaCha20-Poly1305 + Argon2id without breaking existing data.
-
-See [`PLAN.md`](./PLAN.md) for the full roadmap (MCP server, openclaude drop-in,
-git-backed signed history, sharing/forking, billing).
+- **Client** (CLI and MCP server): `~/.openrecall/config.json`, written by
+  `openrecall init`, holds `url` (`local` or a server URL), `apiKey`,
+  `passphrase`, `namespace`, and `scan` (`block` | `warn` | `off`).
+  `OPENRECALL_URL`, `OPENRECALL_API_KEY`, `OPENRECALL_PASSPHRASE`,
+  `OPENRECALL_NAMESPACE`, and `OPENRECALL_SCAN` override it; `OPENRECALL_HOME`
+  moves the whole directory.
+- **Server:** [`.env.example`](./.env.example) documents `STORE` (`fs` | `s3`),
+  `ALLOW_UNAUTHENTICATED`, `STATIC_API_KEYS` or Supabase auth, and the
+  per-namespace and per-account limits.
 
 ## Status
 
-**Beta.** The crypto-blind server, client crypto, CLI, MCP server, secret
-scanner, per-account quotas, and rate limiting are implemented and tested
-(`bun test` — 50 tests). Hosted free beta at `memory.gitlawb.com`. Next:
-self-service console for API keys, the openclaude native drop-in, and the
-Postgres index for horizontal scale (the hosted beta runs a single machine
-deliberately — see [`PLAN.md`](./PLAN.md) §7).
+**Beta.** `@twigpine/openrecall` 0.2.1 is on npm, published from CI with
+provenance. The crypto-blind server, client
+crypto, CLI, local mode, MCP server, agent setup, secret scanner, quotas, and
+rate limiting are implemented and covered by `bun test`, including real MCP
+sessions over stdio under both Bun and Node and an install of the packed
+package under Node. Next: the hosted beta at `memory.twigpine.com` and a
+self-service console for API keys. See [ROADMAP.md](./ROADMAP.md).
 
 ## Development
 
 ```bash
 bun install
-bun test            # run the suite
+bun run build       # dist/openrecall.js (the Node CLI) and dist/client/ (the library)
+bun test            # the suite; build first so the Node bundle and package tests run
 bun run type-check  # tsc --noEmit
-bun run check       # biome lint + format check
+bun run check       # biome lint + format
 ```
 
-For contributors, the codebase splits cleanly along the trust boundary:
+The codebase splits along the trust boundary:
 
 ```
-client/   the zero-knowledge client — encrypts here; holds the key
-src/      the crypto-blind server — only ever sees ciphertext
-src/mcp/  the MCP server (memory tools) over the client
-bin/      the CLI (push | pull | mcp | serve)
+client/    the zero-knowledge client — encrypts here; holds the key
+src/       the crypto-blind server — only ever sees ciphertext
+src/cli/   client settings, local mode, and `openrecall setup`
+src/mcp/   the MCP server (memory tools) over the client
+bin/       the CLI (init | setup | status | push | pull | mcp | serve)
+skills/    the openrecall-memory skill, shared by every agent
 ```
 
 The cardinal rule: **plaintext, passphrases, and derived keys never reach the
-server.** See [CONTRIBUTING.md](./CONTRIBUTING.md) for the full guide.
+server.** A test walks the import graph to enforce it. See
+[CONTRIBUTING.md](./CONTRIBUTING.md) for the full guide.
+
+## Community
+
+- Use [GitHub Discussions](https://github.com/Twigpine/openrecall/discussions) for Q&A, ideas, and community conversation
+- Use [GitHub Issues](https://github.com/Twigpine/openrecall/issues) for confirmed bugs and actionable feature work
+- Join the [Discord](https://discord.gg/k68zFR6AcB) to chat with the community in real time
+- Follow [@twigpine on X](https://x.com/twigpine) for updates and announcements
 
 ## Contributing
 
-Issues and PRs welcome. Please read [CONTRIBUTING.md](./CONTRIBUTING.md) (dev
-setup, design principles, Conventional Commits, DCO sign-off) and our
+Issues and PRs welcome. For larger changes, open an issue first so the scope is
+clear. See [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev setup, design
+principles, Conventional Commits, and DCO sign-off, and our
 [Code of Conduct](./CODE_OF_CONDUCT.md).
-
-## Security
-
-memlawb is security software. Please report vulnerabilities privately — **do not
-open a public issue.** See [SECURITY.md](./SECURITY.md) for the process and the
-threat model.
 
 ## License
 
 Released under the [MIT License](./LICENSE). Contributions are accepted under
-the same license (see [CONTRIBUTING.md](./CONTRIBUTING.md)).
+the same license.
+
+The [logo and brand assets](./docs/assets/brand/README.md) are included as editable SVGs.

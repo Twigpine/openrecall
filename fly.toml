@@ -1,17 +1,17 @@
-# fly.toml — memlawb
+# fly.toml — openrecall
 #
 # Open-source, zero-knowledge agent memory backend.
 # The server is CRYPTO-BLIND: it only ever sees ciphertext. Clients encrypt
 # entries before upload (see client/crypto.ts), so the data at rest here is
 # opaque even to us.
 #
-# Custom domain: https://memory.gitlawb.com
+# Custom domain: https://memory.twigpine.com
 #
 # Secrets (set with `fly secrets set`):
-#   MEMLAWB_SUPABASE_URL        — Shared gitlawb Supabase project URL (API-key lookup).
-#   MEMLAWB_SUPABASE_SECRET_KEY — Service-role key for the same project.
-#   S3_ACCESS_KEY_ID            — Tigris/S3 access key (when STORE=s3).
-#   S3_SECRET_ACCESS_KEY        — Tigris/S3 secret key (when STORE=s3).
+#   OPENRECALL_SUPABASE_URL        — Shared Twigpine Supabase project URL (API-key lookup).
+#   OPENRECALL_SUPABASE_SECRET_KEY — Service-role key for the same project.
+#   S3_ACCESS_KEY_ID               — Tigris/S3 access key (when STORE=s3).
+#   S3_SECRET_ACCESS_KEY           — Tigris/S3 secret key (when STORE=s3).
 #
 # Storage driver (env, default fs for self-host; set s3 for hosted):
 #   STORE=fs   DATA_DIR=/data           (mount a volume)
@@ -20,7 +20,7 @@
 # Auth kill switch (self-host single-user / emergency):
 #   ALLOW_UNAUTHENTICATED=true
 
-app = 'memlawb'
+app = 'openrecall'
 primary_region = 'sin'
 
 [build]

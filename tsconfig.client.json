@@ -1,0 +1,19 @@
+{
+  // The client as a library: plain ESM plus declarations, one file per source,
+  // emitted by `bun run build` into dist/client/ for the package `exports`.
+  // Node cannot load the .ts sources the map used to point at; bun could, and
+  // that difference is what made the library Bun-only while the README said
+  // Node. `rewriteRelativeImportExtensions` turns `./crypto.ts` into
+  // `./crypto.js` in the output, so no bundling and every built file is
+  // exactly one source, which tests/recall-regression.test.ts relies on when
+  // it maps an export back to the module it came from.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": false,
+    "declaration": true,
+    "rootDir": "client",
+    "outDir": "dist/client",
+    "rewriteRelativeImportExtensions": true
+  },
+  "include": ["client/**/*.ts"]
+}

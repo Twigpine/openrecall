@@ -1,0 +1,76 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="440" viewBox="0 0 1280 440" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">OpenRecall — Your agents change. Your memory stays.</title>
+  <desc id="desc">One encrypted memory across projects, agents, and sessions. Claude Code, Codex, and Cursor connect to OpenRecall, with shared preferences and focused project context.</desc>
+  <defs>
+    <pattern id="grid" width="32" height="32" patternUnits="userSpaceOnUse">
+      <path d="M32 0H0V32" stroke="#AEF4CE" stroke-opacity=".045"/>
+    </pattern>
+    <linearGradient id="surface" x1="0" y1="0" x2="1280" y2="440" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#102C29"/>
+      <stop offset="1" stop-color="#0A1D1C"/>
+    </linearGradient>
+  </defs>
+  <rect width="1280" height="440" rx="24" fill="url(#surface)"/>
+  <rect x="740" y="1" width="516" height="438" fill="url(#grid)"/>
+  <rect x=".5" y=".5" width="1279" height="439" rx="23.5" stroke="#AEF4CE" stroke-opacity=".12"/>
+
+  <g transform="translate(64 44) scale(.4)">
+    <rect width="128" height="128" rx="32" fill="#AEF4CE"/>
+    <path d="M78 29H55C38 29 29 38 29 55V73C29 90 38 99 55 99H73C90 99 99 90 99 73V48" stroke="#102C29" stroke-width="10" stroke-linecap="round"/>
+    <path d="M84 48H99V33" stroke="#102C29" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M50 58H77M50 73H68" stroke="#102C29" stroke-width="8" stroke-linecap="round"/>
+  </g>
+  <g font-family="Arial, Helvetica, sans-serif">
+    <text x="130" y="80" fill="#EEF8F2" font-size="30" font-weight="700" letter-spacing="-1">OpenRecall</text>
+    <text x="64" y="185" fill="#EEF8F2" font-size="58" font-weight="700" letter-spacing="-2.4">Your agents change.</text>
+    <text x="64" y="253" fill="#AEF4CE" font-size="58" font-weight="700" letter-spacing="-2.4">Your memory stays.</text>
+    <text x="67" y="305" fill="#B1C9C0" font-size="19">One encrypted memory across projects, agents, and sessions.</text>
+    <g font-size="11" font-weight="700" letter-spacing="1.8" fill="#89AEA0">
+      <text x="67" y="385">OPEN SOURCE</text>
+      <text x="207" y="385">SELF-HOSTABLE</text>
+      <text x="367" y="385">ZERO-KNOWLEDGE</text>
+    </g>
+    <circle cx="188" cy="381" r="2" fill="#476C5E"/>
+    <circle cx="348" cy="381" r="2" fill="#476C5E"/>
+
+    <g stroke="#537F6D" stroke-width="1.5">
+      <path d="M839 134V158Q839 172 853 172H943"/>
+      <path d="M999 134V172"/>
+      <path d="M1159 134V158Q1159 172 1145 172H1055"/>
+      <path d="M999 266V285Q999 298 986 298H890V316"/>
+      <path d="M999 285Q999 298 1012 298H1108V316"/>
+    </g>
+    <g fill="#153B32" stroke="#31594B">
+      <rect x="774" y="94" width="130" height="40" rx="20"/>
+      <rect x="948" y="94" width="102" height="40" rx="20"/>
+      <rect x="1102" y="94" width="114" height="40" rx="20"/>
+    </g>
+    <g fill="#D8EAE0" font-size="14" text-anchor="middle">
+      <text x="839" y="119">Claude Code</text>
+      <text x="999" y="119">Codex</text>
+      <text x="1159" y="119">Cursor</text>
+    </g>
+
+    <rect x="896" y="172" width="206" height="94" rx="20" fill="#AEF4CE"/>
+    <g transform="translate(910 187) scale(.5)">
+      <path d="M78 29H55C38 29 29 38 29 55V73C29 90 38 99 55 99H73C90 99 99 90 99 73V48" stroke="#102C29" stroke-width="10" stroke-linecap="round"/>
+      <path d="M84 48H99V33" stroke="#102C29" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+      <path d="M50 58H77M50 73H68" stroke="#102C29" stroke-width="8" stroke-linecap="round"/>
+    </g>
+    <text x="987" y="214" fill="#102C29" font-size="19" font-weight="700" letter-spacing="-.4">OpenRecall</text>
+    <text x="987" y="236" fill="#315E49" font-size="12">Encrypted memory</text>
+
+    <g fill="#102F29" stroke="#31594B">
+      <rect x="796" y="316" width="188" height="64" rx="12"/>
+      <rect x="1014" y="316" width="188" height="64" rx="12"/>
+    </g>
+    <g fill="#AEF4CE" font-size="14" font-weight="700">
+      <text x="814" y="343">Shared preferences</text>
+      <text x="1032" y="343">Project context</text>
+    </g>
+    <g fill="#89AEA0" font-size="12">
+      <text x="814" y="363">How you like to work</text>
+      <text x="1032" y="363">What this project needs</text>
+    </g>
+  </g>
+</svg>

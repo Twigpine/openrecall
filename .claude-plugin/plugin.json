@@ -1,0 +1,29 @@
+{
+  "name": "openrecall",
+  "version": "0.2.1",
+  "description": "One end-to-end-encrypted memory shared by every agent and every session. Adds the OpenRecall MCP memory tools and the memory skill.",
+  "author": {
+    "name": "Twigpine",
+    "url": "https://twigpine.com"
+  },
+  "homepage": "https://github.com/Twigpine/openrecall",
+  "repository": "https://github.com/Twigpine/openrecall",
+  "license": "MIT",
+  "keywords": [
+    "memory",
+    "mcp",
+    "zero-knowledge",
+    "encryption",
+    "cross-session"
+  ],
+  "mcpServers": {
+    "openrecall": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@twigpine/openrecall",
+        "mcp"
+      ]
+    }
+  }
+}

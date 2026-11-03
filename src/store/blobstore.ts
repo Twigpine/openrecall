@@ -1,7 +1,7 @@
 /**
  * BlobStore — the pluggable persistence interface.
  *
- * memlawb stores two things per namespace:
+ * openrecall stores two things per namespace:
  *   - a `manifest` blob: JSON map of entryKey -> { hash, size, updatedAt }
  *   - one ciphertext blob per distinct entry ciphertext, named by its own hash
  *     (see `contentPath`); the manifest maps each entryKey to that hash, and two
@@ -31,7 +31,7 @@ export interface BlobStore {
    * promise.
    */
   list(prefix: string): Promise<string[]>
-  /** A short label for logs/health (e.g. "fs:/data", "s3:memlawb"). */
+  /** A short label for logs (e.g. "fs:/data", "s3:openrecall"). */
   describe(): string
   /**
    * Whether `delete` actually removes the bytes. A store that keeps history

@@ -13,7 +13,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 process.env.STORE ??= 'fs'
-process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'memlawb-test-'))
+process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'openrecall-test-'))
 process.env.ALLOW_UNAUTHENTICATED ??= 'true'
 process.env.MAX_ENTRIES_PER_NAMESPACE ??= '5'
 process.env.MAX_NAMESPACE_BYTES ??= '5000'

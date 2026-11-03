@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="600" height="128" viewBox="0 0 600 128" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">OpenRecall wordmark for dark backgrounds</title>
+  <desc id="desc">The OpenRecall memory loop symbol beside the OpenRecall name in light ink.</desc>
+  <rect width="128" height="128" rx="32" fill="#AEF4CE"/>
+  <path d="M78 29H55C38 29 29 38 29 55V73C29 90 38 99 55 99H73C90 99 99 90 99 73V48" stroke="#102C29" stroke-width="10" stroke-linecap="round"/>
+  <path d="M84 48H99V33" stroke="#102C29" stroke-width="10" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M50 58H77M50 73H68" stroke="#102C29" stroke-width="8" stroke-linecap="round"/>
+  <text x="158" y="85" fill="#EEF8F2" font-family="Arial, Helvetica, sans-serif" font-size="72" font-weight="700" letter-spacing="-3">OpenRecall</text>
+</svg>

@@ -19,7 +19,7 @@ const PASSPHRASE = 'correct horse battery staple'
 
 let server: ReturnType<typeof Bun.serve>
 let base: string
-let MemlawbClient: typeof import('../client/index.ts').MemlawbClient
+let OpenRecallClient: typeof import('../client/index.ts').OpenRecallClient
 let makeTools: typeof import('../src/mcp/tools.ts').makeTools
 let preflight: typeof import('../src/mcp/startup.ts').preflight
 let renderSetupCard: typeof import('../client/setup.ts').renderSetupCard
@@ -29,7 +29,7 @@ let namespaceSlug: typeof import('../src/namespace.ts').namespaceSlug
 
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
-  ;({ MemlawbClient } = await import('../client/index.ts'))
+  ;({ OpenRecallClient } = await import('../client/index.ts'))
   ;({ makeTools } = await import('../src/mcp/tools.ts'))
   ;({ preflight } = await import('../src/mcp/startup.ts'))
   ;({ renderSetupCard, generatePassphrase } = await import('../client/setup.ts'))
@@ -41,16 +41,16 @@ beforeAll(async () => {
 afterAll(() => server?.stop(true))
 afterEach(() => _reset())
 
-const client = (passphrase = PASSPHRASE) => new MemlawbClient({ url: base, passphrase })
+const client = (passphrase = PASSPHRASE) => new OpenRecallClient({ url: base, passphrase })
 const toolsFor = (ns: string, passphrase = PASSPHRASE) => makeTools(client(passphrase), ns)
 
 /** The env a user would end up with after pasting the generated block. */
 function envFromCard(card: string): Record<string, string> {
   const json = card.slice(card.indexOf('{'), card.lastIndexOf('}') + 1)
   const parsed = JSON.parse(json) as {
-    mcpServers: { memlawb: { env: Record<string, string> } }
+    mcpServers: { openrecall: { env: Record<string, string> } }
   }
-  return parsed.mcpServers.memlawb.env
+  return parsed.mcpServers.openrecall.env
 }
 
 describe('e2e: the path a new user actually walks', () => {
@@ -63,24 +63,24 @@ describe('e2e: the path a new user actually walks', () => {
     const passphrase = generatePassphrase()
     const card = renderSetupCard('openclaude', {
       owner: 'e2euser',
-      repo: 'memlawb',
+      repo: 'openrecall',
       url: base.replace('http://', 'https://'),
       apiKey: 'mk_test_key',
     })
     const env = envFromCard(card)
-    expect(env.MEMLAWB_NAMESPACE).toBe('user:e2euser')
-    expect(env.MEMLAWB_SCAN).toBe('block')
+    expect(env.OPENRECALL_NAMESPACE).toBe('user:e2euser')
+    expect(env.OPENRECALL_SCAN).toBe('block')
 
     // The card must not carry the secret it just generated.
     expect(card).not.toContain(passphrase)
 
     const tools = makeTools(
-      new MemlawbClient({ url: base, passphrase, scanMode: 'block' }),
-      env.MEMLAWB_NAMESPACE as string,
+      new OpenRecallClient({ url: base, passphrase, scanMode: 'block' }),
+      env.OPENRECALL_NAMESPACE as string,
     )
     const saved = await tools.save('prefs.md', 'The user prefers terse answers.')
     expect(saved.isError).toBeUndefined()
-    const recalled = await tools.recall('how should answers be written')
+    const recalled = await tools.recall('what answers does the user prefer')
     expect(recalled.isError).toBeUndefined()
     expect(recalled.text).toContain('terse')
 
@@ -93,11 +93,11 @@ describe('e2e: the path a new user actually walks', () => {
     // itself and passes however both move. That the card agrees with the guide
     // is pinned in tests/setup-card.test.ts, against the guide file.
     const perRepo = card.match(/user:e2euser\/[a-z0-9._-]+/)?.[0] as string
-    expect(perRepo).toBe('user:e2euser/memlawb')
+    expect(perRepo).toBe('user:e2euser/openrecall')
     expect(authorizeNamespace({ owner: 'e2euser' } as never, perRepo)).toBe(true)
     expect(authorizeNamespace({ owner: 'someone-else' } as never, perRepo)).toBe(false)
 
-    const repoTools = makeTools(new MemlawbClient({ url: base, passphrase }), perRepo)
+    const repoTools = makeTools(new OpenRecallClient({ url: base, passphrase }), perRepo)
     expect(
       (await repoTools.save('conventions.md', 'Two-space indent here.')).isError,
     ).toBeUndefined()
@@ -114,9 +114,9 @@ describe('e2e: the path a new user actually walks', () => {
     await client().push(ns, { 'kept.md': 'written under the right key' })
 
     const r = await preflight({
-      MEMLAWB_URL: base,
-      MEMLAWB_PASSPHRASE: 'not the passphrase',
-      MEMLAWB_NAMESPACE: ns,
+      OPENRECALL_URL: base,
+      OPENRECALL_PASSPHRASE: 'not the passphrase',
+      OPENRECALL_NAMESPACE: ns,
     })
     expect(r.ready).toBe(false)
     expect(r.ready ? '' : r.diagnostic).toMatch(/cannot decrypt/i)
@@ -142,9 +142,9 @@ describe('e2e: the path a new user actually walks', () => {
     })
     try {
       const r = await preflight({
-        MEMLAWB_URL: `http://localhost:${proxy.port}`,
-        MEMLAWB_PASSPHRASE: PASSPHRASE,
-        MEMLAWB_NAMESPACE: ns,
+        OPENRECALL_URL: `http://localhost:${proxy.port}`,
+        OPENRECALL_PASSPHRASE: PASSPHRASE,
+        OPENRECALL_NAMESPACE: ns,
       })
       expect(r.ready).toBe(true)
       expect(seen.filter(q => q.includes('view=entry')).length).toBe(1)
@@ -216,9 +216,9 @@ describe('e2e: the path a new user actually walks', () => {
     // preflight refuses to start rather than calling the namespace healthy.
     expect((await toolsFor(ns).list()).text).toContain('gone.md')
     const r = await preflight({
-      MEMLAWB_URL: base,
-      MEMLAWB_PASSPHRASE: PASSPHRASE,
-      MEMLAWB_NAMESPACE: ns,
+      OPENRECALL_URL: base,
+      OPENRECALL_PASSPHRASE: PASSPHRASE,
+      OPENRECALL_NAMESPACE: ns,
     })
     expect(r.ready).toBe(false)
     expect(r.ready ? '' : r.diagnostic).toMatch(/served none of the/i)
@@ -238,7 +238,7 @@ describe('e2e: the path a new user actually walks', () => {
     const err = await client('wrong passphrase')
       .entry(ns, 'two.md')
       .catch(e => e)
-    expect((err as Error).name).toBe('MemlawbDecryptError')
+    expect((err as Error).name).toBe('OpenRecallDecryptError')
   })
 
   test('nothing the client sends carries the passphrase, over the whole flow', async () => {
@@ -259,7 +259,10 @@ describe('e2e: the path a new user actually walks', () => {
       },
     })
     try {
-      const c = new MemlawbClient({ url: `http://localhost:${proxy.port}`, passphrase: PASSPHRASE })
+      const c = new OpenRecallClient({
+        url: `http://localhost:${proxy.port}`,
+        passphrase: PASSPHRASE,
+      })
       await c.push(ns, { 'secret.md': 'the plaintext body' })
       await c.pull(ns)
       await c.entry(ns, 'secret.md')

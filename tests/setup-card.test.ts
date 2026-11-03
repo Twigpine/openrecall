@@ -34,7 +34,7 @@ describe('setup card: namespace authorization (AE6, R19)', () => {
   test('the owner default is authorized for its owner and refused for another', () => {
     const ns = ownerNamespace('alice')
     expect(renderSetupCard('openclaude', { owner: 'alice', url: HOSTED, apiKey: KEY })).toContain(
-      `"MEMLAWB_NAMESPACE": "${ns}"`,
+      `"OPENRECALL_NAMESPACE": "${ns}"`,
     )
     expect(authorizeNamespace(id('alice'), ns)).toBe(true)
     expect(authorizeNamespace(id('bob'), ns)).toBe(false)
@@ -52,9 +52,9 @@ describe('setup card: namespace authorization (AE6, R19)', () => {
       owner: 'alice',
       url: HOSTED,
       apiKey: KEY,
-      repo: 'memlawb',
+      repo: 'openrecall',
     })
-    const perRepo = repoNamespace('alice', 'memlawb')
+    const perRepo = repoNamespace('alice', 'openrecall')
     // Both forms appear: the owner default in the block, the per-repo form as
     // the documented convention beside it.
     expect(card).toContain(ownerNamespace('alice'))
@@ -65,7 +65,7 @@ describe('setup card: namespace authorization (AE6, R19)', () => {
 
   test('a rendered namespace for one owner is never authorized for a neighbour', () => {
     for (const owner of ['ab', 'abc', 'a-b', 'alice']) {
-      const ns = repoNamespace(owner, 'memlawb')
+      const ns = repoNamespace(owner, 'openrecall')
       expect(authorizeNamespace(id(owner), ns)).toBe(true)
       for (const other of ['ab', 'abc', 'a-b', 'alice']) {
         if (other === owner) continue
@@ -89,15 +89,15 @@ describe('setup card: the pasted block (R16)', () => {
     const card = renderSetupCard('openclaude', { owner: 'alice', url: HOSTED, apiKey: KEY })
     expect(configBlock(card)).toEqual({
       mcpServers: {
-        memlawb: {
+        openrecall: {
           command: 'bunx',
-          args: ['-y', '@gitlawb/memlawb', 'mcp'],
+          args: ['-y', '@twigpine/openrecall', 'mcp'],
           env: {
-            MEMLAWB_URL: HOSTED,
-            MEMLAWB_API_KEY: KEY,
-            MEMLAWB_PASSPHRASE: '<paste your passphrase here>',
-            MEMLAWB_NAMESPACE: 'user:alice',
-            MEMLAWB_SCAN: 'block',
+            OPENRECALL_URL: HOSTED,
+            OPENRECALL_API_KEY: KEY,
+            OPENRECALL_PASSPHRASE: '<paste your passphrase here>',
+            OPENRECALL_NAMESPACE: 'user:alice',
+            OPENRECALL_SCAN: 'block',
           },
         },
       },
@@ -118,12 +118,13 @@ describe('setup card: the pasted block (R16)', () => {
     // changed nothing, and naming only the other one would miss a key moving
     // back. What it asserts is that the key is read SOMEWHERE the MCP server
     // runs, which is the property the card depends on.
-    const src = ['../src/mcp/server.ts', '../src/mcp/startup.ts']
+    const src = ['../src/mcp/server.ts', '../src/mcp/startup.ts', '../src/cli/settings.ts']
       .map(f => readFileSync(new URL(f, import.meta.url), 'utf8'))
       .join('\n')
     const card = renderSetupCard('zero', { owner: 'alice', url: HOSTED, apiKey: KEY })
-    const env = (configBlock(card) as { mcpServers: { memlawb: { env: Record<string, string> } } })
-      .mcpServers.memlawb.env
+    const env = (
+      configBlock(card) as { mcpServers: { openrecall: { env: Record<string, string> } } }
+    ).mcpServers.openrecall.env
     for (const key of Object.keys(env))
       expect(`${key} read by server: ${src.includes(`'${key}'`)}`).toBe(
         `${key} read by server: true`,
@@ -147,7 +148,7 @@ describe('setup card: the passphrase is not an input (AE10, R20)', () => {
 
   test('the rendered block carries a placeholder, never a generated secret', () => {
     const card = renderSetupCard('zero', { owner: 'alice', url: HOSTED, apiKey: KEY })
-    expect(card).toContain('"MEMLAWB_PASSPHRASE": "<paste your passphrase here>"')
+    expect(card).toContain('"OPENRECALL_PASSPHRASE": "<paste your passphrase here>"')
     expect(card).toContain(KEY)
   })
 })
@@ -317,31 +318,31 @@ function documentedRepoNamespace(guide: string): string {
 describe('setup card: the guide and the card agree on the namespace form', () => {
   test('the card renders exactly the per-repository form the guide documents', () => {
     const template = documentedRepoNamespace(loadMemoryGuide())
-    const expected = template.replace('<owner>', 'alice').replace('<repo>', 'memlawb')
-    expect(repoNamespace('alice', 'memlawb')).toBe(expected)
+    const expected = template.replace('<owner>', 'alice').replace('<repo>', 'openrecall')
+    expect(repoNamespace('alice', 'openrecall')).toBe(expected)
     // And the operator-facing prose carries the same string the model is told.
     expect(
       renderSetupCard('openclaude', {
         owner: 'alice',
         url: HOSTED,
         apiKey: KEY,
-        repo: 'memlawb',
+        repo: 'openrecall',
       }),
     ).toContain(expected)
   })
 })
 
 /**
- * `memlawb setup` end to end. The pure functions above are well covered, but
+ * `openrecall setup` end to end. The pure functions above are well covered, but
  * cmdSetup is where they are wired together, and the wiring is what carries the
  * property that matters: the passphrase is generated here, printed once,
  * separately, and is never an input to the render function, so it cannot reach
  * the pasted block. Spawning the real CLI is the only way to see the two
  * outputs as a user does.
  */
-const CLI = fileURLToPath(new URL('../bin/memlawb.ts', import.meta.url))
+const CLI = fileURLToPath(new URL('../bin/openrecall.ts', import.meta.url))
 
-/** A clean env, so ambient MEMLAWB_* vars cannot change what the CLI prints. */
+/** A clean env, so ambient OPENRECALL_* vars cannot change what the CLI prints. */
 function runCli(args: string[]) {
   const r = Bun.spawnSync(['bun', 'run', CLI, ...args], {
     env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
@@ -355,21 +356,21 @@ function runCli(args: string[]) {
   }
 }
 
-describe('memlawb setup (CLI)', () => {
+describe('openrecall card (CLI)', () => {
   test('prints the pasted block for the named owner and url', () => {
-    const r = runCli(['setup', 'alice', HOSTED])
+    const r = runCli(['card', 'alice', HOSTED])
     expect(`exit ${r.code}: ${r.stderr}`).toBe('exit 0: ')
     expect(configBlock(r.stdout)).toEqual({
       mcpServers: {
-        memlawb: {
+        openrecall: {
           command: 'bunx',
-          args: ['-y', '@gitlawb/memlawb', 'mcp'],
+          args: ['-y', '@twigpine/openrecall', 'mcp'],
           env: {
-            MEMLAWB_URL: HOSTED,
-            MEMLAWB_API_KEY: '<paste your service key here>',
-            MEMLAWB_PASSPHRASE: '<paste your passphrase here>',
-            MEMLAWB_NAMESPACE: 'user:alice',
-            MEMLAWB_SCAN: 'block',
+            OPENRECALL_URL: HOSTED,
+            OPENRECALL_API_KEY: '<paste your service key here>',
+            OPENRECALL_PASSPHRASE: '<paste your passphrase here>',
+            OPENRECALL_NAMESPACE: 'user:alice',
+            OPENRECALL_SCAN: 'block',
           },
         },
       },
@@ -379,7 +380,7 @@ describe('memlawb setup (CLI)', () => {
   })
 
   test('the printed passphrase is shown once and is not in the pasted block', () => {
-    const r = runCli(['setup', 'alice', HOSTED])
+    const r = runCli(['card', 'alice', HOSTED])
     const m = /passphrase \(shown once, back it up now\):\s+(\S+)/.exec(r.stdout)
     expect(m).not.toBeNull()
     const pass = (m as RegExpExecArray)[1]
@@ -392,22 +393,22 @@ describe('memlawb setup (CLI)', () => {
     // the card, never rendered into it.
     const env = (
       configBlock(r.stdout) as {
-        mcpServers: { memlawb: { env: Record<string, string> } }
+        mcpServers: { openrecall: { env: Record<string, string> } }
       }
-    ).mcpServers.memlawb.env
-    expect(env.MEMLAWB_PASSPHRASE).toBe('<paste your passphrase here>')
+    ).mcpServers.openrecall.env
+    expect(env.OPENRECALL_PASSPHRASE).toBe('<paste your passphrase here>')
     expect(r.stdout.slice(0, r.stdout.lastIndexOf('}'))).not.toContain(pass)
   })
 
   test('a run with no owner fails instead of rendering a namespace', () => {
-    const r = runCli(['setup'])
+    const r = runCli(['card'])
     expect(r.code).not.toBe(0)
-    expect(r.stdout).toContain('memlawb setup <owner> [url]')
+    expect(r.stdout).toContain('openrecall card <owner> [url]')
     expect(r.stdout).not.toContain('mcpServers')
   })
 
   test('a refused url fails rather than printing a card', () => {
-    const r = runCli(['setup', 'alice', 'http://memory.gitlawb.com'])
+    const r = runCli(['card', 'alice', 'http://memory.gitlawb.com'])
     expect(r.code).not.toBe(0)
     expect(r.stderr).toContain('https')
     expect(r.stdout).not.toContain('mcpServers')
@@ -433,7 +434,7 @@ describe('setup card: the URL carries no credentials (R23)', () => {
       ['https://:pw@memory.gitlawb.com', 'https://memory.gitlawb.com'],
       ['https://key@memory.gitlawb.com/path', 'https://memory.gitlawb.com/path'],
     ]) {
-      expect(() => assertServiceUrl(bad)).toThrow(/MEMLAWB_API_KEY/)
+      expect(() => assertServiceUrl(bad)).toThrow(/OPENRECALL_API_KEY/)
       expect(`${good} -> ${assertServiceUrl(good)}`).toBe(`${good} -> ${good}`)
     }
   })
@@ -441,7 +442,7 @@ describe('setup card: the URL carries no credentials (R23)', () => {
   test('loopback does not excuse credentials', () => {
     // The http exemption is about there being no network to listen on, which
     // says nothing about a credential landing in a pasted file.
-    expect(() => assertServiceUrl('http://key@localhost:8080')).toThrow(/MEMLAWB_API_KEY/)
+    expect(() => assertServiceUrl('http://key@localhost:8080')).toThrow(/OPENRECALL_API_KEY/)
     expect(assertServiceUrl('http://localhost:8080')).toBe('http://localhost:8080')
   })
 
@@ -452,7 +453,7 @@ describe('setup card: the URL carries no credentials (R23)', () => {
         url: 'https://key@memory.gitlawb.com',
         apiKey: KEY,
       }),
-    ).toThrow(/MEMLAWB_API_KEY/)
+    ).toThrow(/OPENRECALL_API_KEY/)
     // ... and still renders the same url without the userinfo.
     expect(
       renderSetupCard('openclaude', {
@@ -460,7 +461,7 @@ describe('setup card: the URL carries no credentials (R23)', () => {
         url: 'https://memory.gitlawb.com',
         apiKey: KEY,
       }),
-    ).toContain('"MEMLAWB_URL": "https://memory.gitlawb.com"')
+    ).toContain('"OPENRECALL_URL": "https://memory.gitlawb.com"')
   })
 })
 
@@ -569,10 +570,10 @@ describe('setup card: owner and repo are validated before they become a namespac
       owner: 'alice',
       url: HOSTED,
       apiKey: KEY,
-      repo: 'memlawb',
+      repo: 'openrecall',
     })
-    expect(card).toContain('"MEMLAWB_NAMESPACE": "user:alice"')
-    expect(card).toContain('user:alice/memlawb')
+    expect(card).toContain('"OPENRECALL_NAMESPACE": "user:alice"')
+    expect(card).toContain('user:alice/openrecall')
   })
 
   test('a rejected owner never reaches a namespace the server would authorize elsewhere', () => {

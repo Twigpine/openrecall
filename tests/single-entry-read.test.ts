@@ -270,7 +270,7 @@ describe('single-entry read: authorization', () => {
       env: {
         ...process.env,
         STORE: 'fs',
-        DATA_DIR: mkdtempSync(join(tmpdir(), 'memlawb-entry-auth-')),
+        DATA_DIR: mkdtempSync(join(tmpdir(), 'openrecall-entry-auth-')),
         ALLOW_UNAUTHENTICATED: 'false',
         STATIC_API_KEYS: 'alice:tok-alice,bob:tok-bob',
       },
