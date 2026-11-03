@@ -31,7 +31,7 @@ export class QuotaError extends Error {
   }
 }
 
-function usagePath(owner: string): string {
+export function usagePath(owner: string): string {
   // Hash the owner id so the storage layout never embeds a raw (possibly
   // user-derived) identifier, matching how namespaces/entries are pathed.
   return `owners/${sha256Hex(owner)}/usage.json`

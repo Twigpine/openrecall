@@ -45,6 +45,11 @@ export function take(owner: string, now: number): RateResult {
 }
 
 /** Test-only: clear all buckets. */
+/**
+ * Drop every bucket. Tests only: the buckets are per owner and in-process, and
+ * bun shares one process across test files, so a test that deliberately
+ * exhausts a bucket would otherwise refuse requests in every later suite.
+ */
 export function _reset(): void {
   buckets.clear()
 }

@@ -8,9 +8,8 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { sha256Hex } from '../src/hash.ts'
 import { namespaceSlug } from '../src/namespace.ts'
-import { entryPath } from '../src/store/blobstore.ts'
+import { contentPath } from '../src/store/blobstore.ts'
 
 // Storage/auth/limit env is set in tests/setup.ts (preload) so config.ts reads
 // it no matter which test file loads first.
@@ -219,7 +218,12 @@ describe('per-entry updatedAt', () => {
     await c.push(ns, { [key]: 'this entry is about to lose its blob' })
     expect((await c.pull(ns)).updatedAt[key]).toMatch(ISO) // non-vacuity: it was there
 
-    rmSync(join(DATA_DIR, entryPath(namespaceSlug(ns), sha256Hex(key))), { force: true })
+    // Blobs are named by their ciphertext hash, not the entry key, so take the
+    // hash the manifest holds. No `force`: if the layout moves again, a delete
+    // that finds nothing throws here instead of leaving the blob in place and
+    // the assertions below checking a namespace that never drifted.
+    const hash = (await c.hashes(ns))[key] as string
+    rmSync(join(DATA_DIR, contentPath(namespaceSlug(ns), hash)))
 
     // Assert on the WIRE, not through pull(). Going through the client proves
     // nothing here: its sanitizer only keeps keys present in the decrypted

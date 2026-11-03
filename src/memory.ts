@@ -17,17 +17,27 @@
 import { config } from './config.ts'
 import { namespaceChecksum, sha256Hex, sha256Prefixed } from './hash.ts'
 import { withLock } from './lock.ts'
+import { logEvent } from './log.ts'
 import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
-import { entryPath, getStore, manifestPath } from './store/index.ts'
+import { blobPrefix, contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
 import {
   emptyManifest,
   type Manifest,
   type MemoryData,
   type MemoryHashes,
+  StaleBaseError,
+  UnreadableManifestError,
   type UpsertRequest,
   type UpsertResponse,
 } from './types.ts'
+
+/**
+ * Capabilities the hashes view advertises. Without this a client cannot tell a
+ * server that enforces the write precondition from one that ignores an unknown
+ * body field, so it would report a guarantee it is not getting.
+ */
+const SUPPORTS = ['base-precondition']
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
 async function readManifest(nsSlug: string): Promise<Manifest> {
@@ -36,9 +46,12 @@ async function readManifest(nsSlug: string): Promise<Manifest> {
   try {
     return JSON.parse(new TextDecoder().decode(raw)) as Manifest
   } catch {
-    // A corrupt manifest shouldn't brick the namespace; start clean. Entry
-    // blobs are still on disk and a re-push will rebuild the manifest.
-    return emptyManifest()
+    // Absent and unreadable are different. Absent is a new namespace; unreadable
+    // is a namespace whose index we cannot see, and starting clean there would
+    // now be destructive: the commit path reclaims blobs the new manifest does
+    // not reference, so an empty manifest would delete every live entry. Refuse
+    // the write and let an operator look.
+    throw new UnreadableManifestError()
   }
 }
 
@@ -64,6 +77,8 @@ export async function getHashes(namespace: string, nsSlug: string): Promise<Memo
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
     entryChecksums,
+    erasure: getStore().erasure,
+    supports: SUPPORTS,
   }
 }
 
@@ -81,7 +96,15 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   await Promise.all(
     Object.entries(m.entries).map(async ([key, meta]) => {
-      const bytes = await store.get(entryPath(nsSlug, sha256Hex(key)))
+      let bytes: Uint8Array | null = null
+      try {
+        bytes = (await store.get(contentPath(nsSlug, meta.hash))) ?? null
+      } catch {
+        // A hash that is not a digest cannot name a blob. Skip this entry the
+        // same way a missing one is skipped: one unreadable entry must not take
+        // the whole namespace's read down with it.
+      }
+      bytes ??= await store.get(entryPath(nsSlug, sha256Hex(key)))
       if (!bytes) return // manifest/blob drift — skip rather than 500
       entries[key] = Buffer.from(bytes).toString('base64')
       entryChecksums[key] = meta.hash
@@ -94,6 +117,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
     version: m.version,
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
+    erasure: store.erasure,
     content: { entries, entryChecksums, entryUpdatedAt },
   }
 }
@@ -121,12 +145,28 @@ export async function upsert(
   return withLock(`ns:${nsSlug}`, async () => {
     const store = getStore()
     const m = await readManifest(nsSlug)
+    // The projection mutates `m.entries` in place, so capture what the currently
+    // visible manifest points at before touching it; cleanup needs the old hashes.
+    const prev = checksumsFrom(m)
+    const touched = new Set<string>()
+
+    // Compare the caller's base before any projection, against the manifest this
+    // write would actually mutate. Every disagreeing key is collected so one
+    // round trip tells the caller everything that moved under it.
+    if (req.base) {
+      const conflicts: Record<string, string | null> = {}
+      for (const [key, expected] of Object.entries(req.base)) {
+        const actual = m.entries[key]?.hash ?? null
+        if (actual !== expected) conflicts[key] = actual
+      }
+      if (Object.keys(conflicts).length > 0) throw new StaleBaseError(conflicts)
+    }
+
     const accepted: string[] = []
     const deleted: string[] = []
     const skipped: { key: string; reason: string }[] = []
     // Defer all mutations so we can reject the whole request on a cap breach.
     const blobWrites: { path: string; bytes: Uint8Array }[] = []
-    const blobDeletes: string[] = []
 
     // Deletions first (projected; store.delete deferred to commit).
     for (const key of req.deletions ?? []) {
@@ -137,7 +177,7 @@ export async function upsert(
         continue
       }
       if (m.entries[key]) {
-        blobDeletes.push(entryPath(nsSlug, sha256Hex(key)))
+        touched.add(key)
         delete m.entries[key]
         deleted.push(key)
       }
@@ -173,12 +213,14 @@ export async function upsert(
         accepted.push(key)
         continue
       }
-      blobWrites.push({ path: entryPath(nsSlug, sha256Hex(key)), bytes })
+      blobWrites.push({ path: contentPath(nsSlug, hash), bytes })
+      touched.add(key)
       m.entries[key] = { hash, size: bytes.byteLength, updatedAt: nowIso }
       accepted.push(key)
     }
 
-    const mutated = blobWrites.length > 0 || blobDeletes.length > 0
+    // Every blobWrites push is paired with a touched.add, so touched alone decides.
+    const mutated = touched.size > 0
     if (mutated) {
       // Project the namespace's final footprint and enforce its byte cap.
       let nsBytes = 0
@@ -190,8 +232,13 @@ export async function upsert(
       }
 
       const commit = async () => {
+        // Blobs first, then the manifest that publishes them. A crash before
+        // the manifest write leaves orphans no reader can see; a crash after it
+        // leaves stale extras no reader can see. Either way the visible state is
+        // consistent. Reclaim is deliberately NOT here: it runs after the write
+        // is durable, because a failure to collect garbage must not fail, or
+        // roll back, a write that already landed.
         for (const w of blobWrites) await store.put(w.path, w.bytes)
-        for (const d of blobDeletes) await store.delete(d)
         m.version += 1
         m.lastModified = nowIso
         await writeManifest(nsSlug, m)
@@ -204,17 +251,78 @@ export async function upsert(
       } else {
         await reserveAndCommit(owner, namespace, projected, nowIso, commit)
       }
+
+      await reclaim(nsSlug, m, prev, touched)
     }
 
     return {
       namespace,
       version: m.version,
       checksum: namespaceChecksum(checksumsFrom(m)),
+      erasure: store.erasure,
       accepted,
-      deleted,
+      // A key listed in both deletions and entries is projected as a delete and
+      // then re-added, so reporting it in both arrays tells a client mirroring
+      // `deleted` to drop a file the same response says it stored.
+      deleted: deleted.filter(k => !(k in m.entries)),
       skipped,
     }
   })
+}
+
+/**
+ * Delete ciphertext no visible manifest names.
+ *
+ * Driven by a listing rather than by the keys this request touched, because the
+ * orphans that matter are the ones no key can reach: a write that died before
+ * publishing left blobs the next manifest never mentions, and a delete whose
+ * collection failed removed the key from the manifest, so nothing can name its
+ * hash again. Sweeping the namespace's blob directory against the live hash set
+ * finds both, which is what makes `erasure: 'erases'` true rather than a claim.
+ *
+ * Never throws. This runs after the write is durable and collects garbage that
+ * is already invisible to every reader, so a store hiccup here must not turn a
+ * landed write into a failure, nor skip the caller's quota accounting.
+ *
+ * Single-instance only, like the lock it runs under. The sweep deletes anything
+ * under the namespace's blob prefix that the manifest it just wrote does not
+ * name, which is correct while one process serializes every write to that
+ * namespace and silent data loss the moment two do. It moves behind the same
+ * row-version check as the lock when that lands (see lock.ts and PLAN §7).
+ *
+ * Costs one LIST per mutating write, deliberately: it replaces a delete per
+ * touched key, most of which were no-ops, and it is the only way to see an
+ * orphan no key can name.
+ */
+async function reclaim(
+  nsSlug: string,
+  m: Manifest,
+  prev: Record<string, string>,
+  touched: Set<string>,
+): Promise<void> {
+  try {
+    const store = getStore()
+    const live = new Set<string>()
+    for (const meta of Object.values(m.entries)) live.add(contentPath(nsSlug, meta.hash))
+    for (const path of await store.list(blobPrefix(nsSlug))) {
+      if (!live.has(path)) await store.delete(path)
+    }
+    // Entries written before content addressing sit at a key-derived path the
+    // sweep above does not cover, and only a key the pre-write manifest knew
+    // can have one.
+    for (const key of touched) {
+      if (prev[key] !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
+    }
+  } catch (err) {
+    // The slug is what makes this actionable: without it an operator only knows
+    // collection failed somewhere. It is already every storage path's own
+    // directory name, so it discloses nothing a reader of the store lacks.
+    logEvent({
+      event: 'reclaim_failed',
+      nsSlug,
+      reason: (err as Error)?.constructor?.name ?? 'unknown',
+    })
+  }
 }
 
 function decodeBase64(b64: string): Uint8Array | null {

@@ -17,6 +17,8 @@ type S3Settings = {
 }
 
 export class S3BlobStore implements BlobStore {
+  readonly erasure = 'erases' as const
+
   private readonly client: Bun.S3Client
   private readonly bucket: string
 
@@ -56,6 +58,17 @@ export class S3BlobStore implements BlobStore {
 
   async delete(path: string): Promise<void> {
     await this.client.delete(path)
+  }
+
+  async list(prefix: string): Promise<string[]> {
+    const out: string[] = []
+    let token: string | undefined
+    do {
+      const page = await this.client.list({ prefix, continuationToken: token })
+      for (const o of page.contents ?? []) if (o.key) out.push(o.key)
+      token = page.isTruncated ? page.nextContinuationToken : undefined
+    } while (token)
+    return out
   }
 
   describe(): string {
