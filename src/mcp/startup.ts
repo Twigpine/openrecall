@@ -225,7 +225,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
       ready: false,
       unconfigured: true,
       diagnostic:
-        `OPENRECALL_PASSPHRASE is not set and ${settings.configPath} holds none. Run \`openrecall init\` to create it. ` +
+        `OPENRECALL_PASSPHRASE (or OPENRECALL_PASSPHRASE_FILE) is not set and ${settings.configPath} holds none. Run \`openrecall init\` to create it. ` +
         'The passphrase is your zero-knowledge key, it never reaches the server, and without it nothing can be read or written.',
     }
   }

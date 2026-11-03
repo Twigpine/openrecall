@@ -276,7 +276,7 @@ restore from that backup once to prove the backup works.
   and blocks saves containing live-looking credentials by default
   (`OPENRECALL_SCAN=warn|off` to relax it).
 - **Passphrase custody.** The MCP server and CLI accept `OPENRECALL_PASSPHRASE_FILE`,
-  a path, as well as the value in `OPENRECALL_PASSPHRASE`, and the file wins when
+  an absolute path, as well as the value in `OPENRECALL_PASSPHRASE`, and the file wins when
   both are set. Agent hosts commonly spread their own environment into every
   stdio server they launch, so a passphrase exported for openrecall is readable by
   all of them; a path is not, and a file can carry permissions an environment

@@ -12,7 +12,7 @@
  * Run: bun run scripts/build-binaries.ts [outdir]
  */
 
-import { mkdir, rm } from 'node:fs/promises'
+import { mkdir, readdir, rm } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -62,9 +62,17 @@ for (const target of targets) {
 
 // Checksums beside the binaries: a downloaded binary is the one artifact a user
 // cannot inspect before running.
-const sums =
-  await Bun.$`sh -c 'cd ${outdir} && sha256sum openrecall-* 2>/dev/null || shasum -a 256 openrecall-*'`
-    .quiet()
-    .text()
+const names = (await readdir(outdir)).filter(n => n.startsWith('openrecall-')).sort()
+const sums = (
+  await Promise.all(
+    names.map(async n => {
+      const hex = new Bun.CryptoHasher('sha256')
+        .update(await Bun.file(join(outdir, n)).arrayBuffer())
+        .digest('hex')
+      // sha256sum's text format, so `sha256sum -c SHA256SUMS` verifies it.
+      return `${hex}  ${n}\n`
+    }),
+  )
+).join('')
 await Bun.write(join(outdir, 'SHA256SUMS'), sums)
 console.log(sums.trim())

@@ -93,8 +93,13 @@ async function cmdInit(args: Args) {
   if (apiKey) cfg.apiKey = apiKey
 
   // Never replace an existing passphrase: a new one can't decrypt old memory.
+  //
+  // When OPENRECALL_PASSPHRASE_FILE is set the file is the passphrase, and it
+  // wins over anything stored. Writing a second, generated one here would leave
+  // config.json holding a key the file contradicts, so none is stored.
+  const fromFile = Boolean(process.env.OPENRECALL_PASSPHRASE_FILE?.trim())
   let created = false
-  if (!cfg.passphrase) {
+  if (!cfg.passphrase && !fromFile) {
     cfg.passphrase = process.env.OPENRECALL_PASSPHRASE?.trim() || generatePassphrase()
     created = true
   }
@@ -108,10 +113,12 @@ async function cmdInit(args: Args) {
   console.log(`  namespace  ${r.namespace}`)
   console.log(`  api key    ${cfg.apiKey ? 'set' : 'none'}`)
   console.log(
-    created
-      ? '  passphrase generated — BACK UP this file. The passphrase is the only key to\n' +
+    fromFile
+      ? '  passphrase supplied by OPENRECALL_PASSPHRASE_FILE (none stored here)'
+      : created
+        ? '  passphrase generated — BACK UP this file. The passphrase is the only key to\n' +
           '             your memory; the host cannot recover it.'
-      : '  passphrase kept (existing)',
+        : '  passphrase kept (existing)',
   )
   console.log('\nnext: openrecall setup        # connect your agents')
 }

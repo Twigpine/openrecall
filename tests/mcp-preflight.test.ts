@@ -50,7 +50,7 @@ afterAll(() => server?.stop(true))
 function markerOf(text: string): string {
   const table: [string, RegExp][] = [
     ['misexpansion', /unexpanded variable reference/],
-    ['missing-passphrase', /OPENRECALL_PASSPHRASE is not set/],
+    ['missing-passphrase', /OPENRECALL_PASSPHRASE \(or OPENRECALL_PASSPHRASE_FILE\) is not set/],
     ['unreachable', /cannot reach the openrecall server/],
     ['rejected-key', /rejected the service key/],
     ['unauthorized-namespace', /refused namespace/],
