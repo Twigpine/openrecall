@@ -50,9 +50,6 @@ describe('the image satisfies the runtime floor the package declares', () => {
     expect(declared.length).toBe(3)
     expect(image.length).toBe(3)
 
-    expect(`image ${image.join('.')} >= declared ${declared.join('.')}`).toBe(
-      `image ${image.join('.')} >= declared ${declared.join('.')}`,
-    )
     expect(cmp(image, declared)).toBeGreaterThanOrEqual(0)
   })
 })

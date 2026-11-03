@@ -91,6 +91,11 @@ describe('shipped code declares what it imports', () => {
   test('unbundled library code imports only real dependencies, not merely hoisted ones', () => {
     const declared = new Set(Object.keys(pkg.dependencies ?? {}))
     expect(undeclared(importsUnder(UNBUNDLED), declared)).toEqual([])
+    // Controls: the walk saw client files, and the check does flag a specifier
+    // that is only a devDependency, so an empty result is not an empty walk.
+    expect(sourceFiles(join(ROOT, 'client')).length).toBeGreaterThan(0)
+    const devOnly = Object.keys(pkg.devDependencies ?? {})[0] as string
+    expect(undeclared(new Map([[devOnly, 'client/x.ts']]), declared)).toHaveLength(1)
   })
 
   test('bundled code imports only declared packages, so the build never leans on hoisting', () => {
