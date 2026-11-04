@@ -98,6 +98,14 @@ jobs:
   publish:
     needs: [release-please, verify]
     runs-on: ubuntu-latest
+    # One publish at a time, so the newest-release check below sees what an
+    # earlier approval already shipped. GitHub keeps one pending run per
+    # group: if a third release queues while one publishes and one waits, the
+    # waiting one is cancelled, and re-running it later publishes it as a
+    # backport.
+    concurrency:
+      group: release-publish
+      cancel-in-progress: false
     # Manual approval gate, as in Zero and OpenClaude. The `release`
     # environment carries a required-reviewer rule (Settings -> Environments ->
     # release), so this job waits until a maintainer approves it in the Actions
@@ -186,6 +194,10 @@ jobs:
         id: meta
         with:
           images: ghcr.io/${{ github.repository }}
+          # The default (latest=auto) adds `latest` for every semver tag, even
+          # an older release's. Only the raw rule below decides `latest`.
+          flavor: |
+            latest=false
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release-please.outputs.tag_name }}
             type=raw,value=latest,enable=${{ steps.order.outputs.latest }}
