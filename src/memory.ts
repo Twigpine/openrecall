@@ -22,6 +22,7 @@ import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
 import { blobPrefix, contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
 import {
+  type EntryRead,
   emptyManifest,
   type Manifest,
   type MemoryData,
@@ -37,7 +38,7 @@ import {
  * server that enforces the write precondition from one that ignores an unknown
  * body field, so it would report a guarantee it is not getting.
  */
-const SUPPORTS = ['base-precondition']
+const SUPPORTS = ['base-precondition', 'entry-view']
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
 async function readManifest(nsSlug: string): Promise<Manifest> {
@@ -82,6 +83,29 @@ export async function getHashes(namespace: string, nsSlug: string): Promise<Memo
   }
 }
 
+/**
+ * One entry's ciphertext: the content-addressed blob first, then the path from
+ * before content addressing. Null when neither exists (manifest/blob drift).
+ * Both reads go through here so the fallback and the drift handling cannot
+ * diverge between the full view and the single-entry view.
+ */
+async function readEntryBytes(
+  store: ReturnType<typeof getStore>,
+  nsSlug: string,
+  key: string,
+  hash: string,
+): Promise<Uint8Array | null> {
+  let bytes: Uint8Array | null = null
+  try {
+    bytes = (await store.get(contentPath(nsSlug, hash))) ?? null
+  } catch {
+    // A hash that is not a digest cannot name a blob. Fall through to the older
+    // path, the same way a missing blob does: one unreadable entry must not take
+    // the whole read down with it.
+  }
+  return bytes ?? (await store.get(entryPath(nsSlug, sha256Hex(key)))) ?? null
+}
+
 /** Full view: fetch every ciphertext entry blob. */
 export async function getData(namespace: string, nsSlug: string): Promise<MemoryData> {
   const m = await readManifest(nsSlug)
@@ -96,15 +120,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   await Promise.all(
     Object.entries(m.entries).map(async ([key, meta]) => {
-      let bytes: Uint8Array | null = null
-      try {
-        bytes = (await store.get(contentPath(nsSlug, meta.hash))) ?? null
-      } catch {
-        // A hash that is not a digest cannot name a blob. Skip this entry the
-        // same way a missing one is skipped: one unreadable entry must not take
-        // the whole namespace's read down with it.
-      }
-      bytes ??= await store.get(entryPath(nsSlug, sha256Hex(key)))
+      const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
       if (!bytes) return // manifest/blob drift — skip rather than 500
       entries[key] = Buffer.from(bytes).toString('base64')
       entryChecksums[key] = meta.hash
@@ -119,6 +135,60 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
     checksum: namespaceChecksum(entryChecksums),
     erasure: store.erasure,
     content: { entries, entryChecksums, entryUpdatedAt },
+  }
+}
+
+/**
+ * Bounded view: one entry's ciphertext, selected by key.
+ *
+ * Deliberately NOT getData filtered after the fact. The point is that the
+ * store is asked for one blob, so a caller proving it can decrypt what is
+ * stored pays for one entry instead of the namespace's whole 10 MB cap.
+ *
+ * Drift is answered, not swallowed. getData skips an entry whose body is gone
+ * because one bad blob must not take a namespace-wide read down with it, and
+ * the caller still gets every other entry. Here there is no other entry: the
+ * same skip would return "this namespace has no such key", which is false and
+ * indistinguishable from a key that was never written. So a named-but-missing
+ * body is its own refusal (`unreadable`) and an operator can see it.
+ */
+export async function getEntry(namespace: string, nsSlug: string, key: string): Promise<EntryRead> {
+  let m = await readManifest(nsSlug)
+  // Own property only: a key such as `constructor` must miss, not resolve to
+  // something off the prototype and then fail as an unreadable body.
+  let meta = Object.hasOwn(m.entries, key) ? m.entries[key] : undefined
+  if (!meta) {
+    // The same test the full read uses to answer `empty`, so the two reads
+    // agree on what "this namespace does not exist yet" means.
+    if (m.version === 0 && Object.keys(m.entries).length === 0) return { status: 'no_namespace' }
+    return { status: 'no_entry' }
+  }
+
+  const store = getStore()
+  let bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+  if (!bytes) {
+    // This read takes no namespace lock, so a write that lands between the
+    // manifest read and the blob read can move the key to a new hash. Look once
+    // more before calling it drift, which tells an operator to restore a backup.
+    m = await readManifest(nsSlug)
+    const again = Object.hasOwn(m.entries, key) ? m.entries[key] : undefined
+    if (!again) return { status: 'no_entry' }
+    meta = again
+    bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+    if (!bytes) return { status: 'unreadable' }
+  }
+
+  return {
+    status: 'ok',
+    entry: {
+      namespace,
+      version: m.version,
+      lastModified: m.lastModified,
+      erasure: store.erasure,
+      key,
+      entry: Buffer.from(bytes).toString('base64'),
+      entryChecksum: meta.hash,
+    },
   }
 }
 

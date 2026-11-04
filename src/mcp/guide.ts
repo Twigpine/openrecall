@@ -39,5 +39,10 @@ export const SHORT_INSTRUCTIONS =
   'user and project before asking them to repeat it. When you learn a stable ' +
   'fact (a preference, a project decision, a convention, or feedback on how to ' +
   'work), persist it with memory_save; skip transient context and never save ' +
-  'secrets. Search before adding to avoid duplicates. Call the "memory_guide" ' +
+  'secrets. Route by what the fact is: openrecall takes durable facts that must ' +
+  "survive across machines, the host agent's local memdir keeps the session " +
+  'log, and repo-shared facts belong in team memory. If a fact fits two, ask ' +
+  'who needs it: you on every machine, this session only, or everyone on the ' +
+  'repository. ' +
+  'Search before adding to avoid duplicates. Call the "memory_guide" ' +
   'prompt for the full protocol.'

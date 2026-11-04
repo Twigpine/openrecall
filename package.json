@@ -64,7 +64,8 @@
     "check": "biome check",
     "check:fix": "biome check --write",
     "format": "biome format --write",
-    "lint": "biome lint"
+    "lint": "biome lint",
+    "build:binaries": "bun run scripts/build-binaries.ts"
   },
   "exports": {
     ".": {

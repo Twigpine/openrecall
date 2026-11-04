@@ -106,6 +106,29 @@ selectively — signal, not transcript.
 If asked to "remember" something already in the repo, save instead what was
 *non-obvious* about it.
 
+## Which memory system gets the fact
+
+More than one memory system can be live at once, and they fire on the same
+trigger, so route by what the fact is rather than by whichever system asked
+first.
+
+- **openrecall** takes durable facts that must survive across machines: user
+  preferences, project decisions, conventions, and feedback on how to work. If
+  the fact will still be true next month on a different machine, save it here
+  with `memory_save`, and do that even when the host agent would also write it
+  down somewhere local.
+- **The host agent's local memdir** keeps the session log: what you did this
+  session, what you tried, where you left off. That stays on this machine and
+  does not belong in openrecall.
+- **Team memory** keeps repo-shared facts, the ones every contributor to the
+  repository needs: build and release steps, review conventions, anything that
+  would read the same for a teammate. Put those in the repo rather than in your
+  personal openrecall namespace.
+
+For a fact that seems to fit two of them, ask who needs it. You, on every
+machine, is openrecall. This session only is the memdir log. Everyone working on
+the repository is team memory.
+
 ## How to call the tools
 
 Depending on the agent, the tools may carry a prefix — e.g.
@@ -114,7 +137,7 @@ same tools. If your agent shows MCP tools by name only until you look them up
 (a tool-search step), search for "openrecall" first.
 
 - `memory_save(key, content)` — `key` is a path that mirrors a memory directory
-  layout; `content` is markdown. Saving the same `key` overwrites it.
+  layout; `content` is markdown. Saving the same `key` overwrites it, unless the entry changed since this session last read it. A stale save is refused and names the keys that moved: read each with `memory_get`, merge, and save again.
 - `memory_recall(query, limit?)` — relevance-ranked entries for a query.
 - `memory_recall(query, namespaces: [shared, project], limit?)` — one ranked,
   bounded result across up to eight explicit namespaces. Use `namespace` or
@@ -167,10 +190,18 @@ Why: <why it matters — for feedback/project>
   written. If it names a file, flag, or decision, confirm it still holds before
   acting on it.
 
-## Namespaces (when scoping matters)
+## Namespaces
 
 The six memory read/write tools optionally take a `namespace`; it defaults to
 the one this MCP server is configured with (typically `user:<you>`). The project
 tools use that configured namespace as the shared root. Use the namespace
 returned by `memory_project` consistently across agents; do not invent a new
 scope for every task or branch.
+
+When the memory lives on a server, whatever namespace you pass has to sit inside
+the subtree your key is authorized for. The server grants an owner `user:<owner>`
+and its children and refuses everything else, so every namespace you use starts
+with `user:<owner>`. If you run one MCP config per codebase instead of using
+`memory_project`, set that config's namespace to `user:<owner>/<repo>`. Be
+consistent about the name you pick, so a later recall looks in the place the
+fact was saved.

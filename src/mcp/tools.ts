@@ -9,7 +9,12 @@
  * these tools do.
  */
 
-import type { OpenRecallClient } from '../../client/index.ts'
+import {
+  flattenServerText,
+  type OpenRecallClient,
+  OpenRecallHttpError,
+  OpenRecallTimeoutError,
+} from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { validateNamespace } from '../namespace.ts'
 import { rankEntriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
@@ -26,8 +31,217 @@ export type ToolResult = { text: string; isError?: boolean }
  */
 export type MemoryClient = Pick<OpenRecallClient, 'pull' | 'push' | 'hashes' | 'delete'>
 
+/** Entry order by key. Not the default sort, which compares "key,value" pairs. */
+const byKey = ([a]: [string, unknown], [b]: [string, unknown]) => (a < b ? -1 : 1)
+
+/**
+ * What text the SERVER chose is allowed to put into a model's context.
+ *
+ * Everything a refusal renders (the message, the error code, and the entry keys
+ * and hashes a 409 names) is read off a response body, so a broken or hostile
+ * server writes straight into the conversation unless it passes through here.
+ * Newlines and escapes are the sharp part: they let that text forge turns or
+ * instructions rather than merely be long.
+ *
+ * It covers the typed paths as well as the unrecognized-failure path: those
+ * are the ones a server can actually steer, since it chooses the status that
+ * selects them.
+ */
+export function bounded(message: string, max = 300): string {
+  return flattenServerText(message, max)
+}
+
+/**
+ * How many keys a refusal may name. A server choosing to answer with thousands
+ * of conflicts would otherwise fill a model's context with a single tool
+ * result, each entry short and the total unbounded.
+ */
+const MAX_LISTED = 5
+
 const ok = (text: string): ToolResult => ({ text })
 const fail = (text: string): ToolResult => ({ text, isError: true })
+
+/**
+ * The subtree a key actually reaches, derived from the configured namespace.
+ *
+ * `authorizeNamespace` grants an owner `user:<owner>` and its children, so the
+ * prefix is the owner root, never the configured namespace itself. The guide
+ * and the setup card both ask a developer to run one namespace per codebase,
+ * which makes a configured `user:alice/openrecall` the normal case; naming that as
+ * the limit would be false and would send the model to retarget inside a
+ * subtree narrower than the one it has.
+ *
+ * A namespace that is not `user:`-scoped has no owner root at all: a non-local
+ * key is granted `user:<owner>` and nothing else, and `hasAclGrant` is a closed
+ * door, so no `repo:`/`agent:` namespace is reachable. Returning the namespace
+ * unchanged there would promise a subtree the server can never grant, so this
+ * returns null and the caller says so instead.
+ */
+function ownerRoot(namespace: string): string | null {
+  if (!namespace.startsWith('user:')) return null
+  const slash = namespace.indexOf('/')
+  return slash === -1 ? namespace : namespace.slice(0, slash)
+}
+
+/**
+ * Render a server refusal as text a model can act on.
+ *
+ * One string wrapping the raw JSON body tells a model that something went
+ * wrong and nothing about what to do next: a stale write, a wrong API key and a
+ * rate limit would all read the same. Each status gets its own text with its
+ * own recovery move.
+ *
+ * The 403 text deliberately does NOT echo the namespace that was refused. A
+ * denial is the one moment the caller is provably reaching outside its own
+ * subtree, so repeating the target would feed another owner's namespace back
+ * into the model's context; it names the prefix this deployment is authorized
+ * for instead, or, when this deployment is configured for a namespace no key
+ * can be granted at all, says that and hands the problem to the user.
+ *
+ * Returns null when the error is not a typed HTTP refusal, so the caller keeps
+ * its generic message rather than dressing up an unknown failure.
+ */
+export function denial(
+  action: string,
+  namespace: string,
+  configured: string,
+  tail: string,
+  e: unknown,
+): string | null {
+  if (e instanceof OpenRecallTimeoutError) {
+    // A write that timed out may still have been applied. Saying only "failed"
+    // invites a blind retry, so name the unknown outcome and the safe move.
+    if (e.operation === 'push' || e.operation === 'delete') {
+      return `${action} got no answer from the server within ${e.timeoutMs}ms, so it is unknown whether the change was applied. Re-read ${namespace} with memory_get before trying again. ${tail}`
+    }
+    return `${action} got no answer from the server within ${e.timeoutMs}ms. Try once more, and if it repeats tell the user the memory server is not responding. ${tail}`
+  }
+  if (!(e instanceof OpenRecallHttpError)) return null
+  const authorized = ownerRoot(configured)
+  if (e.status === 401) {
+    // The model cannot edit the server's environment or restart the process,
+    // so an instruction to do that is not a move it has. Like the 429 text,
+    // this one hands the problem to the user and stops the loop.
+    return `${action} refused: the server did not accept this API key (401 unauthorized). Retrying with the same key cannot succeed and no other namespace will help, so stop using the memory tools this session and tell the user the openrecall API key is being rejected and needs replacing. ${tail}`
+  }
+  if (e.status === 403) {
+    if (authorized === null) {
+      return `${action} refused: this key can reach only its own user: namespace, and ${configured} is not one, so nothing under it is reachable either (403 forbidden). No retry and no other key here can succeed, so tell the user this openrecall server is configured for ${configured} and has to point at a namespace under the key owner's own user: subtree instead. ${tail}`
+    }
+    return `${action} refused: this key may only reach ${authorized} and namespaces under it (403 forbidden). Retarget the tool at a namespace under ${authorized}. ${tail}`
+  }
+  if (e.status === 409) {
+    return `${action} refused: the memory changed on the server after this session last read ${namespace}, so the base this write was computed from is out of date (409 stale base). ${conflictLines(e.details)}${sentBaseLine(e.details)} Re-read each conflicting key with memory_get (recall returns clipped regions, not whole entries), reapply this change on top of what is stored now, and save again. ${tail}`
+  }
+  if (e.status === 429) {
+    return `${action} refused: the server is rate limiting this key (429 rate limited). Do not retry now and do not retry in a loop; wait for the limit to reset, and tell the user memory writes are paused. ${tail}`
+  }
+  if (e.status === 413) {
+    return `${action} refused: this write would exceed a storage limit on ${namespace} (413 quota: ${bounded(e.code, 40)}). Delete or shorten stored entries before saving again, or save less content. ${tail}`
+  }
+  return null
+}
+
+/**
+ * What this client wrote against, when it sent a base at all.
+ *
+ * A first write into a namespace this client never read carries no base, so
+ * there is nothing to name and this adds nothing rather than inventing one.
+ */
+function sentBaseLine(details: Record<string, unknown> | undefined): string {
+  const raw = details?.sentBase
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) return ''
+  const all = Object.entries(raw as Record<string, unknown>)
+    .filter(([, v]) => typeof v === 'string')
+    .sort(byKey)
+  const parts = all
+    .slice(0, MAX_LISTED)
+    .map(([k, v]) => `"${bounded(k, 120)}" at ${bounded(v as string, 80)}`)
+  if (parts.length === 0) return ''
+  const more = all.length > parts.length ? ` and ${all.length - parts.length} more` : ''
+  return ` This write was computed against ${parts.join(', ')}${more}.`
+}
+
+/** What the server says each conflicting key holds now, or that it said nothing. */
+function conflictLines(details: Record<string, unknown> | undefined): string {
+  const raw = details?.conflicts
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    return 'The server did not name the conflicting keys.'
+  }
+  const entries = Object.entries(raw as Record<string, unknown>)
+  if (entries.length === 0) return 'The server did not name the conflicting keys.'
+  const sorted = entries.sort(byKey)
+  const parts = sorted
+    .slice(0, MAX_LISTED)
+    .map(
+      ([k, v]) =>
+        `"${bounded(k, 120)}" now holds ${typeof v === 'string' ? bounded(v, 80) : 'no entry'}`,
+    )
+  const more = sorted.length > parts.length ? ` and ${sorted.length - parts.length} more` : ''
+  return `Changed since this session read it: ${parts.join(', ')}${more}.`
+}
+
+/**
+ * A key the server refused inside an otherwise-successful push.
+ *
+ * The server answers 200 for a write it stored nothing of, listing the refused
+ * keys in `skipped` (`src/memory.ts`). Reading only `uploaded` therefore renders
+ * the denial as "saved", or as "unchanged" once the client filters the key out,
+ * and either way the model is told its memory is safe when nothing was written.
+ * Each reason gets the move that actually clears it.
+ */
+function skippedText(key: string, namespace: string, reason: string): string {
+  const head = `Saving "${bounded(key, 120)}" to ${namespace} was refused by the server (${bounded(reason, 80)}), and nothing was stored.`
+  if (reason === 'entry_too_large') {
+    return `${head} Save less content under this key, or split it across several smaller entries and save those.`
+  }
+  if (reason === 'invalid_key') {
+    return `${head} Save it under a different entry key: a plain relative path such as notes/topic.md, with no "..", no leading or trailing "/", and no backslash.`
+  }
+  // invalid_base64 means this client sent something the server could not read,
+  // which no choice of key or content on the model's side fixes.
+  return `${head} Retrying the same request cannot succeed, so tell the user memory writes to ${namespace} are failing.`
+}
+
+/**
+ * A namespace that answers with no entries at a version past zero.
+ *
+ * The server drops any entry whose stored body is missing from the full read,
+ * so a namespace whose blobs are gone reads exactly like one that was never
+ * written. Reporting that as "no memory yet" tells a model its memory does not
+ * exist, and a model told that will save over it. A namespace that genuinely
+ * has nothing is still at version 0, which is how the two are told apart.
+ *
+ * `list` is deliberately not routed through this: it reads the manifest, so it
+ * still names the keys, which is the true answer there.
+ */
+function unservable(ns: string, version: number): string {
+  return (
+    `${ns} is not empty, but the server could not serve any of its entries (version ${version}). ` +
+    'This is server-side data loss, not an empty namespace, so do not treat it as a fresh start and ' +
+    'do not save over it. Tell the user their stored memory is unreadable and needs restoring.'
+  )
+}
+
+/**
+ * Whether a read that came back with no entries at a version past zero is
+ * really lost data. A namespace whose last entry was deleted looks the same
+ * (version bumped, no entries) and is simply empty, so ask the manifest: only a
+ * manifest that still names entries means the bodies are gone. The manifest
+ * read is not recorded as the caller's base.
+ */
+async function lostEntries(
+  client: MemoryClient,
+  ns: string,
+  version: number,
+): Promise<string | null> {
+  if (version === 0) return null
+  const named = Object.keys(await client.hashes(ns, { observe: false }))
+  return named.length > 0 ? unservable(ns, version) : null
+}
+
+/** A refusal already rendered for the model, carried through a nested catch. */
+class Rendered extends Error {}
 
 function snippet(content: string, max = 200): string {
   const oneLine = content.replace(/\s+/g, ' ').trim()
@@ -259,6 +473,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       const ns = nsOf(namespace)
       try {
         const r = await client.push(ns, { [key]: content })
+        // A 2xx does not mean this key landed: the server refuses oversized and
+        // malformed entries per key and reports them here. Match on the key
+        // that was sent, since another key's refusal says nothing about this one.
+        const refused = r.skipped?.find(s => s.key === key)
+        if (refused) return fail(skippedText(key, ns, refused.reason))
         const status = r.uploaded.length ? 'saved' : 'unchanged'
         return ok(`${status} "${key}" in ${ns} (v${r.version})`)
       } catch (e) {
@@ -267,7 +486,8 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             `Refused to save "${key}" — it looks like it contains a secret:\n${e.message}`,
           )
         }
-        return fail(`save failed: ${(e as Error).message}`)
+        const d = denial(`Saving "${key}"`, ns, defaultNamespace, 'Nothing was stored.', e)
+        return fail(d ?? `save failed: ${bounded((e as Error).message)}`)
       }
     },
 
@@ -290,15 +510,28 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         const corpora = await Promise.all(
           sources.map(async source => {
             try {
-              const { entries } = await client.pull(source)
+              const { entries, version } = await client.pull(source)
+              if (Object.keys(entries).length === 0) {
+                const lost = await lostEntries(client, source, version)
+                if (lost) throw new Rendered(lost)
+              }
               return Object.entries(entries).map(([key, content]) => ({
                 key,
                 content,
                 ...(namespaces ? { namespace: source } : {}),
               }))
             } catch (err) {
+              if (err instanceof Rendered) throw err
+              const d = denial(
+                'Recalling memories',
+                source,
+                defaultNamespace,
+                'No memories were read.',
+                err,
+              )
+              if (d) throw new Rendered(d)
               if (!namespaces) throw err
-              throw new Error(`could not read ${source}: ${(err as Error).message}`)
+              throw new Error(`could not read ${source}: ${bounded((err as Error).message)}`)
             }
           }),
         )
@@ -412,7 +645,8 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         )
         return ok(`${leadFor(shown)}${parts.join('\n\n')}${tail}`)
       } catch (e) {
-        return fail(`recall failed: ${(e as Error).message}`)
+        if (e instanceof Rendered) return fail(e.message)
+        return fail(`recall failed: ${bounded((e as Error).message)}`)
       }
     },
 
@@ -443,15 +677,20 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
     async get(key: string, namespace?: string): Promise<ToolResult> {
       const ns = nsOf(namespace)
       try {
-        const { entries } = await client.pull(ns)
-        if (Object.keys(entries).length === 0) return ok(`(no memory stored in ${ns} yet)`)
+        const { entries, version } = await client.pull(ns)
+        if (Object.keys(entries).length === 0) {
+          const lost = await lostEntries(client, ns, version)
+          if (lost) return fail(lost)
+          return ok(`(no memory stored in ${ns} yet)`)
+        }
         // Own-property check, not `entries[key]`: a key like "__proto__" or
         // "toString" must miss, never resolve to something off the prototype.
         if (!Object.hasOwn(entries, key))
           return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
         return ok(`### ${key} (${ns})\n${entries[key]}`)
       } catch (e) {
-        return fail(`get failed: ${(e as Error).message}`)
+        const d = denial(`Reading "${key}"`, ns, defaultNamespace, 'Nothing was read.', e)
+        return fail(d ?? `get failed: ${bounded((e as Error).message)}`)
       }
     },
 
@@ -460,7 +699,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       const ns = nsOf(namespace)
       const needle = query.toLowerCase()
       try {
-        const { entries } = await client.pull(ns)
+        const { entries, version } = await client.pull(ns)
+        if (Object.keys(entries).length === 0) {
+          const lost = await lostEntries(client, ns, version)
+          if (lost) return fail(lost)
+        }
         const hits = Object.entries(entries).filter(
           ([key, content]) =>
             key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle),
@@ -469,7 +712,8 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         const body = hits.map(([key, content]) => `- ${key}: ${snippet(content)}`).join('\n')
         return ok(`${hits.length} match(es) for "${query}" in ${ns}:\n${body}`)
       } catch (e) {
-        return fail(`search failed: ${(e as Error).message}`)
+        const d = denial('Searching memories', ns, defaultNamespace, 'No memories were read.', e)
+        return fail(d ?? `search failed: ${bounded((e as Error).message)}`)
       }
     },
 
@@ -477,14 +721,15 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
     async list(namespace?: string): Promise<ToolResult> {
       const ns = nsOf(namespace)
       try {
-        const hashes = await client.hashes(ns)
+        const hashes = await client.hashes(ns, { observe: false })
         const keys = Object.keys(hashes).sort()
         if (keys.length === 0) return ok(`(${ns} is empty)`)
         return ok(
           `${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} in ${ns}:\n${keys.map(k => `- ${k}`).join('\n')}`,
         )
       } catch (e) {
-        return fail(`list failed: ${(e as Error).message}`)
+        const d = denial('Listing entries', ns, defaultNamespace, 'No entry keys were read.', e)
+        return fail(d ?? `list failed: ${bounded((e as Error).message)}`)
       }
     },
 
@@ -495,7 +740,8 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         await client.delete(ns, key)
         return ok(`deleted "${key}" from ${ns}`)
       } catch (e) {
-        return fail(`delete failed: ${(e as Error).message}`)
+        const d = denial(`Deleting "${key}"`, ns, defaultNamespace, `"${key}" is still stored.`, e)
+        return fail(d ?? `delete failed: ${bounded((e as Error).message)}`)
       }
     },
   }

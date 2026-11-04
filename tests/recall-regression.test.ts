@@ -1700,7 +1700,11 @@ function ciphertextServer() {
       version++
       return new Response(null, { status: 204 })
     }
-    if (entries.size === 0) return new Response(null, { status: 404 })
+    if (entries.size === 0)
+      return Response.json(
+        { error: { code: 'empty', message: 'no memory for this namespace yet' } },
+        { status: 404 },
+      )
     if (u.searchParams.get('view') === 'hashes')
       return Response.json({
         version,
@@ -1761,7 +1765,10 @@ describe('single-origin tool traffic', () => {
       if (method === 'PUT') return Response.json({ version: 1, deleted: [] })
       if (method === 'DELETE') return new Response(null, { status: 204 })
       // 404 is the empty-namespace path: pull returns no entries, hashes {}.
-      return new Response(null, { status: 404 })
+      return Response.json(
+        { error: { code: 'empty', message: 'no memory for this namespace yet' } },
+        { status: 404 },
+      )
     })
     globalThis.fetch = fn
 
@@ -1797,13 +1804,16 @@ describe('single-origin tool traffic', () => {
     expect(cap.headers.filter(h => h.length > 0).length).toBeGreaterThan(0)
     assertNoPlaintext(cap)
 
-    // And what did go out in place of the plaintext: the single PUT's entry
-    // values must be base64 envelopes. Absence of the sentinel on its own would
-    // also hold for a body that never contained the entry at all.
+    // And what did go out in place of the plaintext: the single PUT that
+    // carries an entry must hold base64 envelopes. Absence of the sentinel on
+    // its own would also hold for a body that never contained the entry at all.
+    // The delete is a second PUT with no entries: after the empty-namespace
+    // read the client asserts the key's absence through the PUT body, since
+    // DELETE has no spelling for "must not exist".
     const puts = cap.bodies
       .filter(b => b.startsWith('{'))
       .map(b => JSON.parse(b) as { entries?: Record<string, string> })
-      .filter(b => b.entries !== undefined)
+      .filter(b => Object.keys(b.entries ?? {}).length > 0)
     expect(puts.length).toBe(1)
     const values = Object.values(puts[0].entries ?? {})
     expect(values.length).toBe(1)

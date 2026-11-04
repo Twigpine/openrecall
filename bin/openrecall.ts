@@ -6,6 +6,7 @@
  *   openrecall init [--url <local|https://…>] [--namespace <ns>] [--api-key <key>]
  *   openrecall setup [agent…|all] [--write] [--npx]
  *   openrecall status
+ *   openrecall card <owner> [url]         print the service paste-in card + a new passphrase
  *   openrecall push <dir> [namespace]   encrypt + upload changed .md entries
  *   openrecall pull <dir> [namespace]   download + decrypt into <dir>
  *   openrecall mcp                      run the stdio MCP server (memory tools)
@@ -21,6 +22,7 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
+import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
 import {
   configTooOpen,
@@ -34,6 +36,7 @@ import {
   writeConfigFile,
 } from '../src/cli/settings.ts'
 import { validateNamespace } from '../src/namespace.ts'
+import { version } from '../src/version.ts'
 
 type Args = { positional: string[]; flags: Record<string, string | true> }
 
@@ -90,8 +93,13 @@ async function cmdInit(args: Args) {
   if (apiKey) cfg.apiKey = apiKey
 
   // Never replace an existing passphrase: a new one can't decrypt old memory.
+  //
+  // When OPENRECALL_PASSPHRASE_FILE is set the file is the passphrase, and it
+  // wins over anything stored. Writing a second, generated one here would leave
+  // config.json holding a key the file contradicts, so none is stored.
+  const fromFile = Boolean(process.env.OPENRECALL_PASSPHRASE_FILE?.trim())
   let created = false
-  if (!cfg.passphrase) {
+  if (!cfg.passphrase && !fromFile) {
     cfg.passphrase = process.env.OPENRECALL_PASSPHRASE?.trim() || generatePassphrase()
     created = true
   }
@@ -105,10 +113,12 @@ async function cmdInit(args: Args) {
   console.log(`  namespace  ${r.namespace}`)
   console.log(`  api key    ${cfg.apiKey ? 'set' : 'none'}`)
   console.log(
-    created
-      ? '  passphrase generated — BACK UP this file. The passphrase is the only key to\n' +
+    fromFile
+      ? '  passphrase supplied by OPENRECALL_PASSPHRASE_FILE (none stored here)'
+      : created
+        ? '  passphrase generated — BACK UP this file. The passphrase is the only key to\n' +
           '             your memory; the host cannot recover it.'
-      : '  passphrase kept (existing)',
+        : '  passphrase kept (existing)',
   )
   console.log('\nnext: openrecall setup        # connect your agents')
 }
@@ -163,6 +173,23 @@ async function cmdPull(dir: string, namespace?: string) {
   console.log(`pulled ${ns} v${r.version}: ${n} files → ${dir}`)
 }
 
+/**
+ * Print the paste-in block plus a freshly generated passphrase. The passphrase
+ * is produced here, on this machine, and shown once: nothing sends it anywhere
+ * and nothing can recover it, so the warning is the feature.
+ */
+function cmdCard(owner: string, url: string | undefined) {
+  const card = renderSetupCard('openclaude', {
+    owner,
+    url: url ?? process.env.OPENRECALL_URL ?? 'https://memory.twigpine.com',
+    apiKey: process.env.OPENRECALL_API_KEY ?? '<paste your service key here>',
+  })
+  console.log(card)
+  console.log(
+    `Your new passphrase (shown once, back it up now):\n\n  ${generateRetypablePassphrase()}\n`,
+  )
+}
+
 async function cmdServe() {
   if (typeof Bun !== 'undefined') {
     await import('../src/index.ts')
@@ -213,6 +240,14 @@ const args = parseArgs(rest)
 const [a, b] = args.positional
 try {
   switch (cmd) {
+    // Consumers pin a minimum: an older binary that cannot read
+    // OPENRECALL_PASSPHRASE_FILE fails with "no passphrase", which reads as the
+    // operator's mistake rather than a stale install, so they need a way to
+    // check. Read from the manifest so a release bump carries it.
+    case '--version':
+    case '-v':
+      console.log(version())
+      break
     case 'init':
       await cmdInit(args)
       break
@@ -236,9 +271,16 @@ try {
       if (!a) usage()
       await cmdPull(a, b)
       break
+    case 'card':
+      if (!a) usage()
+      cmdCard(a, b)
+      break
     case 'mcp':
-      // Stdio MCP server. Imported lazily so the other commands don't pay for it.
-      await import('../src/mcp/server.ts')
+      // Stdio MCP server. Imported lazily so push/pull/serve don't pay for it,
+      // and CALLED rather than imported for effect: startup lives in a function
+      // so it can preflight, and an import alone would exit zero having served
+      // nothing.
+      await (await import('../src/mcp/server.ts')).main()
       break
     case 'serve':
       await cmdServe()
@@ -268,6 +310,7 @@ function usage(code = 1): never {
       '  openrecall setup [agent…|all] [--write] [--npx]\n' +
       '                                       connect Claude Code, Zero, OpenClaude, Codex, Cursor, …\n' +
       '  openrecall status                    show config and check the store\n' +
+      '  openrecall card <owner> [url]        print the service paste-in card + a new passphrase\n' +
       '  openrecall push <dir> [namespace]    encrypt + upload changed .md entries\n' +
       '  openrecall pull <dir> [namespace]    download + decrypt into <dir>\n' +
       '  openrecall mcp                       run the stdio MCP server (memory tools)\n' +

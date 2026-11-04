@@ -71,6 +71,22 @@ first; where an agent has its own `mcp add`, that is what it uses, and any JSON
 file it edits is backed up. Per-agent notes, including Zero's sandbox and the
 Claude Code / OpenClaude plugin, are in [docs/agents.md](./docs/agents.md).
 
+To point an agent at a hosted service instead, print the block to paste:
+
+```bash
+# prints the MCP config block, plus a fresh passphrase shown once
+OPENRECALL_API_KEY=<your key> openrecall card <owner> https://memory.twigpine.com
+```
+
+The passphrase is generated locally and never leaves the machine: it is printed
+for you to store, and the block carries a placeholder rather than the value. The
+URL must be `https` unless it points at a loopback host.
+
+That block is a public interface, not example output. The consumer integrations
+point back at it rather than restating it, and a test asserts that every
+environment variable it emits is one the server still reads, so a rename here
+fails in this repository instead of at spawn time in another one.
+
 > **Zero-knowledge means no recovery.** The passphrase in
 > `~/.openrecall/config.json` is the only key to your memory. Back that file up;
 > nobody, including the host, can recover it.
@@ -175,6 +191,20 @@ localhost only. A Docker image (`ghcr.io/twigpine/openrecall`) and a
 [`.env.example`](./.env.example). What lands on the server is ciphertext: grep
 its data directory for any plaintext and you will find nothing.
 
+## Standalone binaries
+
+For a machine with neither Bun nor Node, each release attaches a standalone
+binary with a `SHA256SUMS` file. The runtime is baked in, so they are large
+(tens of MB). The glibc builds need nothing installed, verified on a stock
+`debian:12-slim` with neither Bun nor Node present. The `-musl` builds are the
+exception: they link against `libstdc++` and `libgcc`, so on a bare Alpine they
+fail to load until you `apk add libstdc++`.
+
+```bash
+curl -LO https://github.com/Twigpine/openrecall/releases/latest/download/openrecall-linux-x64
+chmod +x openrecall-linux-x64 && ./openrecall-linux-x64 init
+```
+
 ## Use as a library
 
 ```ts
@@ -223,6 +253,18 @@ local store (~/.openrecall/data)   or   openrecall server (crypto-blind)
 - **Defense in depth.** The client-side secret scanner runs before encryption
   and blocks saves containing live-looking credentials by default
   (`OPENRECALL_SCAN=warn|off` to relax it).
+- **Passphrase custody.** The MCP server and CLI accept `OPENRECALL_PASSPHRASE_FILE`,
+  an absolute path, as well as the value in `OPENRECALL_PASSPHRASE`, and the file wins when
+  both are set. Agent hosts commonly spread their own environment into every
+  stdio server they launch, so a passphrase exported for openrecall is readable by
+  all of them; a path is not, and a file can carry permissions an environment
+  cannot.
+- **Startup refusal.** The MCP server checks its configuration against the
+  pinned namespace before serving a tool, and exits rather than start on one
+  that would corrupt stored memory: unexpanded template text in a secret, a
+  passphrase that cannot decrypt what is stored, a rejected key, an unauthorized
+  namespace, or a scan mode it does not recognize. Every wait is bounded;
+  `OPENRECALL_TIMEOUT_MS` raises the limit on a slow link.
 - **Tenancy.** Each API key maps to an owner who controls exactly their own
   `user:<owner>` subtree, with per-account quotas and per-owner rate limits
   enforced server-side.
@@ -242,6 +284,7 @@ decrypting anything.
 | `GET` | `/health` | liveness |
 | `GET` | `/api/memory/:ns` | full data (ciphertext entries + checksums) |
 | `GET` | `/api/memory/:ns?view=hashes` | per-key checksums only, for delta sync |
+| `GET` | `/api/memory/:ns?view=entry&key=<entryKey>` | one entry's ciphertext, without fetching the rest |
 | `PUT` | `/api/memory/:ns` | delta upsert `{ entries, deletions?, base? }` |
 | `DELETE` | `/api/memory/:ns?key=<entryKey>[&base=sha256:<hex>]` | remove one entry |
 
@@ -257,6 +300,13 @@ refused with `409 stale_base_version` and a `details.conflicts` map naming what
 each key actually holds; omitting `base` writes unconditionally. A namespace
 whose manifest cannot be parsed answers `503 manifest_unreadable` rather than
 appearing empty.
+
+The entry view answers with that key's base64 ciphertext and checksum, byte for
+byte what the full read returns under the same key. It distinguishes three
+answers a single status would blur: `404 empty` (no such namespace),
+`404 entry_not_found` (the namespace exists, the key does not), and
+`503 entry_unreadable` (the manifest names the key and the store cannot produce
+its body).
 
 ## Configuration
 

@@ -7,8 +7,21 @@
  *   GET  /health
  *   GET  /api/memory/:ns               → full data (ciphertext entries)
  *   GET  /api/memory/:ns?view=hashes   → metadata + per-key checksums only
+ *   GET  /api/memory/:ns?view=entry&key=:key → ONE entry's ciphertext
  *   PUT  /api/memory/:ns               → delta upsert (+ optional deletions)
  *   DELETE /api/memory/:ns?key=:key    → remove one entry
+ *
+ * `view=entry` is the bounded read. Proving a passphrase decrypts what is
+ * stored needs one entry, and before it the only read returning ciphertext was
+ * the full one, so that proof cost a namespace-sized transfer (capped at 2000
+ * entries / 10 MB, roughly 13 MB of base64) on every startup. Its refusals are
+ * deliberately distinct, because a client cannot act on a denial it cannot
+ * name:
+ *   404 empty             → no such namespace (same code the full read gives)
+ *   404 entry_not_found   → namespace exists, this key does not
+ *   503 entry_unreadable  → the manifest names the key, the store has no body
+ *   400 invalid_key       → the key failed validateEntryKey
+ *   400 bad_request       → no ?key= at all
  *
  * `:ns` may contain a single slash (repo:owner/name), so the path is parsed
  * manually rather than with a strict router.
@@ -17,7 +30,7 @@
 import { authenticate, authorizeNamespace } from './auth.ts'
 import { config } from './config.ts'
 import { logRejection } from './log.ts'
-import { getData, getHashes, upsert } from './memory.ts'
+import { getData, getEntry, getHashes, upsert } from './memory.ts'
 import {
   InvalidNameError,
   namespaceSlug,
@@ -184,8 +197,35 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
 
   try {
     if (req.method === 'GET') {
-      if (url.searchParams.get('view') === 'hashes') {
+      const view = url.searchParams.get('view')
+      if (view === 'hashes') {
         return json(await getHashes(namespace, nsSlug))
+      }
+      if (view === 'entry') {
+        // Reached only after authorizeNamespace above, like every other branch
+        // here. The key is attacker-controlled, so it is validated before it
+        // can reach a storage path, exactly as the DELETE branch does.
+        const key = url.searchParams.get('key')
+        if (!key) return apiError('bad_request', 'view=entry requires ?key=<entryKey>', 400)
+        try {
+          validateEntryKey(key)
+        } catch (err) {
+          return apiError('invalid_key', (err as Error).message, 400)
+        }
+        const found = await getEntry(namespace, nsSlug, key)
+        if (found.status === 'no_namespace') {
+          return apiError('empty', 'no memory for this namespace yet', 404)
+        }
+        if (found.status === 'no_entry') {
+          return apiError('entry_not_found', 'no such entry in this namespace', 404)
+        }
+        if (found.status === 'unreadable') {
+          // The manifest names this key and the store cannot produce its body.
+          // Not a 404: the entry is not absent, it is unserveable, and a client
+          // told "not found" would conclude the memory was never written.
+          return apiError('entry_unreadable', 'entry body is missing from the store', 503)
+        }
+        return json(found.entry)
       }
       const data = await getData(namespace, nsSlug)
       if (data.version === 0 && Object.keys(data.content.entries).length === 0) {

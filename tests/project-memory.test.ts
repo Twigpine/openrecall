@@ -12,7 +12,10 @@ function scopedClient() {
     async pull(namespace) {
       reads.push(namespace)
       if (namespace === unreadable) throw new Error('store unavailable')
-      return { namespace, version: 1, entries: { ...store.get(namespace) }, updatedAt: {} }
+      // A namespace nobody has written is at version 0, as on the real server;
+      // an empty body at a version past zero reads as lost data.
+      const entries = { ...store.get(namespace) }
+      return { namespace, version: Object.keys(entries).length ? 1 : 0, entries, updatedAt: {} }
     },
     async push(namespace, entries) {
       store.set(namespace, { ...store.get(namespace), ...entries })

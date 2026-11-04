@@ -15,7 +15,8 @@
 import { randomBytes } from 'node:crypto'
 import { chmodSync, existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { join, resolve } from 'node:path'
+import { isAbsolute, join, resolve } from 'node:path'
+import { flattenServerText } from '../../client/index.ts'
 import type { ScanMode } from '../../client/secretscan.ts'
 
 export const LOCAL_URL = 'local'
@@ -52,6 +53,7 @@ export const OVERRIDE_VARS = [
   'OPENRECALL_URL',
   'OPENRECALL_API_KEY',
   'OPENRECALL_PASSPHRASE',
+  'OPENRECALL_PASSPHRASE_FILE',
   'OPENRECALL_NAMESPACE',
   'OPENRECALL_SCAN',
 ] as const
@@ -59,6 +61,67 @@ export const OVERRIDE_VARS = [
 function clean(v: string | undefined): string | undefined {
   const t = v?.trim()
   return t ? t : undefined
+}
+
+/**
+ * OPENRECALL_PASSPHRASE_FILE could not be used. A class of its own so the MCP
+ * startup check can refuse with this message verbatim instead of treating it
+ * as an ordinary settings error.
+ */
+export class PassphraseFileError extends Error {}
+
+function oneLine(text: string): string {
+  return flattenServerText(text, 120)
+}
+
+/**
+ * The passphrase from the file OPENRECALL_PASSPHRASE_FILE names, or undefined
+ * when the variable is unset.
+ *
+ * When both the file and OPENRECALL_PASSPHRASE are set the file wins. The
+ * reason is the host, not us: an agent that launches this server spreads its
+ * own environment into every stdio child it runs, so a passphrase exported for
+ * openrecall is readable by every other MCP server the user has configured. A
+ * path is safe to spread that way; the value never is, and a file can carry
+ * permissions an environment cannot. Whoever moved the secret out of the
+ * environment should not then be overridden by a stale export of the old one.
+ *
+ * An unreadable or empty file is an error, never a fallback to the other
+ * sources: a silent fallback is how a namespace ends up written under a second
+ * key.
+ */
+function passphraseFromFile(env: Env): string | undefined {
+  const path = clean(env.OPENRECALL_PASSPHRASE_FILE)
+  if (!path) return undefined
+  // An agent host launches the MCP server from an arbitrary working directory,
+  // so a relative path would name a different file (or none) depending on who
+  // started the process.
+  if (!isAbsolute(path)) {
+    throw new PassphraseFileError(
+      `OPENRECALL_PASSPHRASE_FILE is "${oneLine(path)}", which is not an absolute path. ` +
+        'Use the full path: a relative one resolves against whatever directory the agent happened to launch from.',
+    )
+  }
+  let contents: string
+  try {
+    contents = readFileSync(path, 'utf8')
+  } catch (err) {
+    throw new PassphraseFileError(
+      `OPENRECALL_PASSPHRASE_FILE points at ${oneLine(path)}, which could not be read: ${oneLine((err as Error).message)}. ` +
+        'Check the path and that the launching user can read it. ' +
+        'Refusing to start rather than falling back to OPENRECALL_PASSPHRASE, because a silent fallback is how a namespace ends up written under a second key.',
+    )
+  }
+  // Trailing newlines are what a file written by `echo` or an editor carries,
+  // and a passphrase that differs by one byte decrypts nothing.
+  const trimmed = contents.trim()
+  if (!trimmed) {
+    throw new PassphraseFileError(
+      `OPENRECALL_PASSPHRASE_FILE points at ${oneLine(path)}, which is empty. ` +
+        'Write the passphrase into that file, or unset the variable to use OPENRECALL_PASSPHRASE instead.',
+    )
+  }
+  return trimmed
 }
 
 export function homeDir(env: Env = process.env): string {
@@ -114,7 +177,7 @@ export function resolveSettings(env: Env = process.env): Settings {
     configPath,
     url: validateUrl(pick('OPENRECALL_URL', file.url) ?? LOCAL_URL),
     apiKey: pick('OPENRECALL_API_KEY', file.apiKey),
-    passphrase: pick('OPENRECALL_PASSPHRASE', file.passphrase),
+    passphrase: passphraseFromFile(env) ?? pick('OPENRECALL_PASSPHRASE', file.passphrase),
     namespace: pick('OPENRECALL_NAMESPACE', file.namespace) ?? DEFAULT_NAMESPACE,
     scan: validateScan(pick('OPENRECALL_SCAN', file.scan) ?? 'block'),
     dataDir: resolve(clean(env.OPENRECALL_DATA_DIR) ?? join(home, 'data')),

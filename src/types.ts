@@ -66,6 +66,47 @@ export type MemoryHashes = {
   supports: string[]
 }
 
+/**
+ * GET ?view=entry response — ONE entry's ciphertext.
+ *
+ * The value is byte-for-byte what the full read puts in
+ * `content.entries[key]`, and `entryChecksum` is that key's
+ * `content.entryChecksums[key]`, so a client hashes and decrypts it with the
+ * code it already has. It exists because proving a passphrase decrypts what is
+ * stored used to cost the whole namespace (2000 entries / 10 MB capped, ~13 MB
+ * of base64) when one entry answers the question.
+ *
+ * `entryChecksum` rather than `checksum`: at this level `checksum` already
+ * means the whole-namespace digest on both other read shapes, and a client that
+ * mistook one for the other would compare an entry against a namespace.
+ */
+export type MemoryEntry = {
+  namespace: string
+  version: number
+  lastModified: string
+  /** Whether this deployment's store actually erases on delete. */
+  erasure: Erasure
+  key: string
+  /** ciphertext (base64) */
+  entry: string
+  /** sha256:<hex> of that ciphertext */
+  entryChecksum: string
+}
+
+/**
+ * What a single-entry read found. A tagged result rather than a null or a
+ * throw, because the three refusals must reach the caller as three different
+ * codes: a namespace with nothing in it, a namespace missing this one key, and
+ * a key the manifest names whose body the store cannot produce. Collapsing any
+ * pair of them is the denial-rendered-as-success defect this repo keeps
+ * shipping.
+ */
+export type EntryRead =
+  | { status: 'ok'; entry: MemoryEntry }
+  | { status: 'no_namespace' }
+  | { status: 'no_entry' }
+  | { status: 'unreadable' }
+
 /** PUT request body. */
 export type UpsertRequest = {
   /** entryKey -> ciphertext (base64). Upsert semantics. */

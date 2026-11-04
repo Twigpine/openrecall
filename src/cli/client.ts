@@ -19,7 +19,7 @@ export class MissingPassphraseError extends Error {
 
 export async function makeClient(
   s: Settings,
-  opts?: { onScanWarning?: (findings: Finding[]) => void },
+  opts?: { onScanWarning?: (findings: Finding[]) => void; timeoutMs?: number },
 ): Promise<OpenRecallClient> {
   if (!s.passphrase) throw new MissingPassphraseError(s.configPath)
   const local = s.url === LOCAL_URL
@@ -29,6 +29,7 @@ export async function makeClient(
     passphrase: s.passphrase,
     scanMode: s.scan,
     onScanWarning: opts?.onScanWarning,
+    ...(opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
     fetch: local ? await localFetch(s.dataDir) : undefined,
   })
 }
