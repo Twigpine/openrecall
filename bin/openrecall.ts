@@ -176,13 +176,15 @@ async function cmdPull(dir: string, namespace?: string) {
 /**
  * Print the paste-in block plus a freshly generated passphrase. The passphrase
  * is produced here, on this machine, and shown once: nothing sends it anywhere
- * and nothing can recover it, so the warning is the feature.
+ * and nothing can recover it, so the warning is the feature. The service key
+ * is never printed, even when OPENRECALL_API_KEY is set: the block carries a
+ * placeholder so the key stays out of scrollback, logs and agent transcripts.
  */
 function cmdCard(owner: string, url: string | undefined) {
   const card = renderSetupCard('openclaude', {
     owner,
     url: url ?? process.env.OPENRECALL_URL ?? 'https://memory.twigpine.com',
-    apiKey: process.env.OPENRECALL_API_KEY ?? '<paste your service key here>',
+    apiKey: '<paste your service key here>',
   })
   console.log(card)
   console.log(

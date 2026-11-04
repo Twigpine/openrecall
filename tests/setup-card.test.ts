@@ -343,9 +343,9 @@ describe('setup card: the guide and the card agree on the namespace form', () =>
 const CLI = fileURLToPath(new URL('../bin/openrecall.ts', import.meta.url))
 
 /** A clean env, so ambient OPENRECALL_* vars cannot change what the CLI prints. */
-function runCli(args: string[]) {
+function runCli(args: string[], extraEnv: Record<string, string> = {}) {
   const r = Bun.spawnSync(['bun', 'run', CLI, ...args], {
-    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '' },
+    env: { PATH: process.env.PATH ?? '', HOME: process.env.HOME ?? '', ...extraEnv },
     stdout: 'pipe',
     stderr: 'pipe',
   })
@@ -398,6 +398,18 @@ describe('openrecall card (CLI)', () => {
     ).mcpServers.openrecall.env
     expect(env.OPENRECALL_PASSPHRASE).toBe('<paste your passphrase here>')
     expect(r.stdout.slice(0, r.stdout.lastIndexOf('}'))).not.toContain(pass)
+  })
+
+  test('the service key from the environment is never printed', () => {
+    const r = runCli(['card', 'alice', HOSTED], { OPENRECALL_API_KEY: KEY })
+    expect(`exit ${r.code}: ${r.stderr}`).toBe('exit 0: ')
+    expect(r.stdout).not.toContain(KEY)
+    const env = (
+      configBlock(r.stdout) as {
+        mcpServers: { openrecall: { env: Record<string, string> } }
+      }
+    ).mcpServers.openrecall.env
+    expect(env.OPENRECALL_API_KEY).toBe('<paste your service key here>')
   })
 
   test('a run with no owner fails instead of rendering a namespace', () => {
