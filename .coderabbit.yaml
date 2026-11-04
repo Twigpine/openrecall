@@ -1,0 +1,167 @@
+# yaml-language-server: $schema=https://coderabbit.ai/integrations/schema.v2.json
+language: "en-US"
+early_access: false
+tone_instructions: "Be direct, concise, and maintainer-minded. Separate blocking issues from non-blocking suggestions."
+
+reviews:
+  profile: "assertive"
+  # CodeRabbit requests changes for blocking findings and approves the PR once
+  # they are resolved, the latest commit is reviewed, and every pre-merge check
+  # below passes. This is the current key for what request_changes_workflow did.
+  auto_approvals:
+    enabled: true
+  high_level_summary: true
+  review_status: true
+  review_details: true
+  collapse_walkthrough: true
+  sequence_diagrams: false
+  estimate_code_review_effort: true
+  assess_linked_issues: true
+  related_issues: true
+  related_prs: true
+  suggested_labels: true
+  auto_apply_labels: false
+  suggested_reviewers: true
+  auto_assign_reviewers: false
+  in_progress_fortune: false
+  poem: false
+  enable_prompt_for_ai_agents: true
+
+  auto_review:
+    enabled: true
+    drafts: true
+    auto_incremental_review: true
+    auto_pause_after_reviewed_commits: 0
+    base_branches:
+      - ".*"
+    # github-actions[bot] is not ignored on purpose: it opens the release-please
+    # PRs, and the "npm release PR validated" check has to run on them.
+    ignore_usernames:
+      - "dependabot[bot]"
+
+  path_filters:
+    - "!dist/**"
+    - "!binaries/**"
+    - "!**/*.png"
+    - "!**/*.jpg"
+    - "!**/*.jpeg"
+    - "!**/*.gif"
+
+  path_instructions:
+    - path: "**/*"
+      instructions: |
+        Apply the design principles in CONTRIBUTING.md. Review the current diff, not stale discussion context. Separate real blockers from suggestions. Do not request changes for vague style churn. Treat approval as merge-ready from CodeRabbit's side, pending required human review and GitHub Checks. If checks are failing or unavailable, say so clearly instead of implying the PR is fully ready.
+
+    - path: "client/**"
+      instructions: |
+        This is the zero-knowledge client, where all encryption happens. Review AES-256-GCM and scrypt usage, nonce derivation, key and passphrase handling, and the pre-encryption secret scan with high scrutiny. Block on anything that sends plaintext, the passphrase, or a derived key off the client, weakens key derivation, risks nonce reuse under one key, skips the secret scan, or adds a third-party dependency.
+
+    - path: "src/**"
+      instructions: |
+        The server must stay crypto-blind: it never reads, logs, or derives memory plaintext, passphrases, or keys. Namespaces and entry keys are attacker-controlled, so they must pass through the validators in src/namespace.ts. Block on auth, quota, or rate-limit bypasses, cross-tenant reads or writes, unvalidated wire input, and new third-party dependencies outside src/mcp/.
+
+    - path: "src/mcp/**"
+      instructions: |
+        Review the MCP server for tool schema compatibility, explicit namespace handling, bounded output, and failure messages that never echo plaintext or secrets. On the stdio transport, stdout carries only protocol messages, so block on stray stdout writes.
+
+    - path: "{bin/**,src/cli/**}"
+      instructions: |
+        Review CLI and setup changes for cross-platform paths, safe writes to other agents' config files, file permissions on key and passphrase files, and dry-run behavior unless --write is passed. Block on changes that could print or persist a passphrase, or that edit user config without the documented opt-in.
+
+    - path: ".github/**"
+      instructions: |
+        Review CI and release workflow changes for token permissions, third-party actions, pull_request_target usage, artifact upload/download behavior, shell injection, and whether checks still run on the actual PR head. Block on broadened write permissions or unpinned/excessively trusted external execution unless clearly justified. The npm publish uses trusted publishing (OIDC), so block on anything that adds an npm token.
+
+    - path: "{scripts/**,package.json,Dockerfile,fly.toml,.claude-plugin/**,release-please-config.json}"
+      instructions: |
+        Review build, packaging, and release changes for what ends up in the npm tarball, the Node bundle, the standalone binaries, and the GHCR image. Block on changes that could break Node or Bun startup, publish unexpected files, or drift the engines floor.
+
+    - path: "{README.md,CONTRIBUTING.md,SECURITY.md,ROADMAP.md,docs/**,skills/**}"
+      instructions: |
+        Review docs for accuracy against current code behavior. Flag security claims that overpromise, stale install commands, missing setup caveats, and instructions that could push users toward unsafe passphrase handling. Keep purely wording-level suggestions non-blocking.
+
+    - path: "tests/**"
+      instructions: |
+        Review tests for meaningful coverage of the changed behavior, isolation of OPENRECALL_HOME and other global state, async cleanup, and tenant-isolation and crypto-boundary regressions. Block when risky runtime changes lack focused regression coverage.
+
+  pre_merge_checks:
+    override_requested_reviewers_only: true
+    title:
+      mode: "warning"
+      requirements: "Conventional Commit title that matches the actual diff. Use `!` for a contract change: while below 1.0.0, a plain feat or fix only bumps the patch version."
+    description:
+      mode: "warning"
+    issue_assessment:
+      mode: "warning"
+    custom_checks:
+      - name: "Security boundary disclosed"
+        mode: "warning"
+        instructions: |
+          If the PR touches client/, src/auth.ts, src/namespace.ts, src/quota.ts, src/ratelimit.ts, src/handler.ts, src/memory.ts, src/store/, or src/mcp/, verify that the description completes the Security boundary section of the PR template and that the change keeps the server crypto-blind: no plaintext, passphrase, or derived key reaches the server or a log. Otherwise pass.
+      - name: "npm release PR validated"
+        mode: "error"
+        instructions: |
+          Merging a release PR publishes the package to npm, so CodeRabbit approves one only after this check passes.
+
+          Decide every item from the PR title and the diff alone. This check does not receive the head branch name, the PR body, or GitHub Check results, so no item depends on them. If an item still cannot be decided from the title and the diff, fail it and say what was missing; never report this check as inconclusive.
+
+          Scope: a PR is a release PR when its title starts with `chore(main): release`, or when its diff changes `version` in `package.json` or any value in `.release-please-manifest.json`. Either signal is enough, so editing the title does not take a release PR out of scope. Every other PR passes this check; say "Not a release PR."
+
+          For a release PR, NEW is `version` in `package.json` after the change, and PREVIOUS is the `"."` value of `.release-please-manifest.json` before the change. The check passes only when all of the following hold. When it fails, list each failed item with the file and the value found.
+
+          1. Title: the title is exactly `chore(main): release NEW`. A malformed or edited title fails this item; quote it.
+          2. Changed files: the diff touches only `package.json`, `.release-please-manifest.json`, `CHANGELOG.md`, and `.claude-plugin/plugin.json`. Any other path fails, whether source, tests, workflows, scripts, dependency manifests, or lockfiles.
+          3. One version everywhere: NEW equals the `"."` value in `.release-please-manifest.json` and `version` in `.claude-plugin/plugin.json`.
+          4. Version-only edits: in `package.json` and `.claude-plugin/plugin.json` only the `version` line changes, and in `.release-please-manifest.json` only the `"."` value changes. No dependency, `engines`, `files`, `bin`, `exports`, or `scripts` change is allowed.
+          5. Valid increment: NEW is a plain MAJOR.MINOR.PATCH with no prerelease or build suffix, and it is greater than PREVIOUS.
+          6. Bump level: this repo sets `bump-minor-pre-major` and `bump-patch-for-minor-pre-major`. Below 1.0.0, a breaking change bumps MINOR and resets PATCH, while a feat or a fix bumps only PATCH. From 1.0.0 on, a breaking change bumps MAJOR, a feat bumps MINOR, and a fix bumps PATCH. Read the change types from the new CHANGELOG section: a "BREAKING CHANGES" heading means a breaking change, "Features" means a feat, and every other section, such as "Bug Fixes", "Performance Improvements", "Reverts", or "Dependencies", counts as a fix. NEW must be exactly the next version for the highest change type present. A commit in the release whose `Release-As:` footer names NEW overrides this item.
+          7. Changelog: `CHANGELOG.md` gains exactly one new section, at the top, headed `## [NEW](https://github.com/Twigpine/openrecall/compare/vPREVIOUS...vNEW) (YYYY-MM-DD)`, with at least one entry. Everything below it is unchanged, so no earlier section is edited or removed.
+
+  tools:
+    github-checks:
+      enabled: true
+      timeout_ms: 900000
+    actionlint:
+      enabled: true
+    zizmor:
+      enabled: true
+    biome:
+      enabled: true
+    markdownlint:
+      enabled: true
+    shellcheck:
+      enabled: true
+    hadolint:
+      enabled: true
+    gitleaks:
+      enabled: true
+    trufflehog:
+      enabled: true
+    semgrep:
+      enabled: true
+    osvScanner:
+      enabled: true
+
+chat:
+  art: false
+  auto_reply: false
+  allow_non_org_members: false
+
+knowledge_base:
+  opt_out: false
+  web_search:
+    enabled: true
+  code_guidelines:
+    enabled: true
+    filePatterns:
+      - "CONTRIBUTING.md"
+      - "SECURITY.md"
+      - ".github/PULL_REQUEST_TEMPLATE.md"
+  learnings:
+    scope: "local"
+  pull_requests:
+    scope: "local"
+
+issue_enrichment:
+  auto_enrich:
+    enabled: false
