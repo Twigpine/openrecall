@@ -22,6 +22,7 @@
 import { spawn } from 'node:child_process'
 import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
+import { flattenServerText } from '../client/index.ts'
 import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
 import {
@@ -153,9 +154,21 @@ async function cmdPush(dir: string, namespace?: string) {
     entries[rel.split(sep).join('/')] = await readFile(join(dir, rel), 'utf8')
   }
   const r = await client.push(ns, entries)
-  console.log(
-    `pushed ${ns}: ${r.uploaded.length} uploaded, ${r.unchanged.length} unchanged → v${r.version}`,
-  )
+  const skipped = r.skipped ?? []
+  const summary = [`${r.uploaded.length} uploaded`, `${r.unchanged.length} unchanged`]
+  if (skipped.length) summary.push(`${skipped.length} rejected`)
+  console.log(`pushed ${ns}: ${summary.join(', ')} → v${r.version}`)
+  if (skipped.length) {
+    // The store answers 200 even when it drops entries, so a push that looks
+    // successful can have stored nothing. Name every dropped key and fail.
+    console.error(
+      `  ✗ ${skipped.length} entr${skipped.length === 1 ? 'y' : 'ies'} rejected by the store:`,
+    )
+    for (const x of skipped)
+      console.error(`      ${flattenServerText(x.key, 300)} (${flattenServerText(x.reason, 80)})`)
+    console.error('  nothing was saved for those keys — rename or resize them and push again')
+    process.exitCode = 1
+  }
 }
 
 async function cmdPull(dir: string, namespace?: string) {

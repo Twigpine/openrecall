@@ -14,6 +14,7 @@
  */
 
 import {
+  type DeleteResult,
   type OpenRecallClient,
   OpenRecallHttpError,
   type PullResult,
@@ -79,9 +80,12 @@ export class StubClient implements MemoryClient {
     return out
   }
 
-  async delete(_namespace: string, entryKey: string): Promise<void> {
+  async delete(namespace: string, entryKey: string): Promise<DeleteResult> {
     this.raise()
+    const deleted = Object.hasOwn(this.entries, entryKey)
     delete this.entries[entryKey]
+    if (deleted) this.version += 1
+    return { namespace, version: this.version, deleted }
   }
 }
 
@@ -162,8 +166,10 @@ export function makeStubClient(entries: Record<string, string> = {}) {
     async hashes(_namespace: string): Promise<Record<string, string>> {
       return Object.fromEntries(Object.keys(store).map(k => [k, 'stub-hash']))
     },
-    async delete(_namespace: string, key: string): Promise<void> {
+    async delete(namespace: string, key: string): Promise<DeleteResult> {
+      const deleted = Object.hasOwn(store, key)
       delete store[key]
+      return { namespace, version: Object.keys(store).length ? 1 : 0, deleted }
     },
   }
 }
