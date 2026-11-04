@@ -3,7 +3,9 @@ name: release
 # release-please drives everything from Conventional Commits on main:
 #   1. it opens/updates a "release PR" that bumps the version + CHANGELOG;
 #   2. when you merge that PR it creates the GitHub release + tag;
-#   3. the publish job then ships npm + a GHCR image.
+#   3. the verify job builds and tests the tag; the publish job then waits for
+#      a maintainer's approval (the `release` environment) and ships npm, a
+#      GHCR image, and the standalone binaries.
 #
 # Publishing runs in the SAME workflow as the release (not on a separate tag
 # trigger) because tags created with GITHUB_TOKEN don't trigger other workflows.
@@ -11,6 +13,8 @@ name: release
 # No secrets. npm is published through trusted publishing: npmjs.com holds a
 # rule naming this repo and this workflow file, and npm exchanges the job's
 # OIDC token for a short-lived credential itself, with provenance attached.
+# That rule should also name the `release` environment, so removing the
+# approval gate from this file would also stop npm accepting the publish.
 # GHCR uses the built-in GITHUB_TOKEN.
 
 on:
@@ -33,10 +37,40 @@ jobs:
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
 
-  publish:
+  # The publish job's gate, run first so the approver sees a green build of
+  # the release tag before approving. It holds no write permission and no OIDC
+  # token.
+  verify:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ needs.release-please.outputs.tag_name }}
+          persist-credentials: false
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: '1.2'
+      - uses: actions/setup-node@v5
+        with:
+          node-version: '24.22.1'
+      - run: bun install --frozen-lockfile
+      - run: bunx biome ci && bun run type-check && bun run build && bun test
+
+  publish:
+    needs: [release-please, verify]
+    if: ${{ needs.release-please.outputs.release_created == 'true' }}
+    runs-on: ubuntu-latest
+    # Manual approval gate, as in Zero and OpenClaude. The `release`
+    # environment carries a required-reviewer rule (Settings -> Environments ->
+    # release), so this job waits until a maintainer approves it in the Actions
+    # UI. Nothing reaches npm or GHCR, and no binaries are attached, before then.
+    environment:
+      name: release
+      url: https://www.npmjs.com/package/@twigpine/openrecall
     permissions:
       contents: read
       packages: write
