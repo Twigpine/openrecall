@@ -804,7 +804,7 @@ function declaredNames(code: string): Set<string> {
   for (const m of code.matchAll(/\(([^()]*)\)\s*(?::[^=({]*)?=>/g)) add(m[1].replace(/:[^,]*/g, ''))
   for (const m of code.matchAll(/([A-Za-z_$][\w$]*)\s*=>/g)) names.add(m[1])
   for (const m of code.matchAll(
-    /\b(?:function\s*[A-Za-z_$\w]*|[A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?::[^{]*)?\{/g,
+    /\b(?:function\s*[\w$]*|[A-Za-z_$][\w$]*)\s*\(([^()]*)\)\s*(?::[^{]*)?\{/g,
   ))
     add(m[1].replace(/:[^,]*/g, ''))
   for (const m of code.matchAll(/\bcatch\s*\(\s*([A-Za-z_$][\w$]*)/g)) names.add(m[1])
