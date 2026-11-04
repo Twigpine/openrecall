@@ -52,10 +52,21 @@ const SECURITY_HEADERS = {
   'cache-control': 'no-store',
 }
 
+const UTF8 = new TextEncoder()
+
 function json(body: unknown, status = 200, extraHeaders?: Record<string, string>): Response {
-  return new Response(JSON.stringify(body), {
+  const payload = JSON.stringify(body)
+  return new Response(payload, {
     status,
-    headers: { 'content-type': 'application/json', ...SECURITY_HEADERS, ...extraHeaders },
+    headers: {
+      // Declared, not inferred: a bodyless Response (which is what HEAD sends)
+      // is measured as zero bytes, so without this every HEAD would claim the
+      // representation is empty while a GET of the same route returns a body.
+      'content-length': String(UTF8.encode(payload).byteLength),
+      'content-type': 'application/json',
+      ...SECURITY_HEADERS,
+      ...extraHeaders,
+    },
   })
 }
 
@@ -86,7 +97,10 @@ function methodNotAllowed(method: string, allow: string): Response {
 
 /**
  * Strip the body for HEAD. Probes (`curl -I`, uptime checks, proxies) must see
- * the same status and headers a GET would produce, without a payload.
+ * the same status and headers a GET would produce, without a payload. The
+ * `content-length` `json()` already declared rides along with the copied
+ * headers, so HEAD reports the size of the representation rather than the zero
+ * a bodyless `Response` would otherwise be measured as.
  */
 function withoutBody(res: Response): Response {
   return new Response(null, { status: res.status, headers: res.headers })

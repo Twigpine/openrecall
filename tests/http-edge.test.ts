@@ -36,8 +36,19 @@ describe('/health', () => {
   })
 
   test('HEAD has the GET status and headers but no body', async () => {
+    const get = await call('/health')
+    const getBody = await get.text()
     const res = await call('/health', { method: 'HEAD' })
-    expect(res.status).toBe(200)
+
+    expect(res.status).toBe(get.status)
+    // Every header, not just the one this test used to name: a later change to
+    // `withoutBody` could drop a security header and still look green.
+    expect([...res.headers.entries()]).toEqual([...get.headers.entries()])
+    // A bodyless Response measures as 0 bytes; HEAD must still declare the size
+    // of the representation a GET would return.
+    expect(res.headers.get('content-length')).toBe(
+      String(new TextEncoder().encode(getBody).byteLength),
+    )
     expect(res.headers.get('content-type')).toContain('application/json')
     expect(await res.text()).toBe('')
   })
@@ -113,9 +124,17 @@ describe('declared body size', () => {
   })
 
   test('a correct declaration still writes', async () => {
+    // Declares the length explicitly, so this exercises the declared-header path
+    // rather than the absent-header one: a regression that rejects a valid
+    // declaration would otherwise still pass.
+    const payload = JSON.stringify({ entries: { 'a.md': 'aGk=' } })
     const res = await call(memory('user:edge-body-ok'), {
       method: 'PUT',
-      ...json({ entries: { 'a.md': 'aGk=' } }),
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(new TextEncoder().encode(payload).byteLength),
+      },
+      body: payload,
     })
     expect(res.status).toBe(200)
   })
@@ -140,6 +159,25 @@ describe('HEAD on memory reads', () => {
     const entry = await call(`${memory(ns)}?view=entry&key=a.md`, { method: 'HEAD' })
     expect(entry.status).toBe(200)
     expect(await entry.text()).toBe('')
+  })
+
+  test('HEAD declares the length of the body GET would return', async () => {
+    // The full read is the route whose body is big enough for a probe to care:
+    // a HEAD that reported 0 would tell a client the namespace is empty.
+    const target = 'user:edge-head-length'
+    const put = await call(memory(target), {
+      method: 'PUT',
+      ...json({ entries: { 'a.md': 'aGk=', 'b.md': 'aGk=' } }),
+    })
+    expect(put.status).toBe(200)
+
+    const get = await call(memory(target))
+    const expected = String(new TextEncoder().encode(await get.text()).byteLength)
+
+    const head = await call(memory(target), { method: 'HEAD' })
+    expect(head.status).toBe(get.status)
+    expect(head.headers.get('content-length')).toBe(expected)
+    expect(await head.text()).toBe('')
   })
 
   test('HEAD of a refused entry read keeps the status and drops the error body', async () => {
