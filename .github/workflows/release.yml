@@ -3,9 +3,11 @@ name: release
 # release-please drives everything from Conventional Commits on main:
 #   1. it opens/updates a "release PR" that bumps the version + CHANGELOG;
 #   2. when you merge that PR it creates the GitHub release + tag;
-#   3. the verify job builds and tests the tag; the publish job then waits for
-#      a maintainer's approval (the `release` environment) and ships npm, a
-#      GHCR image, and the standalone binaries.
+#   3. the verify job confirms the approval gate exists, then builds and tests
+#      the release commit;
+#   4. the publish job waits for a maintainer's approval (the `release`
+#      environment), then ships npm and a GHCR image and builds the standalone
+#      binaries, which the binaries job attaches to the GitHub release.
 #
 # Publishing runs in the SAME workflow as the release (not on a separate tag
 # trigger) because tags created with GITHUB_TOKEN don't trigger other workflows.
@@ -13,9 +15,10 @@ name: release
 # No secrets. npm is published through trusted publishing: npmjs.com holds a
 # rule naming this repo and this workflow file, and npm exchanges the job's
 # OIDC token for a short-lived credential itself, with provenance attached.
-# That rule should also name the `release` environment, so removing the
-# approval gate from this file would also stop npm accepting the publish.
-# GHCR uses the built-in GITHUB_TOKEN.
+# GHCR uses the built-in GITHUB_TOKEN. The approval gate is the `release`
+# environment on the publish job. Naming that environment in npm's
+# trusted-publisher rule as well makes npm itself reject a publish from
+# outside the gate; until it is named there, only this file enforces the gate.
 
 on:
   push:
@@ -31,38 +34,69 @@ jobs:
     outputs:
       release_created: ${{ steps.rp.outputs.release_created }}
       tag_name: ${{ steps.rp.outputs.tag_name }}
+      sha: ${{ steps.rp.outputs.sha }}
     steps:
       - uses: googleapis/release-please-action@v4
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # release-please finds a merged release PR by parsing its body (the
+      # `---` delimiters and the release-notes heading). If the body was
+      # edited out of that shape, it skips the release without an error, so
+      # nothing is tagged or published. Turn that silent skip into a failure.
+      - name: Fail if a release PR merged without a release
+        if: "${{ steps.rp.outputs.release_created != 'true' && startsWith(github.event.head_commit.message, 'chore(main): release') }}"
+        run: |
+          echo "::error::A release PR merged but release-please created no release. Restore the PR body's '---' delimiters and release notes, then re-run this workflow."
+          exit 1
 
-  # The publish job's gate, run first so the approver sees a green build of
-  # the release tag before approving. It holds no write permission and no OIDC
-  # token.
+  # Runs before anyone is asked to approve, so the approver sees a green build
+  # of the exact commit that will ship. It holds no write permission and no
+  # OIDC token. Both jobs check out release-please's commit SHA rather than
+  # the tag name, so moving the tag while approval waits changes nothing.
   verify:
     needs: release-please
     if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     permissions:
       contents: read
+      actions: read # read the release environment's protection rules
     steps:
+      # The gate only exists if the `release` environment has a required
+      # reviewer. GitHub creates a missing environment on first use with no
+      # protection at all, so stop here, before publish is ever queued.
+      - name: Check the release environment requires approval
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! reviewers=$(gh api "repos/$GITHUB_REPOSITORY/environments/release" \
+              --jq '[.protection_rules[]? | select(.type == "required_reviewers") | .reviewers | length] | add // 0'); then
+            echo "::error::Could not read the 'release' environment. Create it under Settings -> Environments with a required reviewer, then re-run this workflow."
+            exit 1
+          fi
+          if [ "$reviewers" -lt 1 ]; then
+            echo "::error::The 'release' environment has no required reviewer, so publishing would not wait for approval. Add one under Settings -> Environments -> release, then re-run this workflow."
+            exit 1
+          fi
+          echo "The release environment requires approval ($reviewers reviewer entries)."
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.release-please.outputs.sha }}
           persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.2'
+      # Before the tests: the stdio and package suites run the built bundle and
+      # the packed tarball under `node`, which should be the floor we declare
+      # rather than whatever the runner image ships.
       - uses: actions/setup-node@v5
         with:
           node-version: '24.22.1'
       - run: bun install --frozen-lockfile
-      - run: bunx biome ci && bun run type-check && bun run build && bun test
+      - run: bun run verify
 
   publish:
     needs: [release-please, verify]
-    if: ${{ needs.release-please.outputs.release_created == 'true' }}
     runs-on: ubuntu-latest
     # Manual approval gate, as in Zero and OpenClaude. The `release`
     # environment carries a required-reviewer rule (Settings -> Environments ->
@@ -78,31 +112,55 @@ jobs:
     steps:
       - uses: actions/checkout@v5
         with:
-          ref: ${{ needs.release-please.outputs.tag_name }}
+          ref: ${{ needs.release-please.outputs.sha }}
+          persist-credentials: false
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.2'
-      # Before the tests, not after: the stdio and package suites run the built
-      # bundle and the packed tarball under `node`, which should be the floor
-      # we declare rather than whatever the runner image ships.
+      # npm >= 11.5.1 for trusted publishing; this Node ships it.
       - uses: actions/setup-node@v5
         with:
           node-version: '24.22.1'
           registry-url: 'https://registry.npmjs.org'
+      # Build only. verify already ran the full gate on this commit, so no
+      # test code runs next to the OIDC token, and a flaky test cannot waste
+      # an approval.
       - run: bun install --frozen-lockfile
-      - run: bunx biome ci && bun run type-check && bun run build && bun test
+      - run: bun run build
+
+      # Approvals can land out of order. If a newer version is already on npm,
+      # this one must not take npm's `latest` dist-tag or the `latest` image
+      # tag, and npm 11 refuses to publish it as `latest` implicitly anyway.
+      - name: Check whether this is the newest release
+        id: order
+        run: |
+          v=$(node -p "require('./package.json').version")
+          latest=$(npm view @twigpine/openrecall dist-tags.latest 2>/dev/null || true)
+          newest=$(printf '%s\n%s\n' "${latest:-0.0.0}" "$v" | sort -V | tail -n 1)
+          if [ "$newest" = "$v" ]; then
+            echo "latest=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "latest=false" >> "$GITHUB_OUTPUT"
+            echo "::warning::$v is older than $latest, which is already on npm, so $v ships without the latest tags."
+          fi
 
       # npm, with no token in this job or in the repo's secrets. A version
       # already on the registry is skipped rather than failed, so a re-run of
       # this job (after a GHCR failure, say) and the one-time manual publish
       # that first creates the package both pass through here.
+      # --ignore-scripts publishes the dist/ built above instead of rebuilding
+      # it in prepublishOnly.
       - name: Publish to npm (trusted publishing)
+        env:
+          IS_LATEST: ${{ steps.order.outputs.latest }}
         run: |
           v=$(node -p "require('./package.json').version")
           if npm view "@twigpine/openrecall@$v" version >/dev/null 2>&1; then
             echo "@twigpine/openrecall@$v is already on npm; skipping publish"
+          elif [ "$IS_LATEST" = "true" ]; then
+            npm publish --access public --ignore-scripts
           else
-            npm publish --access public
+            npm publish --access public --ignore-scripts --tag backport
           fi
 
       # Standalone binaries, for a machine with neither Bun nor Node. Bun
@@ -130,7 +188,7 @@ jobs:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=semver,pattern={{version}},value=${{ needs.release-please.outputs.tag_name }}
-            type=raw,value=latest
+            type=raw,value=latest,enable=${{ steps.order.outputs.latest }}
       - uses: docker/build-push-action@v6
         with:
           context: .
