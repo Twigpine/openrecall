@@ -115,7 +115,7 @@ describe('store factory seam', () => {
     // is an exact count, not a floor, because a floor is what let an earlier
     // version of this test lose reach without failing: any module added to or
     // dropped from the production graph should force a look at this number.
-    expect(seen.size).toBe(35) // includes the encrypted MCP project directory
+    expect(seen.size).toBe(36) // includes the encrypted MCP project directory + MCP server status
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })
