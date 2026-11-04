@@ -32,6 +32,15 @@ jobs:
         id: rp
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+      # release-please finds a merged release PR by parsing its body (the
+      # `---` delimiters and the release-notes heading). If the body was
+      # edited out of that shape, it skips the release without an error, so
+      # nothing is tagged or published. Turn that silent skip into a failure.
+      - name: Fail if a release PR merged without a release
+        if: "${{ steps.rp.outputs.release_created != 'true' && startsWith(github.event.head_commit.message, 'chore(main): release') }}"
+        run: |
+          echo "::error::A release PR merged but release-please created no release. Restore the PR body's '---' delimiters and release notes, then re-run this workflow."
+          exit 1
 
   publish:
     needs: release-please
