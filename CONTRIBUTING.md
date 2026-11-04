@@ -115,11 +115,23 @@ A `feat` bumps the minor version, `fix` the patch; `feat!` or a
 
 **PR checklist:**
 
-- [ ] `bun test`, `bun run type-check`, and `bun run check` pass.
+- [ ] `bun run verify` passes: Biome, type-check, build, and tests, the same
+      gate CI and the release workflow run.
 - [ ] New behavior is covered by tests.
 - [ ] Conventional Commit title.
 - [ ] Docs/README updated if behavior changed.
 - [ ] Commits are signed off (DCO, below).
+
+## Releases
+
+Merging the release PR that release-please opens tags the version and
+creates the GitHub release, but nothing ships yet. The release workflow
+builds and tests the release commit, then its publish job waits for a
+maintainer to approve it in the Actions tab. Approval ships the npm package
+and the GHCR image and attaches the standalone binaries; an unapproved run
+fails after 30 days. The gate is the `release` environment, which must
+exist with a required reviewer: the workflow stops before publishing if it
+doesn't.
 
 ## Developer Certificate of Origin (DCO)
 
