@@ -75,12 +75,14 @@ To point an agent at a hosted service instead, print the block to paste:
 
 ```bash
 # prints the MCP config block, plus a fresh passphrase shown once
-OPENRECALL_API_KEY=<your key> openrecall card <owner> https://memory.twigpine.com
+openrecall card <owner> https://memory.twigpine.com
 ```
 
 The passphrase is generated locally and never leaves the machine: it is printed
 for you to store, and the block carries a placeholder rather than the value. The
-URL must be `https` unless it points at a loopback host.
+service key is never printed either, even if `OPENRECALL_API_KEY` is set; paste
+it into the block yourself. The URL must be `https` unless it points at a
+loopback host.
 
 That block is a public interface, not example output. The consumer integrations
 point back at it rather than restating it, and a test asserts that every
