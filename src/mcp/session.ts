@@ -45,6 +45,24 @@ export type Session = {
   readonly openedProjects: Set<string>
   /** namespace -> (key -> YYYY-MM-DD): accesses not yet flushed to the sidecar. */
   readonly pendingAccess: Map<string, Map<string, string>>
+  /** namespace -> the last doctor run in this process (`memory_doctor`, or the scheduled one). */
+  readonly doctor: Map<string, DoctorRun>
+}
+
+/**
+ * What one doctor run left behind. `announced` is false after a scheduled run
+ * with findings until the next recall or save on that namespace appends its
+ * one banner line; an explicit `memory_doctor` call has shown the report
+ * already, so it records itself announced.
+ */
+export type DoctorRun = {
+  ranAt: string
+  /** The manifest version the run audited. */
+  version: number
+  findings: number
+  /** Finding kinds by count, most frequent first. */
+  kinds: string[]
+  announced: boolean
 }
 
 const CROCKFORD = '0123456789ABCDEFGHJKMNPQRSTVWXYZ'
@@ -101,5 +119,6 @@ export function makeSession(options: SessionOptions = {}): Session {
     sessionId: newSessionId(),
     openedProjects: new Set<string>(),
     pendingAccess: new Map<string, Map<string, string>>(),
+    doctor: new Map<string, DoctorRun>(),
   }
 }

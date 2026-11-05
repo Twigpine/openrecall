@@ -43,7 +43,7 @@ describe('openrecall status --timings', () => {
     const r = cli(['status', '--timings'])
     expect(`${r.code}: ${r.err}`).toBe('0: ')
     expect(r.out).toContain('2 entries')
-    expect(r.out).toMatch(/recall timings over 2 entries, \d+ bytes fetched per call/)
+    expect(r.out).toMatch(/recall timings over 2 entries, \d+ bytes fetched by the cold call/)
     expect(r.out).toMatch(/stage\s+cold\s+warm p50\s+warm p95/)
     for (const stage of ['fetch', 'decrypt', 'rank', 'format', 'total']) {
       expect(r.out).toMatch(new RegExp(`^${stage}\\s+[\\d.]+ ms\\s+[\\d.]+ ms\\s+[\\d.]+ ms$`, 'm'))

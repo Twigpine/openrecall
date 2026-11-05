@@ -9,7 +9,7 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync } from 'node:fs'
+import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
@@ -88,6 +88,7 @@ for (const l of launchers) {
         const { tools } = await c.listTools()
         expect(tools.map(t => t.name).sort()).toEqual([
           'memory_delete',
+          'memory_doctor',
           'memory_get',
           'memory_list',
           'memory_project',
@@ -293,6 +294,82 @@ for (const l of launchers) {
         }
       } finally {
         await Promise.all([agentA.close(), agentB.close()])
+      }
+    }, 30_000)
+
+    test('the startup doctor runs after ready, off the handshake, and memory_doctor reports over stdio', async () => {
+      const home = freshHome()
+      const env = { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p' }
+      // Seed a duplicate pair through one server, so the next start has
+      // something to find. That server audited an empty namespace at its own
+      // start and left a marker two writes old, which is not yet due; the
+      // marker is removed so the second start is the no-marker case.
+      const seed = await connect(l, env)
+      try {
+        const body = 'Deploys go through the Ashfield cluster from the release branch.'
+        for (const key of ['project/deploy.md', 'project/deploy-copy.md']) {
+          const saved = text(
+            await seed.callTool({ name: 'memory_save', arguments: { key, content: body } }),
+          )
+          // The empty-namespace audit found nothing, so no banner rides here.
+          expect(saved).toMatch(/^saved "project\/deploy(-copy)?\.md" in user:me \(v\d+\)$/)
+        }
+      } finally {
+        await seed.close()
+      }
+      const marker = join(home, 'state', 'doctor.json')
+      expect(existsSync(marker)).toBe(true)
+      rmSync(marker)
+
+      const errLines: string[] = []
+      const c = await connect(l, env, errLines)
+      try {
+        const { tools } = await c.listTools()
+        expect(tools.map(t => t.name)).toContain('memory_doctor')
+        const line = await stderrLine(errLines, s => s.includes('doctor:'))
+        expect(line).toBe('[openrecall mcp] doctor: 1 suggestion for user:me')
+        // Ready came first: the audit is queued behind the handshake, never on it.
+        const all = errLines.join('')
+        expect(all.indexOf('[openrecall mcp] ready')).toBeGreaterThanOrEqual(0)
+        expect(all.indexOf('[openrecall mcp] ready')).toBeLessThan(all.indexOf('doctor:'))
+        expect(all).not.toContain('Ashfield')
+
+        const recalled = text(
+          await c.callTool({
+            name: 'memory_recall',
+            arguments: { query: 'release branch deploys' },
+          }),
+        )
+        expect(recalled).toContain('### project/deploy.md')
+        expect(recalled).toMatch(
+          /\n\(memory_doctor: 1 suggestion for user:me \(near-duplicate\); call memory_doctor to see them\)$/,
+        )
+        const again = text(
+          await c.callTool({
+            name: 'memory_recall',
+            arguments: { query: 'release branch deploys' },
+          }),
+        )
+        expect(again).not.toContain('memory_doctor')
+
+        // Four entries: the pair, the index, and the access sidecar the two
+        // recalls above left pending, which the doctor flushes before it reads.
+        const report = text(await c.callTool({ name: 'memory_doctor', arguments: {} }))
+        expect(report.startsWith('doctor report for user:me:\nentries 4/2000 · ')).toBe(true)
+        const listed = text(
+          await c.callTool({ name: 'memory_list', arguments: { include_system: true } }),
+        )
+        expect(listed).toContain('- sys.openrecall/accessed.json')
+        expect(report).toContain('\nnear-duplicate (1):\n')
+        expect(report).toContain('project/deploy-copy.md')
+        expect(report.length).toBeLessThanOrEqual(2000)
+        expect(existsSync(marker)).toBe(true)
+        if (process.platform !== 'win32') {
+          expect((statSync(marker).mode & 0o777).toString(8)).toBe('600')
+        }
+        expect(readFileSync(marker, 'utf8')).not.toContain('user:me')
+      } finally {
+        await c.close()
       }
     }, 30_000)
   })

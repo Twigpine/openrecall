@@ -50,5 +50,7 @@ export const SHORT_INSTRUCTIONS =
   "feedback in either. MEMORY.md is generated from each entry's description on every " +
   'save; do not edit its generated lines, and put orientation notes in its "## Pinned" ' +
   'section (20 lines max). ' +
-  'Search before adding to avoid duplicates. Call the "memory_guide" ' +
+  'Search before adding to avoid duplicates. ' +
+  'Run memory_doctor when a result says it has suggestions; it only proposes, so apply ' +
+  'what you agree with using the ordinary tools. Call the "memory_guide" ' +
   'prompt for the full protocol.'

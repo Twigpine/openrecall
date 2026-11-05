@@ -6,10 +6,12 @@
  */
 
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
-import { readdirSync, readFileSync } from 'node:fs'
+import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OpenRecallClient, OpenRecallProtocolError } from '../client/index.ts'
 import { today } from '../src/mcp/accessed.ts'
+import { DUE_AFTER_VERSIONS, markerKey } from '../src/mcp/doctor.ts'
 import { parseFrontmatter, stripFrontmatter } from '../src/mcp/frontmatter.ts'
 import { ACCESSED_KEY, LEGACY_INDEX_KEY } from '../src/mcp/keys.ts'
 import { GENERATED_MARKER } from '../src/mcp/memindex.ts'
@@ -2017,5 +2019,242 @@ describe('provenance trailer and inactive notes at the recall surface', () => {
     const r = await tools.recall('lantern checked nightly', NS)
     expect(r.text).toContain('### project/trail.md')
     expect(r.text).toMatch(new RegExp(`\\n\\[project · [^\\n·\\]]+ · updated ${today()}\\]\\n`))
+  })
+})
+
+/**
+ * `memory_doctor` through the real server and against the stubs: what it
+ * reports, that it writes nothing, where its marker goes, when the scheduled
+ * run is due, and the one banner that run earns.
+ */
+describe('memory_doctor', () => {
+  const DUP =
+    'The build is green when vet, unit and replay all pass; a red replay blocks the rollout.'
+  const suggestions = (n: number) => `${n} suggestion${n === 1 ? '' : 's'}`
+
+  test('reports an expired note and a duplicate pair under 2,000 chars, and writes nothing', async () => {
+    const NS = 'user:me/doctor'
+    expect((await tools.save('project/gates.md', DUP, NS)).isError).toBeUndefined()
+    expect((await tools.save('project/gates-copy.md', DUP, NS)).isError).toBeUndefined()
+    expect(
+      (await tools.save('project/old.md', '---\nexpires: 2020-01-01\n---\nThe old rule.', NS))
+        .isError,
+    ).toBeUndefined()
+    const probe = new OpenRecallClient({
+      url: `http://localhost:${server.port}`,
+      passphrase: 'mcp-pass',
+    })
+    const before = (await probe.pull(NS)).version
+    const r = await tools.doctor(NS)
+    expect(r.isError).toBeUndefined()
+    expect(r.text.startsWith(`doctor report for ${NS}:\nentries 4/2000 · `)).toBe(true)
+    expect(r.text).toMatch(
+      /\nnear-duplicate \(1\):\n- project\/gates(-copy)?\.md ↔ project\/gates(-copy)?\.md: duplicate 1\.00/,
+    )
+    expect(r.text).toContain('\nexpired (1):\n- project/old.md: expired 2020-01-01 → ')
+    expect(r.text.length).toBeLessThanOrEqual(2000)
+    // Read-only: the manifest did not move, and the audit was timed as one.
+    expect((await probe.pull(NS)).version).toBe(before)
+    expect(r.timings?.entries).toBe(4)
+    expect(r.timings?.rank).toBeGreaterThanOrEqual(0)
+    // An explicit call is its own announcement: the next recall carries no banner.
+    const recalled = await tools.recall('replay blocks the rollout', NS)
+    expect(recalled.text).not.toContain('memory_doctor')
+  })
+
+  test('namespaces audits several together and reports the cross-namespace twins', async () => {
+    const A = 'user:me/doctor-a'
+    const B = 'user:me/doctor-b'
+    expect((await tools.save('project/deploy.md', DUP, A)).isError).toBeUndefined()
+    expect((await tools.save('project/deploy.md', DUP, B)).isError).toBeUndefined()
+    const r = await tools.doctor(undefined, [A, B])
+    expect(r.isError).toBeUndefined()
+    expect(r.text.startsWith(`doctor report for ${A}, ${B}:\nentries 4/4000 · `)).toBe(true)
+    expect(r.text).toContain(
+      `\ncross-namespace-twin (1):\n- project/deploy.md ↔ project/deploy.md: "project/deploy.md" in ${A} and "project/deploy.md" in ${B}: same key → `,
+    )
+    expect(r.text.length).toBeLessThanOrEqual(2000)
+    const both = await tools.doctor(A, [A, B])
+    expect(both.isError).toBe(true)
+    expect(both.text).toContain('not both')
+    const none = await tools.doctor(undefined, [])
+    expect(none.isError).toBe(true)
+    expect(none.text).toContain('between 1 and 8')
+  })
+
+  test('a stub sees no push from the doctor, except the flush of pending access stamps', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'project/a.md': 'The alpha rota.', 'project/b.md': 'The alpha rota.' }
+    const pushes: Record<string, string>[] = []
+    const push = stub.push.bind(stub)
+    stub.push = async (ns, entries, opts) => {
+      pushes.push(entries)
+      return push(ns, entries, opts)
+    }
+    const session = makeSession()
+    const t = makeTools(stub, 'user:me', session)
+    const r = await t.doctor()
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('\nnear-duplicate (1):\n')
+    expect(pushes).toEqual([])
+    expect(stub.version).toBe(1)
+    // After a read there is one pending stamp, and that is the one thing pushed.
+    await t.get('project/a.md')
+    expect(session.pendingAccess.get('user:me')?.size).toBe(1)
+    expect((await t.doctor()).isError).toBeUndefined()
+    expect(pushes).toHaveLength(1)
+    expect(Object.keys(pushes[0] as Record<string, string>)).toEqual([ACCESSED_KEY])
+    expect(session.pendingAccess.get('user:me')?.size ?? 0).toBe(0)
+    expect(Object.keys(stub.entries).sort()).toEqual(['project/a.md', 'project/b.md', ACCESSED_KEY])
+  })
+
+  test('the marker is written 0600 under state/ and names no namespace', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'openrecall-doctor-home-'))
+    try {
+      const path = join(home, 'state', 'doctor.json')
+      const NS = 'user:me/secret-project'
+      const t = makeTools(
+        makeStubClient({ 'project/a.md': 'The alpha rota.' }),
+        NS,
+        makeSession(),
+        {
+          doctorMarkerPath: path,
+        },
+      )
+      expect((await t.doctor()).isError).toBeUndefined()
+      const raw = readFileSync(path, 'utf8')
+      expect(raw).not.toContain('secret-project')
+      const markers = JSON.parse(raw) as Record<string, { version: number; findings: number }>
+      expect(Object.keys(markers)).toEqual([markerKey(NS)])
+      expect(markers[markerKey(NS)]).toMatchObject({ version: 1, findings: 1 })
+      if (process.platform !== 'win32') {
+        expect((statSync(path).mode & 0o777).toString(8)).toBe('600')
+        expect((statSync(join(home, 'state')).mode & 0o777).toString(8)).toBe('700')
+      }
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('an unwritable marker path is said once, and the run is still remembered in memory', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'openrecall-doctor-home-'))
+    try {
+      writeFileSync(join(home, 'state'), 'a file where the directory should be')
+      const warnings: string[] = []
+      const t = makeTools(
+        makeStubClient({ 'project/a.md': 'The alpha rota.' }),
+        'user:me',
+        makeSession(),
+        {
+          doctorMarkerPath: join(home, 'state', 'doctor.json'),
+          warn: line => warnings.push(line),
+        },
+      )
+      expect((await t.doctor()).isError).toBeUndefined()
+      expect((await t.doctor()).isError).toBeUndefined()
+      expect(warnings).toHaveLength(1)
+      expect(warnings[0]).toContain('could not write')
+      expect(await t.doctorIfDue('user:me')).toEqual({ ran: false, reason: 'not-due' })
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
+
+  test('doctorIfDue runs when no marker exists, then not within a day and ten versions', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'project/a.md': 'The alpha rota.', 'project/b.md': 'The alpha rota.' }
+    const session = makeSession()
+    const t = makeTools(stub, 'user:me', session)
+    const NOW = '2026-11-05T12:00:00.000Z'
+    const first = await t.doctorIfDue('user:me', { now: NOW })
+    expect(first).toMatchObject({
+      ran: true,
+      findings: 2,
+      kinds: ['index-missing', 'near-duplicate'],
+    })
+    expect(session.doctor.get('user:me')).toEqual({
+      ranAt: NOW,
+      version: 1,
+      findings: 2,
+      kinds: ['index-missing', 'near-duplicate'],
+      announced: false,
+    })
+    // Within the day, fewer than ten writes later: skipped, and the record stands.
+    expect(await t.doctorIfDue('user:me', { now: '2026-11-06T11:59:59.000Z' })).toEqual({
+      ran: false,
+      reason: 'not-due',
+    })
+    expect(session.doctor.get('user:me')?.ranAt).toBe(NOW)
+    // Ten mutating writes later: due again.
+    for (let i = 0; i < DUE_AFTER_VERSIONS; i++) {
+      await stub.push('user:me', { [`project/n${i}.md`]: `Note number ${i} about nothing.` })
+    }
+    const third = await t.doctorIfDue('user:me', { now: '2026-11-05T12:30:00.000Z' })
+    expect(third).toMatchObject({ ran: true })
+    expect(session.doctor.get('user:me')?.version).toBe(1 + DUE_AFTER_VERSIONS)
+    // A day and a second later: due by time alone.
+    expect(await t.doctorIfDue('user:me', { now: '2026-11-06T12:30:01.000Z' })).toMatchObject({
+      ran: true,
+    })
+    // A namespace that cannot be read is reported, never thrown.
+    stub.error = httpError(503, 'unavailable')
+    expect(await t.doctorIfDue('user:me', { now: '2026-11-08T12:00:00.000Z' })).toMatchObject({
+      ran: false,
+      reason: 'failed',
+    })
+  })
+
+  test('a scheduled run with findings earns one banner on the next recall or save, then none', async () => {
+    const stub = new StubClient()
+    stub.entries = {
+      'project/a.md': 'The alpha rota for the lighthouse.',
+      'project/b.md': 'The alpha rota for the lighthouse.',
+    }
+    const t = makeTools(stub, 'user:me', makeSession())
+    const run = await t.doctorIfDue('user:me')
+    if (!run.ran) throw new Error('expected the first run to be due')
+    const banner = `(memory_doctor: ${suggestions(run.findings)} for user:me (${run.kinds.slice(0, 2).join(', ')}); call memory_doctor to see them)`
+    const first = await t.recall('alpha rota lighthouse')
+    expect(first.isError).toBeUndefined()
+    expect(first.text.endsWith(`\n${banner}`)).toBe(true)
+    expect(first.text).toContain('### project/a.md')
+    const second = await t.recall('alpha rota lighthouse')
+    expect(second.text).not.toContain('memory_doctor')
+
+    // A save carries it the same way, once; the first line keeps its shape.
+    const t2 = makeTools(stub, 'user:me', makeSession())
+    expect((await t2.doctorIfDue('user:me')).ran).toBe(true)
+    const saved = await t2.save('project/c.md', 'A third note, about the harbour.')
+    expect(saved.isError).toBeUndefined()
+    expect(saved.text).toMatch(/^saved "project\/c.md" in user:me \(v\d+\)\n/)
+    expect(saved.text.endsWith(`\n${banner}`)).toBe(true)
+    const again = await t2.save('project/c.md', 'A third note, about the harbour, revised.')
+    expect(again.text).not.toContain('memory_doctor')
+
+    // Another namespace's recall does not spend it. (The save above wrote the
+    // index, so this run finds the pair alone: the banner follows the run.)
+    const t3 = makeTools(stub, 'user:me', makeSession())
+    const run3 = await t3.doctorIfDue('user:me')
+    if (!run3.ran) throw new Error('expected a fresh session to be due')
+    expect(run3).toMatchObject({ findings: 1, kinds: ['near-duplicate'] })
+    expect((await t3.recall('alpha', 'user:other')).text).not.toContain('memory_doctor')
+    expect(
+      (await t3.recall('alpha rota lighthouse')).text.endsWith(
+        '\n(memory_doctor: 1 suggestion for user:me (near-duplicate); call memory_doctor to see them)',
+      ),
+    ).toBe(true)
+
+    // A run with nothing to say earns no banner.
+    const clean = makeTools(
+      makeStubClient({
+        'project/a.md': '---\ndescription: the rota\n---\nThe alpha rota for the lighthouse.',
+        'MEMORY.md':
+          '<!-- openrecall:generated v1 -->\n\n## Project\n\n- [a](project/a.md) — the rota\n',
+      }),
+      'user:me',
+      makeSession(),
+    )
+    expect(await clean.doctorIfDue('user:me')).toEqual({ ran: true, findings: 0, kinds: [] })
+    expect((await clean.recall('alpha rota lighthouse')).text).not.toContain('memory_doctor')
   })
 })

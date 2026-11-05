@@ -34,12 +34,27 @@ export function projectNamespace(sharedNamespace: string, id: string): string {
   )
 }
 
+export type ProjectHooks = {
+  /**
+   * Called with the project namespace after a successful `open`, once the
+   * result is built. The MCP server uses it to schedule a doctor run over the
+   * opened namespace when one is due; it runs after `open` returns and must
+   * not throw into it.
+   */
+  opened?: (namespace: string) => void
+}
+
 /**
  * The project tools. `session`, when given, learns every project namespace
  * `open` registers in this process; `memory_save` reads that to route typed
  * notes (`src/mcp/tools.ts`).
  */
-export function makeProjects(client: MemoryClient, sharedNamespace: string, session?: Session) {
+export function makeProjects(
+  client: MemoryClient,
+  sharedNamespace: string,
+  session?: Session,
+  hooks: ProjectHooks = {},
+) {
   const catalog = () => validateNamespace(`${validateNamespace(sharedNamespace)}/projects`)
 
   return {
@@ -53,6 +68,11 @@ export function makeProjects(client: MemoryClient, sharedNamespace: string, sess
           [`${sha256Hex(id)}.json`]: JSON.stringify({ version: 1, id, namespace }),
         })
         session?.openedProjects.add(namespace)
+        try {
+          hooks.opened?.(namespace)
+        } catch {
+          // A hook that fails is the hook's problem; the project is open.
+        }
         return {
           text:
             `Project: ${id}\nProject namespace: ${namespace}\nShared namespace: ${sharedNamespace}\n\n` +

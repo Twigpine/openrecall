@@ -23,6 +23,7 @@
  * diagnostics go to stderr.
  */
 
+import { join } from 'node:path'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
@@ -369,6 +370,27 @@ export function makeServer(binding: ServerBinding): McpServer {
   )
 
   server.registerTool(
+    'memory_doctor',
+    {
+      title: 'Audit memory organization',
+      description:
+        'Report duplicates, expired and stale entries, index drift, dangling links and size against caps, as proposed operations. Changes nothing; apply suggestions with memory_save and memory_delete.',
+      inputSchema: {
+        namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+        namespaces: z
+          .array(z.string())
+          .min(1)
+          .max(8)
+          .optional()
+          .describe(
+            'Audit these namespaces together, for example the shared and project namespaces from memory_project, and report twins across them. Use instead of namespace.',
+          ),
+      },
+    },
+    async ({ namespace, namespaces }) => run('memory_doctor', t => t.doctor(namespace, namespaces)),
+  )
+
+  server.registerTool(
     'memory_delete',
     {
       title: 'Delete a memory',
@@ -385,6 +407,28 @@ export function makeServer(binding: ServerBinding): McpServer {
   )
 
   return server
+}
+
+/**
+ * Run the doctor over `ns` when one is due, off the request path. Queued with
+ * `setTimeout(0)` so whatever triggered it answers first: the client's
+ * `initialize` (the SDK fires `oninitialized` on the client's initialized
+ * notification, after the handshake) or a `memory_project` open. The run
+ * itself is `tools.doctorIfDue`, which reads the marker file, pulls the
+ * namespace once and writes nothing but the pending access stamps. One stderr
+ * line when it found something, nothing when it did not; the next recall or
+ * save on that namespace carries the banner that points at `memory_doctor`.
+ */
+function scheduleDoctor(tools: MemoryTools, ns: string): void {
+  setTimeout(() => {
+    void tools.doctorIfDue(ns).then(r => {
+      if (r.ran && r.findings > 0) {
+        process.stderr.write(
+          `[openrecall mcp] doctor: ${r.findings} suggestion${r.findings === 1 ? '' : 's'} for ${ns}\n`,
+        )
+      }
+    })
+  }, 0)
 }
 
 /** What `main` speaks from and reads, so a test can supply both. */
@@ -428,8 +472,16 @@ export async function main(options: StartupOptions = {}): Promise<void> {
     // so they are the first thing in the launcher's log, and to stderr because
     // stdout belongs to the protocol.
     for (const w of config.warnings) process.stderr.write(`openrecall mcp: ${w}\n`)
-    tools = makeTools(config.client, defaultNamespace, session)
-    projects = makeProjects(config.client, defaultNamespace, session)
+    const bound = makeTools(config.client, defaultNamespace, session, {
+      doctorMarkerPath: join(config.home, 'state', 'doctor.json'),
+      warn: line => process.stderr.write(`[openrecall mcp] ${line}\n`),
+    })
+    tools = bound
+    // A project opened in this process gets the same scheduled audit the
+    // default namespace gets at startup, when one is due for it.
+    projects = makeProjects(config.client, defaultNamespace, session, {
+      opened: ns => scheduleDoctor(bound, ns),
+    })
   } else if (config.unconfigured) {
     const diagnosis =
       `OpenRecall is not set up: ${config.diagnostic}\n` +
@@ -452,6 +504,12 @@ export async function main(options: StartupOptions = {}): Promise<void> {
       holder.server = s
     },
   })
+  if (tools) {
+    // The startup audit of the default namespace, after the handshake and off
+    // its path: `initialize` and the first tool call never wait for it.
+    const bound = tools
+    server.server.oninitialized = () => scheduleDoctor(bound, defaultNamespace)
+  }
   await serveOn(server, options.transport ?? new StdioServerTransport())
   process.stderr.write(`[openrecall mcp] ready • store=${target} • namespace=${defaultNamespace}\n`)
 }

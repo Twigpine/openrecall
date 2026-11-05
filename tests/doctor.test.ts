@@ -34,6 +34,7 @@ import {
   renderReport,
   runDoctor,
   runDoctorAcross,
+  runDoctorAll,
   SECTION_ITEMS,
   STALE_HORIZON_DAYS,
   STALE_HORIZON_UNTYPED_DAYS,
@@ -146,6 +147,15 @@ const trashed = (key: string, fields: Fields, body = 'A deleted note about nothi
 describe('control and meters', () => {
   test('four distinct typed notes with their generated index have no findings', () => {
     expect(run(withIndex(BASE)).findings).toEqual([])
+  })
+
+  test('an empty namespace, or one holding only bookkeeping, has no findings', () => {
+    // The generator writes no index for a namespace with nothing to list, so
+    // a fresh namespace audits clean: the scheduled run at every first start
+    // must not announce a suggestion about a MEMORY.md nobody is owed.
+    expect(run({}).findings).toEqual([])
+    expect(run({ 'sys.openrecall/accessed.json': '{"v":1,"keys":{}}' }).findings).toEqual([])
+    expect(run({ 'MEMORY.md': '<!-- openrecall:generated v1 -->\n' }).findings).toEqual([])
   })
 
   test('meters count every entry, bytes with the envelope, and the index size', () => {
@@ -626,6 +636,25 @@ describe('runDoctorAcross', () => {
     const input = { namespace: NS, entries: withIndex(BASE), now: NOW }
     expect(runDoctorAcross([input])).toEqual(runDoctor(input))
     expect(runDoctorAcross([]).findings).toEqual([])
+  })
+
+  test('runDoctorAll keeps each namespace’s own report beside the combined one', () => {
+    const inputs = [
+      { namespace: 'user:a', entries: withIndex(BASE), now: NOW },
+      { namespace: 'user:b', entries: B, now: NOW },
+    ]
+    const { each, across } = runDoctorAll(inputs)
+    expect(across).toEqual(runDoctorAcross(inputs))
+    expect(each.map(r => r.namespace)).toEqual(['user:a', 'user:b'])
+    expect(each[0]).toEqual(runDoctor(inputs[0]))
+    expect(each[1]).toEqual(runDoctor(inputs[1]))
+    // A namespace's own report carries no twins and no tag on its details.
+    expect(each.flatMap(r => r.findings).some(f => f.kind === 'cross-namespace-twin')).toBe(false)
+    expect(each[1].findings[0].detail.startsWith('[')).toBe(false)
+    expect(runDoctorAll([])).toEqual({ each: [], across: runDoctorAcross([]) })
+    const one = runDoctorAll([inputs[0]])
+    expect(one.each).toHaveLength(1)
+    expect(one.across).toBe(one.each[0])
   })
 
   test('twins by key and by duplicate body, per-namespace findings tagged, meters totalled', () => {

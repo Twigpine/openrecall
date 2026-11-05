@@ -20,7 +20,10 @@
  * Finding kinds, in report order, and their rules:
  *
  * - index-missing: an active, non-hidden, unexpired note with no link line in
- *   `MEMORY.md`. When there is no index at all, one finding says so. When the
+ *   `MEMORY.md`. When there is no index at all and there is such a note to
+ *   list, one finding says so; a namespace with nothing to list expects no
+ *   index (the generator writes none for it), so an empty namespace, or one
+ *   holding only bookkeeping, is finding-free. When the
  *   index carries the generator's `… N more entries not listed` tail it is at
  *   its cap and the unlisted notes are expected, so none are reported.
  * - index-dangling: a link line (Pinned, generated or legacy) whose target is
@@ -414,13 +417,18 @@ export function linkTargets(line: string): string[] {
 function indexFindings(entries: Record<string, string>, notes: Note[], nowDate: Date): Finding[] {
   const out: Finding[] = []
   const text = entries[INDEX_BASENAME]
+  const listable = (note: Note) => isActive(note) && !isExpired(note.expires, nowDate)
   if (text === undefined) {
-    out.push({
-      kind: 'index-missing',
-      keys: [],
-      detail: `no ${INDEX_BASENAME} in the namespace`,
-      suggest: 'memory_save mode=update any note: the index is regenerated with every save',
-    })
+    // No index is expected for a namespace with nothing to list: the
+    // generator writes none for it, and a fresh namespace must audit clean.
+    if (notes.some(listable)) {
+      out.push({
+        kind: 'index-missing',
+        keys: [],
+        detail: `no ${INDEX_BASENAME} in the namespace`,
+        suggest: 'memory_save mode=update any note: the index is regenerated with every save',
+      })
+    }
     return out
   }
   const pinned = new Set(parseIndex(text).pinned)
@@ -927,15 +935,32 @@ export function runDoctor(input: DoctorInput): DoctorReport {
  * `[namespace] ` at the front of their detail, and the twins come after.
  */
 export function runDoctorAcross(inputs: DoctorInput[]): DoctorReport {
+  return runDoctorAll(inputs).across
+}
+
+/**
+ * `runDoctorAcross`, keeping each namespace's own report as well: the tool
+ * layer records one marker per namespace (its own finding count, twins
+ * excluded) and shows the combined report, and analyzing each namespace
+ * twice to get both would double the cost of the call.
+ */
+export function runDoctorAll(inputs: DoctorInput[]): {
+  each: DoctorReport[]
+  across: DoctorReport
+} {
   if (inputs.length === 0) {
     return {
-      namespace: '',
-      meters: meter({ namespace: '', entries: {}, now: '' }, []),
-      findings: [],
+      each: [],
+      across: {
+        namespace: '',
+        meters: meter({ namespace: '', entries: {}, now: '' }, []),
+        findings: [],
+      },
     }
   }
-  if (inputs.length === 1) return runDoctor(inputs[0])
   const analyses = inputs.map(analyze)
+  const each = analyses.map(a => a.report)
+  if (inputs.length === 1) return { each, across: each[0] as DoctorReport }
   const meters: DoctorMeters = {
     entries: 0,
     bytes: 0,
@@ -999,7 +1024,7 @@ export function runDoctorAcross(inputs: DoctorInput[]): DoctorReport {
     { contradictions: false },
   )
   for (const p of pairs) twin(p.a, p.b, `${p.reason} ${p.similarity.toFixed(2)}`)
-  return { namespace: inputs.map(i => i.namespace).join(' + '), meters, findings }
+  return { each, across: { namespace: inputs.map(i => i.namespace).join(' + '), meters, findings } }
 }
 
 // ---------------------------------------------------------------------------
