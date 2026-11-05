@@ -25,6 +25,8 @@
 
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
+import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js'
+import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import pkg from '../../package.json' with { type: 'json' }
 import { DEFAULT_NAMESPACE } from '../cli/settings.ts'
@@ -32,7 +34,14 @@ import { logTiming } from '../log.ts'
 import { loadMemoryGuide, SHORT_INSTRUCTIONS } from './guide.ts'
 import { makeProjects } from './projects.ts'
 import { preflight } from './startup.ts'
+import { clearSetupError, getSetupError, recordSetupError, recordToolFailure } from './status.ts'
 import { type MemoryTools, makeTools, type Timings, type ToolResult } from './tools.ts'
+
+// The health of this server, for embedders and tests that would otherwise have
+// to scrape stderr for it. Re-exported from here because this is the module a
+// caller reads as "the MCP server"; the state itself lives in ./status.ts so it
+// can be read without starting a transport.
+export { getSetupError, hadToolError } from './status.ts'
 
 /**
  * The `_meta` key every tool result carries its stage timings under. The MCP
@@ -74,40 +83,107 @@ const toMcp = (r: ToolResult, trailer: boolean) => ({
 })
 
 /**
- * Preflight, then bind the tools and connect the transport. Called by the CLI
- * rather than run on import, so a misconfigured process exits before the
- * transport exists and never half-serves.
+ * True for the response to a tool call that failed.
+ *
+ * A response carries no `method`; `isError` on the result is the flag the
+ * protocol defines for a refused call, and the SDK sets it both for a tool that
+ * answered with a failure and for one whose arguments it rejected. Nothing else
+ * this server serves puts `isError` on a result.
+ *
+ * The known limit: `isError` is what identifies a tool result here, rather than
+ * the request it answers. Correlating the two would mean keeping every
+ * in-flight request id and wrapping `onmessage` as well — and `connect()` is
+ * what installs `onmessage`, so the wrapper would have to be stitched on after
+ * the fact — all for a boolean. A handler registered by hand on a server passed
+ * to `serveOn()` that returned a non-tool result carrying `isError` would be
+ * counted too; this module registers no such handler.
  */
-export async function main(): Promise<void> {
-  const config = await preflight(process.env)
-  let tools: MemoryTools | null = null
-  let projects: ReturnType<typeof makeProjects> | null = null
-  let setupError = ''
-  let defaultNamespace = DEFAULT_NAMESPACE
-  let target = 'unconfigured'
-  if (config.ready) {
-    defaultNamespace = config.namespace
-    target = config.url
-    // Non-fatal findings from the preflight. Written before the tools are bound
-    // so they are the first thing in the launcher's log, and to stderr because
-    // stdout belongs to the protocol.
-    for (const w of config.warnings) process.stderr.write(`openrecall mcp: ${w}\n`)
-    tools = makeTools(config.client, defaultNamespace)
-    projects = makeProjects(config.client, defaultNamespace)
-  } else if (config.unconfigured) {
-    setupError =
-      `OpenRecall is not set up: ${config.diagnostic}\n` +
-      'Tell the user to run `npx -y @twigpine/openrecall init` (or, for a hosted service, `openrecall card <owner> <url>`), then restart this MCP server. Do not retry the memory tools until then.'
-    process.stderr.write(`[openrecall mcp] ${setupError}\n`)
-  } else {
-    process.stderr.write(`openrecall mcp: ${config.diagnostic}\n`)
-    process.exit(1)
-  }
+function isToolFailure(message: JSONRPCMessage): boolean {
+  if (!('result' in message) || message.result === undefined) return false
+  return (message.result as { isError?: unknown }).isError === true
+}
 
-  // Opt-in: the trailer spends context and the stderr line spends log space.
-  // The `_meta` timings are always there.
-  const timingsOn = process.env.OPENRECALL_TIMINGS === '1'
-  const unconfigured = (): ToolResult => ({ text: setupError, isError: true })
+/**
+ * Count failed tool calls on their way to the client.
+ *
+ * Counting in a tool callback is not enough: the SDK validates arguments before
+ * a registered callback runs, so `memory_recall` with `limit: 0` is refused
+ * inside the SDK and never reaches this file's code. The outgoing response is
+ * the one place every refusal passes through, whether the SDK or the tool
+ * produced it, and the SDK turns a thrown callback into one as well.
+ *
+ * Only the status is read. Arguments and message text are never kept: the
+ * caller already receives them, and both can quote whatever the caller sent —
+ * which on this server can look like a secret.
+ *
+ * A JSON-RPC `error` response is deliberately not counted. That is the protocol
+ * failing rather than a tool answering, and labelling the two apart would mean
+ * tracking request ids for a boolean.
+ *
+ * Decorates in place and returns the transport: `connect()` installs its
+ * callbacks on the object it is given, so a wrapper would have to forward every
+ * one of them to stay equivalent.
+ */
+function countToolFailures(transport: Transport): Transport {
+  const send = transport.send.bind(transport)
+  transport.send = async (message, options) => {
+    if (isToolFailure(message)) recordToolFailure()
+    return send(message, options)
+  }
+  return transport
+}
+
+/**
+ * Serve `server` on `transport`, counting the failed tool calls it reports.
+ *
+ * Exported so a test can drive a real client/server pair over the SDK's
+ * in-memory transport and read the count in the same process. The stdio suite
+ * cannot: there the server is a child process, and its status dies with it.
+ */
+export async function serveOn(server: McpServer, transport: Transport): Promise<void> {
+  await server.connect(countToolFailures(transport))
+}
+
+/** What `makeServer` binds. A null group is one the preflight left unbound. */
+export type ServerBinding = {
+  tools: MemoryTools | null
+  projects: ReturnType<typeof makeProjects> | null
+  defaultNamespace: string
+  /**
+   * Append the timings trailer to every tool text and write one timing line
+   * per call on stderr (what OPENRECALL_TIMINGS=1 asks for). Opt-in: the
+   * trailer spends context and the line spends log space. The `_meta` timings
+   * are always there.
+   */
+  timings?: boolean
+}
+
+/**
+ * Bind the tools to a server.
+ *
+ * Split out of `main()` so a test can drive the real registrations over the
+ * SDK's in-memory transport: the stdio suite runs the server in a child
+ * process, where the status this module exposes cannot be read.
+ */
+export function makeServer(binding: ServerBinding): McpServer {
+  const defaultNamespace = binding.defaultNamespace
+
+  // Captured when this server is built, not read on each call. A second start in
+  // the same process can clear or replace the shared diagnosis, and an earlier
+  // unbound server that is still connected must keep answering with the one
+  // that describes *it* rather than with the newer start's, or with none.
+  const setupDiagnostic = getSetupError()
+
+  // "Not configured" is the same answer for every tool group, so it is written
+  // once. The text comes from ./status.ts, which is what the operator saw on
+  // stderr, so the answer a caller reads and the log can never disagree.
+  const unconfigured = (): ToolResult => ({
+    text: setupDiagnostic ?? 'OpenRecall is not configured',
+    isError: true,
+  })
+  const timingsOn = binding.timings === true
+  // Every result leaves with timings: the tool's own when it measured, else
+  // the wall time of the call (the setup refusal, a project tool).
   const finish = (name: string, startedAt: number, r: ToolResult) => {
     const timings = r.timings ?? totalOnly(startedAt)
     if (timingsOn) {
@@ -125,10 +201,10 @@ export async function main(): Promise<void> {
     return toMcp({ ...r, timings }, timingsOn)
   }
   const run = async (name: string, fn: (t: MemoryTools) => Promise<ToolResult>) =>
-    finish(name, performance.now(), tools ? await fn(tools) : unconfigured())
-  type Projects = ReturnType<typeof makeProjects>
+    finish(name, performance.now(), binding.tools ? await fn(binding.tools) : unconfigured())
+  type Projects = NonNullable<ServerBinding['projects']>
   const runProjects = async (name: string, fn: (p: Projects) => Promise<ToolResult>) =>
-    finish(name, performance.now(), projects ? await fn(projects) : unconfigured())
+    finish(name, performance.now(), binding.projects ? await fn(binding.projects) : unconfigured())
 
   const server = new McpServer(
     { name: 'openrecall', version: pkg.version },
@@ -275,7 +351,65 @@ export async function main(): Promise<void> {
     async ({ key, namespace }) => run('memory_delete', t => t.delete(key, namespace)),
   )
 
-  const transport = new StdioServerTransport()
-  await server.connect(transport)
+  return server
+}
+
+/** What `main` speaks from and reads, so a test can supply both. */
+export type StartupOptions = {
+  /** Left out by the CLI, which gets stdio. */
+  transport?: Transport
+  /** Left out by the CLI, which uses the launcher's environment. */
+  env?: Record<string, string | undefined>
+}
+
+/**
+ * Preflight, then bind the tools and connect the transport. Called by the CLI
+ * rather than run on import, so a misconfigured process exits before the
+ * transport exists and never half-serves.
+ *
+ * Both inputs are injectable for the same reason `preflight` takes an
+ * environment: a test can drive the real startup path — including the status it
+ * records — without spawning a process or reading the machine's own
+ * configuration.
+ */
+export async function main(options: StartupOptions = {}): Promise<void> {
+  const config = await preflight(options.env ?? process.env)
+  let tools: MemoryTools | null = null
+  let projects: ReturnType<typeof makeProjects> | null = null
+  let defaultNamespace = DEFAULT_NAMESPACE
+  let target = 'unconfigured'
+  if (config.ready) {
+    // A second start in the same process must not keep reporting the first
+    // start's diagnosis. Only the setup error: the tool-failure flag records
+    // something a caller was already told, and a good start does not unsay it.
+    clearSetupError()
+    defaultNamespace = config.namespace
+    target = config.url
+    // Non-fatal findings from the preflight. Written before the tools are bound
+    // so they are the first thing in the launcher's log, and to stderr because
+    // stdout belongs to the protocol.
+    for (const w of config.warnings) process.stderr.write(`openrecall mcp: ${w}\n`)
+    tools = makeTools(config.client, defaultNamespace)
+    projects = makeProjects(config.client, defaultNamespace)
+  } else if (config.unconfigured) {
+    const diagnosis =
+      `OpenRecall is not set up: ${config.diagnostic}\n` +
+      'Tell the user to run `npx -y @twigpine/openrecall init` (or, for a hosted service, `openrecall card <owner> <url>`), then restart this MCP server. Do not retry the memory tools until then.'
+    // Recorded before it is logged, so a caller reading the status always sees
+    // the same diagnosis the operator saw on stderr.
+    recordSetupError(diagnosis)
+    process.stderr.write(`[openrecall mcp] ${diagnosis}\n`)
+  } else {
+    process.stderr.write(`openrecall mcp: ${config.diagnostic}\n`)
+    process.exit(1)
+  }
+
+  const server = makeServer({
+    tools,
+    projects,
+    defaultNamespace,
+    timings: (options.env ?? process.env).OPENRECALL_TIMINGS === '1',
+  })
+  await serveOn(server, options.transport ?? new StdioServerTransport())
   process.stderr.write(`[openrecall mcp] ready • store=${target} • namespace=${defaultNamespace}\n`)
 }
