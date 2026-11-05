@@ -148,7 +148,7 @@ other:
 
 ```bash
 openrecall sync ~/memories                 # one round trip
-openrecall sync ~/memories --watch         # keep mirroring
+openrecall sync ~/memories --watch         # watch local changes; use --interval for remote polling
 openrecall sync ~/memories --prune --watch # also propagate local deletions
 ```
 
