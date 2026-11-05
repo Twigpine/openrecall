@@ -15,12 +15,99 @@ import {
   OpenRecallHttpError,
   OpenRecallProtocolError,
   OpenRecallTimeoutError,
+  type PullResult,
 } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { validateNamespace } from '../namespace.ts'
 import { rankEntriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
 
-export type ToolResult = { text: string; isError?: boolean }
+export type ToolResult = { text: string; isError?: boolean; timings?: Timings }
+
+/**
+ * Where one tool call's time went, in milliseconds, so a slow call is blamed
+ * on the stage that was slow rather than on "memory". Every tool reports it on
+ * every path out, refusals included; server.ts carries it in the result's
+ * `_meta`, which a model never sees, so measuring costs no context.
+ */
+export type Timings = {
+  /** The client call: transport plus, for a pull, the JSON parse. */
+  fetch: number
+  /** The AES-GCM pass over every entry the call decrypted. */
+  decrypt: number
+  /** Tokenizing and scoring the corpus (recall), or matching (search). */
+  rank: number
+  /** Region selection and output budgeting (recall). */
+  format: number
+  /** Wall time of the whole call. */
+  total: number
+  /** Entries the call read or scored. */
+  entries: number
+  /** Response bytes the call fetched. */
+  bytes: number
+}
+
+type Stage = 'fetch' | 'decrypt' | 'rank' | 'format'
+
+const round = (ms: number) => Math.round(ms * 100) / 100
+
+/** One call's stopwatch. Stages accumulate, so a stage entered twice adds up. */
+class Timer {
+  private readonly started = performance.now()
+  private readonly ms: Record<Stage, number> = { fetch: 0, decrypt: 0, rank: 0, format: 0 }
+  entries = 0
+  bytes = 0
+
+  async time<T>(stage: Stage, fn: () => T | Promise<T>): Promise<T> {
+    const t = performance.now()
+    try {
+      return await fn()
+    } finally {
+      this.ms[stage] += performance.now() - t
+    }
+  }
+
+  /**
+   * Credit a pull. The client splits its own time into fetch, parse and
+   * decrypt; a client without that breakdown (a test double) is charged
+   * entirely to fetch, from the elapsed time the caller measured around it.
+   */
+  pulled(r: PullResult, elapsedMs: number): void {
+    this.entries += Object.keys(r.entries).length
+    if (r.timings) {
+      this.ms.fetch += r.timings.fetchMs + r.timings.parseMs
+      this.ms.decrypt += r.timings.decryptMs
+      this.bytes += r.timings.bytes
+    } else {
+      this.ms.fetch += elapsedMs
+    }
+  }
+
+  done(): Timings {
+    return {
+      fetch: round(this.ms.fetch),
+      decrypt: round(this.ms.decrypt),
+      rank: round(this.ms.rank),
+      format: round(this.ms.format),
+      total: round(performance.now() - this.started),
+      entries: this.entries,
+      bytes: this.bytes,
+    }
+  }
+}
+
+/**
+ * Hand a tool body a Timer and attach what it measured to the result, on every
+ * path out of the body including refusals, so a slow failure is as visible as
+ * a slow success. The body's parameters after the timer are the tool's own
+ * parameters, so the wrapper changes nothing server.ts binds.
+ */
+const timed =
+  <A extends unknown[]>(body: (timer: Timer, ...args: A) => Promise<ToolResult>) =>
+  async (...args: A): Promise<ToolResult> => {
+    const timer = new Timer()
+    const r = await body(timer, ...args)
+    return { ...r, timings: timer.done() }
+  }
 
 /**
  * The client surface these tools actually use. Declared structurally, and
@@ -487,8 +574,16 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
    * server that answers the full namespace to `?view=entry`: everything is
    * decrypted and one key picked out of it.
    */
-  async function getViaPull(key: string, ns: string): Promise<ToolResult> {
-    const { entries, version } = await client.pull(ns)
+  /** `client.pull`, with its stage timings and entry count credited to the timer. */
+  async function pullTimed(timer: Timer, source: string): Promise<PullResult> {
+    const started = performance.now()
+    const r = await client.pull(source)
+    timer.pulled(r, performance.now() - started)
+    return r
+  }
+
+  async function getViaPull(timer: Timer, key: string, ns: string): Promise<ToolResult> {
+    const { entries, version } = await pullTimed(timer, ns)
     if (Object.keys(entries).length === 0) {
       const lost = await lostEntries(client, ns, version)
       if (lost) return fail(lost)
@@ -503,10 +598,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
 
   return {
     /** Persist one durable memory entry (encrypted before upload). */
-    async save(key: string, content: string, namespace?: string): Promise<ToolResult> {
+    save: timed(async (timer, key: string, content: string, namespace?: string) => {
       const ns = nsOf(namespace)
       try {
-        const r = await client.push(ns, { [key]: content })
+        const r = await timer.time('fetch', () => client.push(ns, { [key]: content }))
+        timer.entries = 1
         // A 2xx does not mean this key landed: the server refuses oversized and
         // malformed entries per key and reports them here. Match on the key
         // that was sent, since another key's refusal says nothing about this one.
@@ -523,166 +619,176 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         const d = denial(`Saving "${key}"`, ns, defaultNamespace, 'Nothing was stored.', e)
         return fail(d ?? `save failed: ${bounded((e as Error).message)}`)
       }
-    },
+    }),
 
     /** Rank stored memories by relevance to a natural-language query. */
-    async recall(
-      query: string,
-      namespace?: string,
-      limit = 5,
-      namespaces?: string[],
-    ): Promise<ToolResult> {
-      try {
-        if (namespaces && namespace !== undefined)
-          throw new Error('use either namespace or namespaces, not both')
-        if (namespaces && (namespaces.length === 0 || namespaces.length > 8))
-          throw new Error('namespaces must contain between 1 and 8 namespaces')
-        const sources = namespaces
-          ? [...new Set(namespaces.map(ns => validateNamespace(ns.trim())))]
-          : [nsOf(namespace)]
-        const ns = sources.join(', ')
-        const corpora = await Promise.all(
-          sources.map(async source => {
-            try {
-              const { entries, version } = await client.pull(source)
-              if (Object.keys(entries).length === 0) {
-                const lost = await lostEntries(client, source, version)
-                if (lost) throw new Rendered(lost)
+    recall: timed(
+      async (
+        timer,
+        query: string,
+        namespace?: string,
+        limit: number = 5,
+        namespaces?: string[],
+      ) => {
+        try {
+          if (namespaces && namespace !== undefined)
+            throw new Error('use either namespace or namespaces, not both')
+          if (namespaces && (namespaces.length === 0 || namespaces.length > 8))
+            throw new Error('namespaces must contain between 1 and 8 namespaces')
+          const sources = namespaces
+            ? [...new Set(namespaces.map(ns => validateNamespace(ns.trim())))]
+            : [nsOf(namespace)]
+          const ns = sources.join(', ')
+          const corpora = await Promise.all(
+            sources.map(async source => {
+              try {
+                const { entries, version } = await pullTimed(timer, source)
+                if (Object.keys(entries).length === 0) {
+                  const lost = await lostEntries(client, source, version)
+                  if (lost) throw new Rendered(lost)
+                }
+                return Object.entries(entries).map(([key, content]) => ({
+                  key,
+                  content,
+                  ...(namespaces ? { namespace: source } : {}),
+                }))
+              } catch (err) {
+                if (err instanceof Rendered) throw err
+                const d = denial(
+                  'Recalling memories',
+                  source,
+                  defaultNamespace,
+                  'No memories were read.',
+                  err,
+                )
+                if (d) throw new Rendered(d)
+                if (!namespaces) throw err
+                throw new Error(`could not read ${source}: ${bounded((err as Error).message)}`)
               }
-              return Object.entries(entries).map(([key, content]) => ({
-                key,
-                content,
-                ...(namespaces ? { namespace: source } : {}),
-              }))
-            } catch (err) {
-              if (err instanceof Rendered) throw err
-              const d = denial(
-                'Recalling memories',
-                source,
-                defaultNamespace,
-                'No memories were read.',
-                err,
-              )
-              if (d) throw new Rendered(d)
-              if (!namespaces) throw err
-              throw new Error(`could not read ${source}: ${bounded((err as Error).message)}`)
-            }
-          }),
-        )
-        const entries = corpora.flat()
-        if (entries.length === 0) return ok(`(no memory stored in ${ns} yet)`)
-        const {
-          results: ranked,
-          searched,
-          belowFloor,
-          trimmedByLimit,
-          reason,
-        } = rankEntriesDetailed(query, entries, limit)
-        if (ranked.length === 0 && searched === 0) {
-          // Entries exist but none of them is a ranking candidate, which today
-          // means the namespace holds nothing but its MEMORY.md index. "0
-          // entries searched" reads as an empty namespace and is how an agent
-          // concludes there is nothing here, when in fact the one thing here is
-          // the table of contents naming everything that was ever written.
-          return ok(
-            `(nothing in ${ns} was searched for "${query}": the namespace holds only its ` +
-              'MEMORY.md index, which recall does not rank. Call memory_get with key ' +
-              '"MEMORY.md" to read the index itself.)',
+            }),
           )
-        }
-        if (ranked.length === 0 && reason === 'no-content-terms') {
-          // Nothing was scored, so the below-floor count is 0 and reporting it
-          // would claim the corpus was searched and came back empty. It was
-          // not: the query was all function words.
-          return ok(
-            `(no searchable words in "${query}": every term is a function word the ranker ` +
-              `drops, so none of the ${searched} entr${searched === 1 ? 'y' : 'ies'} in ${ns} ` +
-              'was scored. Retry with the distinctive words you expect the entry to contain, ' +
-              'or call memory_list.)',
-          )
-        }
-        if (ranked.length === 0) {
-          // A bare miss is read as "this fact was never recorded", and the agent
-          // then saves it again under a second key that phase 1 has no way to
-          // reconcile with the first. So the miss says what was searched and
-          // names the next move. Per KTD-B the below-floor entries stay
-          // withheld: the count is a number and nothing more, because an entry
-          // the ranker judged irrelevant is not made relevant by summarizing it
-          // here, and leaking its key or text would spend the caller's context
-          // on exactly what the floor exists to keep out.
-          return ok(
-            `(nothing in ${ns} looks relevant to "${query}". ` +
-              `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
-              `${belowFloor} below the relevance floor and withheld. ` +
-              'Call memory_list before concluding the fact is unrecorded; ' +
-              'it may be stored under wording this query did not match.)',
-          )
-        }
-        // Regions, not bodies, and the aggregate budget is spent in rank order:
-        // the strongest hit gets its full per-hit allowance and whatever is left
-        // bounds the rest. Hits the budget cannot reach are reported by count
-        // rather than dropped silently, so the caller can tell a short answer
-        // from a truncated one.
-        //
-        // The budget covers the WHOLE returned string, not just the regions.
-        // Charging only the parts left the lead line, the tail and every "\n\n"
-        // joiner outside the bound, and a limit-20 recall measured 4,158 against
-        // a documented 4,000: a cap the output can exceed is not a cap. Both
-        // fixed pieces are reserved at their worst case (every hit omitted, so
-        // the tail is present and its count is as wide as it can get) because
-        // both lengths depend on numbers that are only known once the loop that
-        // spends the budget has finished.
-        const leadFor = (n: number) => `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}:\n\n`
-        // Two different reasons a relevant entry is missing, and both have to be
-        // reported. Only budget omissions were counted, so `limit` trimming was
-        // silent: a namespace with 15 entries above the floor and a limit of 5
-        // rendered identically to one holding exactly 5, and "5 relevant
-        // memories" reads as the whole answer. `belowFloor` cannot cover this,
-        // since it is computed before the slice and excludes limit trimming by
-        // definition, which is why the ranker now reports `trimmedByLimit`.
-        const REASON_BUDGET = 'the recall size cap was reached'
-        const REASON_LIMIT = 'more cleared the relevance floor than `limit` allows'
-        const REASON_BOTH = `${REASON_BUDGET}, and ${REASON_LIMIT}`
-        const tailFor = (n: number, why: string) =>
-          n
-            ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: ${why}. Call memory_list, then memory_get by key.)`
-            : ''
-        const parts: string[] = []
-        // Reserved at the worst case on BOTH axes, the widest count and the
-        // longest reason, because the cap covers the whole returned string and
-        // neither value is known until the loop below has finished.
-        let budget =
-          AGGREGATE_CHARS -
-          leadFor(ranked.length).length -
-          tailFor(ranked.length + trimmedByLimit, REASON_BOTH).length
-        let omitted = 0
-        for (const r of ranked) {
-          const header = `### ${r.key}${namespaces ? ` (${r.namespace})` : ''}\n`
-          const pointer =
-            `\n(region only; call memory_get with key "${r.key}"` +
-            `${namespaces ? ` and namespace "${r.namespace}"` : ''} for the full entry)`
-          const joiner = parts.length ? '\n\n'.length : 0
-          const allowed = Math.min(PER_HIT_CHARS, budget - joiner - header.length - pointer.length)
-          if (allowed < MIN_REGION_CHARS) {
-            omitted++
-            continue
+          const entries = corpora.flat()
+          if (entries.length === 0) return ok(`(no memory stored in ${ns} yet)`)
+          const {
+            results: ranked,
+            searched,
+            belowFloor,
+            trimmedByLimit,
+            reason,
+          } = await timer.time('rank', () => rankEntriesDetailed(query, entries, limit))
+          if (ranked.length === 0 && searched === 0) {
+            // Entries exist but none of them is a ranking candidate, which today
+            // means the namespace holds nothing but its MEMORY.md index. "0
+            // entries searched" reads as an empty namespace and is how an agent
+            // concludes there is nothing here, when in fact the one thing here is
+            // the table of contents naming everything that was ever written.
+            return ok(
+              `(nothing in ${ns} was searched for "${query}": the namespace holds only its ` +
+                'MEMORY.md index, which recall does not rank. Call memory_get with key ' +
+                '"MEMORY.md" to read the index itself.)',
+            )
           }
-          const region = regionFor(r.content, query, allowed)
-          const part = header + region.text + (region.partial ? pointer : '')
-          budget -= joiner + part.length
-          parts.push(part)
+          if (ranked.length === 0 && reason === 'no-content-terms') {
+            // Nothing was scored, so the below-floor count is 0 and reporting it
+            // would claim the corpus was searched and came back empty. It was
+            // not: the query was all function words.
+            return ok(
+              `(no searchable words in "${query}": every term is a function word the ranker ` +
+                `drops, so none of the ${searched} entr${searched === 1 ? 'y' : 'ies'} in ${ns} ` +
+                'was scored. Retry with the distinctive words you expect the entry to contain, ' +
+                'or call memory_list.)',
+            )
+          }
+          if (ranked.length === 0) {
+            // A bare miss is read as "this fact was never recorded", and the agent
+            // then saves it again under a second key that phase 1 has no way to
+            // reconcile with the first. So the miss says what was searched and
+            // names the next move. Per KTD-B the below-floor entries stay
+            // withheld: the count is a number and nothing more, because an entry
+            // the ranker judged irrelevant is not made relevant by summarizing it
+            // here, and leaking its key or text would spend the caller's context
+            // on exactly what the floor exists to keep out.
+            return ok(
+              `(nothing in ${ns} looks relevant to "${query}". ` +
+                `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
+                `${belowFloor} below the relevance floor and withheld. ` +
+                'Call memory_list before concluding the fact is unrecorded; ' +
+                'it may be stored under wording this query did not match.)',
+            )
+          }
+          // Regions, not bodies, and the aggregate budget is spent in rank order:
+          // the strongest hit gets its full per-hit allowance and whatever is left
+          // bounds the rest. Hits the budget cannot reach are reported by count
+          // rather than dropped silently, so the caller can tell a short answer
+          // from a truncated one.
+          //
+          // The budget covers the WHOLE returned string, not just the regions.
+          // Charging only the parts left the lead line, the tail and every "\n\n"
+          // joiner outside the bound, and a limit-20 recall measured 4,158 against
+          // a documented 4,000: a cap the output can exceed is not a cap. Both
+          // fixed pieces are reserved at their worst case (every hit omitted, so
+          // the tail is present and its count is as wide as it can get) because
+          // both lengths depend on numbers that are only known once the loop that
+          // spends the budget has finished.
+          const leadFor = (n: number) =>
+            `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}:\n\n`
+          // Two different reasons a relevant entry is missing, and both have to be
+          // reported. Only budget omissions were counted, so `limit` trimming was
+          // silent: a namespace with 15 entries above the floor and a limit of 5
+          // rendered identically to one holding exactly 5, and "5 relevant
+          // memories" reads as the whole answer. `belowFloor` cannot cover this,
+          // since it is computed before the slice and excludes limit trimming by
+          // definition, which is why the ranker now reports `trimmedByLimit`.
+          const REASON_BUDGET = 'the recall size cap was reached'
+          const REASON_LIMIT = 'more cleared the relevance floor than `limit` allows'
+          const REASON_BOTH = `${REASON_BUDGET}, and ${REASON_LIMIT}`
+          const tailFor = (n: number, why: string) =>
+            n
+              ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: ${why}. Call memory_list, then memory_get by key.)`
+              : ''
+          const parts: string[] = []
+          // Reserved at the worst case on BOTH axes, the widest count and the
+          // longest reason, because the cap covers the whole returned string and
+          // neither value is known until the loop below has finished.
+          let budget =
+            AGGREGATE_CHARS -
+            leadFor(ranked.length).length -
+            tailFor(ranked.length + trimmedByLimit, REASON_BOTH).length
+          let omitted = 0
+          const formatted = await timer.time('format', () => {
+            for (const r of ranked) {
+              const header = `### ${r.key}${namespaces ? ` (${r.namespace})` : ''}\n`
+              const pointer =
+                `\n(region only; call memory_get with key "${r.key}"` +
+                `${namespaces ? ` and namespace "${r.namespace}"` : ''} for the full entry)`
+              const joiner = parts.length ? '\n\n'.length : 0
+              const allowed = Math.min(
+                PER_HIT_CHARS,
+                budget - joiner - header.length - pointer.length,
+              )
+              if (allowed < MIN_REGION_CHARS) {
+                omitted++
+                continue
+              }
+              const region = regionFor(r.content, query, allowed)
+              const part = header + region.text + (region.partial ? pointer : '')
+              budget -= joiner + part.length
+              parts.push(part)
+            }
+            const shown = parts.length
+            const tail = tailFor(
+              omitted + trimmedByLimit,
+              omitted && trimmedByLimit ? REASON_BOTH : omitted ? REASON_BUDGET : REASON_LIMIT,
+            )
+            return `${leadFor(shown)}${parts.join('\n\n')}${tail}`
+          })
+          return ok(formatted)
+        } catch (e) {
+          if (e instanceof Rendered) return fail(e.message)
+          return fail(`recall failed: ${bounded((e as Error).message)}`)
         }
-        const shown = parts.length
-        const tail = tailFor(
-          omitted + trimmedByLimit,
-          omitted && trimmedByLimit ? REASON_BOTH : omitted ? REASON_BUDGET : REASON_LIMIT,
-        )
-        return ok(`${leadFor(shown)}${parts.join('\n\n')}${tail}`)
-      } catch (e) {
-        if (e instanceof Rendered) return fail(e.message)
-        return fail(`recall failed: ${bounded((e as Error).message)}`)
-      }
-    },
+      },
+    ),
 
     /**
      * Return one entry's full body, untruncated. This is the read affordance
@@ -716,12 +822,13 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
      * observes everything it decrypts. A save of some other key after only a
      * `get` therefore carries no base for it, as a first write never did.
      */
-    async get(key: string, namespace?: string): Promise<ToolResult> {
+    get: timed(async (timer, key: string, namespace?: string) => {
       const ns = nsOf(namespace)
       try {
         let body: string
         try {
-          body = await client.entry(ns, key)
+          body = await timer.time('fetch', () => client.entry(ns, key))
+          timer.entries = 1
         } catch (e) {
           if (e instanceof OpenRecallHttpError) {
             // The server's own `empty`: no manifest, nothing written yet.
@@ -733,7 +840,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             if (e.status === 503 && e.code === 'entry_unreadable')
               return fail(unreadableEntry(key, ns))
           }
-          if (e instanceof OpenRecallProtocolError) return getViaPull(key, ns)
+          if (e instanceof OpenRecallProtocolError) return getViaPull(timer, key, ns)
           throw e
         }
         return ok(`### ${key} (${ns})\n${body}`)
@@ -741,21 +848,23 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         const d = denial(`Reading "${key}"`, ns, defaultNamespace, 'Nothing was read.', e)
         return fail(d ?? `get failed: ${bounded((e as Error).message)}`)
       }
-    },
+    }),
 
     /** Literal substring/keyword search over keys and decrypted content. */
-    async search(query: string, namespace?: string): Promise<ToolResult> {
+    search: timed(async (timer, query: string, namespace?: string) => {
       const ns = nsOf(namespace)
       const needle = query.toLowerCase()
       try {
-        const { entries, version } = await client.pull(ns)
+        const { entries, version } = await pullTimed(timer, ns)
         if (Object.keys(entries).length === 0) {
           const lost = await lostEntries(client, ns, version)
           if (lost) return fail(lost)
         }
-        const hits = Object.entries(entries).filter(
-          ([key, content]) =>
-            key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle),
+        const hits = await timer.time('rank', () =>
+          Object.entries(entries).filter(
+            ([key, content]) =>
+              key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle),
+          ),
         )
         if (hits.length === 0) return ok(`no matches for "${query}" in ${ns}`)
         const body = hits.map(([key, content]) => `- ${key}: ${snippet(content)}`).join('\n')
@@ -764,14 +873,15 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         const d = denial('Searching memories', ns, defaultNamespace, 'No memories were read.', e)
         return fail(d ?? `search failed: ${bounded((e as Error).message)}`)
       }
-    },
+    }),
 
     /** List entry keys in a namespace (no content downloaded). */
-    async list(namespace?: string): Promise<ToolResult> {
+    list: timed(async (timer, namespace?: string) => {
       const ns = nsOf(namespace)
       try {
-        const hashes = await client.hashes(ns, { observe: false })
+        const hashes = await timer.time('fetch', () => client.hashes(ns, { observe: false }))
         const keys = Object.keys(hashes).sort()
+        timer.entries = keys.length
         if (keys.length === 0) return ok(`(${ns} is empty)`)
         return ok(
           `${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} in ${ns}:\n${keys.map(k => `- ${k}`).join('\n')}`,
@@ -780,18 +890,19 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         const d = denial('Listing entries', ns, defaultNamespace, 'No entry keys were read.', e)
         return fail(d ?? `list failed: ${bounded((e as Error).message)}`)
       }
-    },
+    }),
 
     /** Delete one entry. */
-    async delete(key: string, namespace?: string): Promise<ToolResult> {
+    delete: timed(async (timer, key: string, namespace?: string) => {
       const ns = nsOf(namespace)
       try {
-        await client.delete(ns, key)
+        await timer.time('fetch', () => client.delete(ns, key))
+        timer.entries = 1
         return ok(`deleted "${key}" from ${ns}`)
       } catch (e) {
         const d = denial(`Deleting "${key}"`, ns, defaultNamespace, `"${key}" is still stored.`, e)
         return fail(d ?? `delete failed: ${bounded((e as Error).message)}`)
       }
-    },
+    }),
   }
 }

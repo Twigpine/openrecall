@@ -10,7 +10,7 @@ import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { OpenRecallClient, OpenRecallProtocolError } from '../client/index.ts'
 import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
-import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
+import { type MemoryTools, makeTools, type ToolResult } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
 import { httpError, makeStubClient, StubClient } from './stub-client.ts'
 
@@ -1243,5 +1243,59 @@ describe('memory_get reads one entry, not the namespace', () => {
     const r = await makeTools(older, 'user:me').get('a.md')
     expect(r.isError).toBeUndefined()
     expect(r.text).toContain('body from the full view')
+  })
+})
+
+/**
+ * Every tool result says where its time went. The numbers themselves are not
+ * asserted (they are whatever this machine does today); their presence, their
+ * shape, and the fact that they never enter the text are.
+ */
+describe('every tool result carries stage timings', () => {
+  test('recall, get, list, save, search and delete report their stages', async () => {
+    // Its own namespace: the shared one is at the test server's 5-entry cap by
+    // now, and a refused save would make the get below read nothing.
+    const NS = 'user:me/timed'
+    expect(
+      (await tools.save('timed/a.md', 'A note about release timing and deploys.', NS)).isError,
+    ).toBeUndefined()
+    const checks: [string, ToolResult][] = [
+      ['recall', await tools.recall('release timing', NS)],
+      ['get', await tools.get('timed/a.md', NS)],
+      ['list', await tools.list(NS)],
+      ['save', await tools.save('timed/b.md', 'another note', NS)],
+      ['search', await tools.search('release', NS)],
+      ['delete', await tools.delete('timed/b.md', NS)],
+    ]
+    for (const [name, r] of checks) {
+      const t = r.timings
+      expect(`${name}: ${t !== undefined}`).toBe(`${name}: true`)
+      if (!t) continue
+      for (const v of Object.values(t)) expect(v).toBeGreaterThanOrEqual(0)
+      // The stages are measured inside the total; rounding is the only slack.
+      expect(t.total + 0.5).toBeGreaterThanOrEqual(t.fetch + t.decrypt + t.rank + t.format)
+      expect(r.text).not.toContain('timings')
+    }
+    const recall = checks[0]?.[1].timings
+    expect(recall?.entries).toBeGreaterThanOrEqual(1)
+    expect(recall?.bytes).toBeGreaterThan(0)
+    expect(checks[1]?.[1].timings?.entries).toBe(1)
+    expect(checks[2]?.[1].timings?.entries).toBeGreaterThanOrEqual(1)
+  })
+
+  test('a refusal is timed too', async () => {
+    const stub = new StubClient()
+    stub.error = httpError(401, 'unauthorized')
+    const r = await makeTools(stub, 'user:me').recall('anything')
+    expect(r.isError).toBe(true)
+    expect(r.timings?.total).toBeGreaterThanOrEqual(0)
+  })
+
+  test('a client without its own breakdown is charged to fetch', async () => {
+    const r = await makeTools(makeStubClient({ 'a.md': 'alpha beta' }), 'user:me').recall('alpha')
+    const t = r.timings
+    expect(t?.decrypt).toBe(0)
+    expect(t?.bytes).toBe(0)
+    expect(t?.entries).toBe(1)
   })
 })

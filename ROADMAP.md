@@ -79,6 +79,9 @@ the hosted beta runs exactly one machine (`min_machines_running = 1`).
   version checks. That enables horizontal scale and high availability.
 - Local mode is unaffected. It serializes across processes with a lock on
   disk.
+- Latency targets for the memory tools, and how to measure them, are in
+  [docs/performance.md](docs/performance.md); `openrecall status --timings`
+  prints the per-stage breakdown.
 
 ## Later
 

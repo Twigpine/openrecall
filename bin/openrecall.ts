@@ -5,7 +5,7 @@
  * Usage:
  *   openrecall init [--url <local|https://…>] [--namespace <ns>] [--api-key <key>]
  *   openrecall setup [agent…|all] [--write] [--npx]
- *   openrecall status
+ *   openrecall status [--timings]       show config, check the store, measure recall per stage
  *   openrecall card <owner> [url]         print the service paste-in card + a new passphrase
  *   openrecall push <dir> [namespace]   encrypt + upload changed .md entries
  *   openrecall pull <dir> [namespace]   download + decrypt into <dir>
@@ -35,6 +35,7 @@ import {
   validateUrl,
   writeConfigFile,
 } from '../src/cli/settings.ts'
+import type { Timings } from '../src/mcp/tools.ts'
 import { validateNamespace } from '../src/namespace.ts'
 import { version } from '../src/version.ts'
 
@@ -123,7 +124,7 @@ async function cmdInit(args: Args) {
   console.log('\nnext: openrecall setup        # connect your agents')
 }
 
-async function cmdStatus() {
+async function cmdStatus(timings: boolean) {
   const s = resolveSettings()
   console.log(
     `config     ${s.configPath}${configTooOpen(s.configPath) ? '  ⚠ readable by others — chmod 600' : ''}`,
@@ -141,6 +142,62 @@ async function cmdStatus() {
   const hashes = await client.hashes(s.namespace)
   const n = Object.keys(hashes).length
   console.log(`\nok — ${n} ${n === 1 ? 'entry' : 'entries'} in ${s.namespace}`)
+  if (timings) await printTimings(client, s.namespace, n)
+}
+
+/**
+ * The warm-recall latency targets, in milliseconds, at the namespace entry
+ * cap; see docs/performance.md. Below the cap the measurement is informational
+ * because a small namespace cannot fail a target set for a full one.
+ */
+const SLO = { entries: 2000, p50Ms: 50, p95Ms: 200 }
+
+/**
+ * `status --timings`: run recall once cold and eleven times warm against the
+ * pinned namespace and print where the time goes per stage. The recall text is
+ * never printed: it is memory content, and this is a diagnostic. The probe is
+ * generic on purpose, so the numbers describe the namespace and not one lucky
+ * query.
+ */
+async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: string, n: number) {
+  const { makeTools } = await import('../src/mcp/tools.ts')
+  const tools = makeTools(client, ns)
+  const probe = 'project conventions and user preferences'
+  const sample = async () => {
+    const r = await tools.recall(probe)
+    if (!r.timings) throw new Error('recall returned no timings')
+    return r.timings
+  }
+  const cold = await sample()
+  const warm: Timings[] = []
+  for (let i = 0; i < 11; i++) warm.push(await sample())
+  const stages = ['fetch', 'decrypt', 'rank', 'format', 'total'] as const
+  const sorted = (stage: (typeof stages)[number]) => warm.map(t => t[stage]).sort((a, b) => a - b)
+  const median = (xs: number[]) => xs[Math.floor(xs.length / 2)] as number
+  // With eleven samples the 95th percentile is the second largest.
+  const p95 = (xs: number[]) => xs[Math.floor(0.95 * (xs.length - 1))] as number
+  const fmt = (ms: number) => `${ms.toFixed(1).padStart(8)} ms`
+  console.log(`\nrecall timings over ${cold.entries} entries, ${cold.bytes} bytes fetched per call`)
+  console.log(
+    `${'stage'.padEnd(8)}${'cold'.padStart(11)}${'warm p50'.padStart(11)}${'warm p95'.padStart(11)}`,
+  )
+  for (const stage of stages) {
+    const xs = sorted(stage)
+    console.log(`${stage.padEnd(8)}${fmt(cold[stage])}${fmt(median(xs))}${fmt(p95(xs))}`)
+  }
+  const totals = sorted('total')
+  const p50 = median(totals)
+  const p95Total = p95(totals)
+  if (n >= SLO.entries) {
+    const pass = p50 <= SLO.p50Ms && p95Total <= SLO.p95Ms
+    console.log(
+      `SLO ${pass ? 'PASS' : 'FAIL'}: warm p50 ${p50.toFixed(1)} ms (target ≤ ${SLO.p50Ms}), p95 ${p95Total.toFixed(1)} ms (target ≤ ${SLO.p95Ms})`,
+    )
+  } else {
+    console.log(
+      `SLO informational (${n} entries; targets are defined at ${SLO.entries}: warm p50 ≤ ${SLO.p50Ms} ms, p95 ≤ ${SLO.p95Ms} ms)`,
+    )
+  }
 }
 
 async function cmdPush(dir: string, namespace?: string) {
@@ -263,7 +320,7 @@ try {
       break
     }
     case 'status':
-      await cmdStatus()
+      await cmdStatus(args.flags.timings === true)
       break
     case 'push':
       if (!a) usage()
@@ -311,7 +368,7 @@ function usage(code = 1): never {
       '                                       create ~/.openrecall/config.json (keeps your passphrase)\n' +
       '  openrecall setup [agent…|all] [--write] [--npx]\n' +
       '                                       connect Claude Code, Zero, OpenClaude, Codex, Cursor, …\n' +
-      '  openrecall status                    show config and check the store\n' +
+      '  openrecall status [--timings]        show config and check the store; --timings measures recall per stage\n' +
       '  openrecall card <owner> [url]        print the service paste-in card + a new passphrase\n' +
       '  openrecall push <dir> [namespace]    encrypt + upload changed .md entries\n' +
       '  openrecall pull <dir> [namespace]    download + decrypt into <dir>\n' +
