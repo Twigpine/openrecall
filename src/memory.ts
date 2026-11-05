@@ -274,7 +274,10 @@ export async function upsert(
         skipped.push({ key, reason: 'invalid_key' })
         continue
       }
-      if (m.entries[key]) {
+      // Object.hasOwn, not truthiness: `m.entries[key]` resolves inherited
+      // names like `constructor` from Object.prototype, which would report a
+      // deletion (and bump the version) for a key that was never stored.
+      if (Object.hasOwn(m.entries, key)) {
         touched.add(key)
         delete m.entries[key]
         deleted.push(key)
@@ -362,7 +365,7 @@ export async function upsert(
       // A key listed in both deletions and entries is projected as a delete and
       // then re-added, so reporting it in both arrays tells a client mirroring
       // `deleted` to drop a file the same response says it stored.
-      deleted: deleted.filter(k => !(k in m.entries)),
+      deleted: deleted.filter(k => !Object.hasOwn(m.entries, k)),
       skipped,
     }
   })
