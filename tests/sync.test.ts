@@ -1,8 +1,8 @@
 /**
  * `openrecall sync` — the directory ↔ namespace mirror.
  *
- * The pure half (planning, walking, path guarding, debouncing) is tested
- * directly. The running half is tested against the REAL stack: an
+ * The pure half (planning, walking, path guarding, debouncing, report labels)
+ * is tested directly. The running half is tested against the REAL stack: an
  * OpenRecallClient over local mode, which serves the production handler from
  * the production store with the production crypto. Nothing here stubs the
  * client or the server, because the properties that matter — deterministic
@@ -11,10 +11,22 @@
  * quietly re-implement wrongly.
  */
 
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdirSync, mkdtempSync, rmSync, statSync, utimesSync, writeFileSync } from 'node:fs'
+import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+  utimesSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { _reset } from '../src/ratelimit.ts'
 
 const PASSPHRASE = 'sync test passphrase'
 
@@ -32,23 +44,36 @@ function put(dir: string, key: string, content: string, mtimeMs?: number): strin
   const path = join(dir, ...key.split('/'))
   mkdirSync(dirname(path), { recursive: true })
   writeFileSync(path, content)
-  if (mtimeMs !== undefined) utimesSync(path, new Date(mtimeMs), new Date(mtimeMs))
+  touch(path, mtimeMs)
   return path
+}
+
+/** Pin an existing file's mtime without changing its bytes. */
+function touch(path: string, mtimeMs?: number): void {
+  if (mtimeMs !== undefined) utimesSync(path, new Date(mtimeMs), new Date(mtimeMs))
 }
 
 let runSync: typeof import('../src/cli/sync.ts').runSync
 let planSync: typeof import('../src/cli/sync.ts').planSync
+let listMemoryFiles: typeof import('../src/cli/sync.ts').listMemoryFiles
 let walkMemoryFiles: typeof import('../src/cli/sync.ts').walkMemoryFiles
 let safeJoin: typeof import('../src/cli/sync.ts').safeJoin
 let makeDebouncer: typeof import('../src/cli/sync.ts').makeDebouncer
+let formatSyncReport: typeof import('../src/cli/sync.ts').formatSyncReport
 let OpenRecallClient: typeof import('../client/index.ts').OpenRecallClient
 let LOCAL_ORIGIN: string
 let localFetch: typeof import('../src/cli/local.ts').localFetch
 
 beforeAll(async () => {
-  ;({ runSync, planSync, walkMemoryFiles, safeJoin, makeDebouncer } = await import(
-    '../src/cli/sync.ts'
-  ))
+  ;({
+    runSync,
+    planSync,
+    listMemoryFiles,
+    walkMemoryFiles,
+    safeJoin,
+    makeDebouncer,
+    formatSyncReport,
+  } = await import('../src/cli/sync.ts'))
   ;({ OpenRecallClient } = await import('../client/index.ts'))
   ;({ LOCAL_ORIGIN, localFetch } = await import('../src/cli/local.ts'))
 })
@@ -56,6 +81,11 @@ beforeAll(async () => {
 afterAll(() => {
   for (const d of dirs) rmSync(d, { recursive: true, force: true })
 })
+
+// Local mode authenticates as the shared anonymous owner, and bun runs every
+// test file in one process. Leaving this suite's hundreds of requests in that
+// bucket would 429 the next HTTP suite, so clear it between tests.
+afterEach(() => _reset())
 
 /** A real client over the real in-process server, on the suite's store. */
 async function realClient(): Promise<InstanceType<typeof OpenRecallClient>> {
@@ -65,7 +95,7 @@ async function realClient(): Promise<InstanceType<typeof OpenRecallClient>> {
 
 // ─── Pure: walking and path guarding ─────────────────────────────────────
 
-describe('walkMemoryFiles', () => {
+describe('memory file listing', () => {
   test('walks every depth — pull writes deep keys, so the walker may not cap depth', async () => {
     const dir = tempDir()
     put(dir, 'MEMORY.md', 'index')
@@ -77,6 +107,21 @@ describe('walkMemoryFiles', () => {
       'MEMORY.md',
       'projects/openrecall/decisions/2026/deep.md',
     ])
+  })
+
+  test('distinguishes a failed listing from a successfully empty directory', async () => {
+    expect(await listMemoryFiles(join(tempDir(), 'nope'))).toEqual({
+      files: [],
+      complete: false,
+    })
+    expect(await listMemoryFiles(tempDir())).toEqual({ files: [], complete: true })
+  })
+
+  test('a directory named *.md is not a memory file', async () => {
+    const dir = tempDir()
+    mkdirSync(join(dir, 'notes.md'))
+    put(dir, 'real.md', 'real')
+    expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
   })
 
   test('an unreadable or missing directory is empty, not an error', async () => {
@@ -95,6 +140,7 @@ describe('safeJoin', () => {
   test('refuses a key that would leave the root', () => {
     expect(safeJoin(root, '../escape.md')).toBeNull()
     expect(safeJoin(root, 'a/../../escape.md')).toBeNull()
+    expect(safeJoin(root, '')).toBeNull()
   })
 })
 
@@ -145,6 +191,28 @@ describe('planSync', () => {
     expect(newerLocal.actions).toEqual([{ kind: 'upload', key: 'a.md', reason: 'local-newer' }])
   })
 
+  test('a baseline makes a one-sided change win even against a later clock', () => {
+    // Local bytes are still the baseline; only its mtime moved. The remote
+    // write is the real change, so it wins.
+    const remoteChanged = planSync({
+      local: { 'a.md': { hash: 'h1', mtimeMs: T0 + 86_400_000 } },
+      remote: { 'a.md': { hash: 'h2', updatedAt: new Date(T0).toISOString() } },
+      baselines: { 'a.md': 'h1' },
+    })
+    expect(remoteChanged.actions).toEqual([
+      { kind: 'download', key: 'a.md', reason: 'remote-newer', remoteAt: T0 },
+    ])
+
+    // Remote bytes are still the baseline; only the local file changed. A
+    // remote timestamp later than the local edit is not evidence about content.
+    const localChanged = planSync({
+      local: { 'a.md': { hash: 'h2', mtimeMs: T0 } },
+      remote: { 'a.md': { hash: 'h1', updatedAt: new Date(T0 + 86_400_000).toISOString() } },
+      baselines: { 'a.md': 'h1' },
+    })
+    expect(localChanged.actions).toEqual([{ kind: 'upload', key: 'a.md', reason: 'local-newer' }])
+  })
+
   test('an exact tie goes to the local working copy', () => {
     const plan = planSync({
       local: { 'a.md': { hash: 'h1', mtimeMs: T0 } },
@@ -179,15 +247,32 @@ describe('planSync', () => {
     ])
   })
 
-  test('a remote-only key prunes only when this pair previously held it locally', () => {
+  test('a remote deletion is surfaced, restored, or applied only on request', () => {
+    const base = {
+      local: { 'a.md': { hash: 'h1', mtimeMs: T0 } },
+      remote: {} as Record<string, { hash: string; updatedAt?: string }>,
+      baselines: { 'a.md': 'h1' },
+    }
+    expect(planSync(base).actions).toEqual([{ kind: 'remote-deleted', key: 'a.md' }])
+    expect(planSync({ ...base, prefer: 'local' }).actions).toEqual([
+      { kind: 'upload', key: 'a.md', reason: 'prefer-local' },
+    ])
+    expect(planSync({ ...base, prefer: 'remote' }).actions).toEqual([
+      { kind: 'remove-local', key: 'a.md' },
+    ])
+  })
+
+  test('a remote-only key prunes only when the baseline hash still matches', () => {
     const base = {
       local: {} as Record<string, { hash: string; mtimeMs: number }>,
       remote: {
         'known.md': { hash: 'h1', updatedAt: new Date(T0).toISOString() },
         'new-remote.md': { hash: 'h2', updatedAt: new Date(T0).toISOString() },
       },
+      baselines: { 'known.md': 'h1' },
+      prune: true,
     }
-    const guarded = planSync({ ...base, prunableKeys: ['known.md'] })
+    const guarded = planSync(base)
     expect(guarded.actions).toContainEqual({ kind: 'prune', key: 'known.md' })
     expect(guarded.actions).toContainEqual({
       kind: 'download',
@@ -196,15 +281,70 @@ describe('planSync', () => {
       remoteAt: T0,
     })
 
+    // A newer remote write under a previously-synced key is downloaded, not
+    // deleted. The hash check is what protects the concurrent write.
+    const changed = planSync({
+      ...base,
+      remote: { 'known.md': { hash: 'h2', updatedAt: new Date(T0).toISOString() } },
+    })
+    expect(changed.actions).toEqual([
+      { kind: 'download', key: 'known.md', reason: 'remote-newer', remoteAt: T0 },
+    ])
+
     // Without the state list, the previously-known key is a download too: the
     // guard, not the flag, is what makes pruning safe.
-    const unguarded = planSync(base)
+    const unguarded = planSync({ ...base, baselines: {} })
     expect(unguarded.actions).toContainEqual({
       kind: 'download',
       key: 'known.md',
       reason: 'local-missing',
       remoteAt: T0,
     })
+
+    // Legacy state can prove the key was local but not its hash, so it cannot
+    // approve a delete either.
+    const legacy = planSync({ ...base, baselines: { 'known.md': null } })
+    expect(legacy.actions).toContainEqual({
+      kind: 'download',
+      key: 'known.md',
+      reason: 'local-missing',
+      remoteAt: T0,
+    })
+  })
+})
+
+describe('formatSyncReport', () => {
+  const report = {
+    namespace: 'user:report',
+    dryRun: false,
+    uploaded: [],
+    downloaded: [],
+    unchanged: [],
+    unresolved: [],
+    pruned: [],
+    remoteDeleted: [],
+    removedLocal: [],
+    skipped: [],
+    downloadSkipped: [],
+  }
+
+  test('a vanished download says "not downloaded", not "not stored"', () => {
+    const { out, err } = formatSyncReport(
+      { ...report, downloadSkipped: [{ key: 'gone.md', reason: 'vanished' }] },
+      '/tmp/memories',
+    )
+    expect(out.join('\n')).toContain('sync user:report')
+    expect(err.join('\n')).toContain('gone.md not downloaded (vanished)')
+    expect(err.join('\n')).not.toContain('not stored')
+  })
+
+  test('a store refusal keeps the "not stored" label', () => {
+    const { err } = formatSyncReport(
+      { ...report, skipped: [{ key: 'bad.md', reason: 'invalid_key' }] },
+      '/tmp/memories',
+    )
+    expect(err.join('\n')).toContain('bad.md not stored (invalid_key)')
+    expect(err.join('\n')).not.toContain('not downloaded')
   })
 })
 
@@ -331,7 +471,7 @@ async function readFileUtf8(dir: string, key: string): Promise<string> {
   return readFile(join(dir, ...key.split('/')), 'utf8')
 }
 
-describe('runSync conflict resolution, by real timestamps', () => {
+describe('runSync conflict resolution, by baseline and real timestamps', () => {
   test('a locally-newer file wins and reaches the server', async () => {
     const ns = 'user:sync-conflict-local'
     const dir = tempDir()
@@ -371,6 +511,74 @@ describe('runSync conflict resolution, by real timestamps', () => {
     expect(await readFileUtf8(dir, 'note.md')).toBe('agent rewrote it')
   })
 
+  test('an unchanged local file cannot overwrite a newer remote entry by mtime alone', async () => {
+    const ns = 'user:sync-baseline-clock'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const path = put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'agent wrote this' })
+    // The bytes are still the baseline; only the local mtime is ahead. Without
+    // a per-key hash baseline, this clock skew would upload v1 over the agent.
+    touch(path, Date.now() + 86_400_000)
+
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.uploaded).toEqual([])
+    expect(r.downloaded).toEqual([{ key: 'note.md', reason: 'remote-newer' }])
+    expect(await readFileUtf8(dir, 'note.md')).toBe('agent wrote this')
+  })
+
+  test('a stale remote timestamp cannot overwrite a real local edit', async () => {
+    const ns = 'user:sync-baseline-remote-time'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    // The remote bytes are unchanged (still the baseline); only the local file
+    // changed. Its old mtime must not hand the win to the unchanged remote.
+    put(dir, 'note.md', 'human edit', Date.parse('2001-01-01T00:00:00.000Z'))
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.uploaded).toEqual([{ key: 'note.md', reason: 'local-newer' }])
+    expect((await (await realClient()).pull(ns)).entries['note.md']).toBe('human edit')
+  })
+
+  test('two conflicting keys each resolve against their own timestamps', async () => {
+    const ns = 'user:sync-two-conflicts'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'a.md', 'a1')
+    put(dir, 'b.md', 'b1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    // Two separate remote writes give the two keys distinct server times.
+    const other = await realClient()
+    await other.push(ns, { 'a.md': 'remote a' })
+    await new Promise(r => setTimeout(r, 30))
+    await other.push(ns, { 'b.md': 'remote b' })
+
+    const meta = await other.metadata(ns)
+    const aAt = Date.parse(meta.entryUpdatedAt['a.md'] as string)
+    const bAt = Date.parse(meta.entryUpdatedAt['b.md'] as string)
+    // With one shared clock reading for both keys a swap could hide; the test
+    // depends on the two remote times being genuinely ordered.
+    expect(bAt).toBeGreaterThan(aAt)
+    const between = Math.floor((aAt + bAt) / 2)
+    put(dir, 'a.md', 'local a', between)
+    put(dir, 'b.md', 'local b', between)
+
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.uploaded).toEqual([{ key: 'a.md', reason: 'local-newer' }])
+    expect(r.downloaded).toEqual([{ key: 'b.md', reason: 'remote-newer' }])
+    expect(await readFileUtf8(dir, 'a.md')).toBe('local a')
+    expect(await readFileUtf8(dir, 'b.md')).toBe('remote b')
+  })
+
   test('dry run plans the work and writes nothing', async () => {
     const ns = 'user:sync-dryrun'
     const dir = tempDir()
@@ -394,8 +602,72 @@ describe('runSync conflict resolution, by real timestamps', () => {
     const entries = (await (await realClient()).pull(ns)).entries
     expect(entries['a.md']).toBe('v1')
     expect(Object.hasOwn(entries, 'remote-new.md')).toBe(true)
-    const { existsSync } = await import('node:fs')
     expect(existsSync(join(dir, 'remote-new.md'))).toBe(false)
+  })
+
+  test('a file changed while its download is in flight is not overwritten', async () => {
+    const ns = 'user:sync-race'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const path = put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'remote v2' })
+    touch(path, Date.parse('2001-01-01T00:00:00.000Z'))
+
+    let releaseEntry: (() => void) | undefined
+    const entryGate = new Promise<void>(resolve => {
+      releaseEntry = resolve
+    })
+    let entryStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      entryStarted = resolve
+    })
+    const delayed = new Proxy(client, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'entry') {
+          return async (...args: unknown[]) => {
+            entryStarted?.()
+            await entryGate
+            return (value as (...a: unknown[]) => Promise<string>).call(target, ...args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as InstanceType<typeof OpenRecallClient>
+
+    const run = runSync(dir, delayed, { namespace: ns, statePath: state })
+    await started
+    put(dir, 'note.md', 'edited during the fetch')
+    releaseEntry?.()
+    const r = await run
+
+    expect(r.downloadSkipped).toEqual([{ key: 'note.md', reason: 'local-changed' }])
+    expect(await readFileUtf8(dir, 'note.md')).toBe('edited during the fetch')
+    expect((await (await realClient()).pull(ns)).entries['note.md']).toBe('remote v2')
+  })
+
+  test('a downloaded symlink cannot write through to a file outside the mirror', async () => {
+    const ns = 'user:sync-symlink-download'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const outside = join(tempDir(), 'outside.md')
+    writeFileSync(outside, 'do not touch')
+    touch(outside, Date.parse('2001-01-01T00:00:00.000Z'))
+    const link = join(dir, 'evil.md')
+    symlinkSync(outside, link)
+
+    const other = await realClient()
+    await other.push(ns, { 'evil.md': 'remote content' })
+
+    const client = await realClient()
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.downloadSkipped).toEqual([{ key: 'evil.md', reason: 'unsafe_key' }])
+    expect(readFileSync(outside, 'utf8')).toBe('do not touch')
+    expect(lstatSync(link).isSymbolicLink()).toBe(true)
   })
 })
 
@@ -409,13 +681,15 @@ describe('runSync --prune, guarded by pair state', () => {
     const client = await realClient()
     await runSync(dir, client, { namespace: ns, statePath: state })
 
-    // The state file now names both keys for THIS (dir, namespace) pair.
-    const { readFileSync, existsSync } = await import('node:fs')
+    // The state file now names both keys for THIS (dir, namespace) pair, with
+    // the remote hash each key had when the sync succeeded.
     const stateKey = await syncStateKeyOf(dir, ns)
     const recorded = JSON.parse(readFileSync(state, 'utf8')) as {
-      pairs: Record<string, string[]>
+      pairs: Record<string, Record<string, string | null>>
     }
-    expect(recorded.pairs[stateKey]).toEqual(['gone.md', 'keep.md'])
+    expect(Object.keys(recorded.pairs[stateKey] ?? {}).sort()).toEqual(['gone.md', 'keep.md'])
+    for (const hash of Object.values(recorded.pairs[stateKey] ?? {}))
+      expect(hash).toMatch(/^sha256:/)
 
     // The local file disappears, and a colleague's agent saves something new
     // remotely that this directory has never seen.
@@ -434,6 +708,55 @@ describe('runSync --prune, guarded by pair state', () => {
     expect(Object.keys(entries).sort()).toEqual(['colleague.md', 'keep.md'])
     expect(existsSync(join(dir, 'colleague.md'))).toBe(true)
     expect(existsSync(join(dir, 'gone.md'))).toBe(false)
+  })
+
+  test('a remote write under a locally deleted key is downloaded, not pruned', async () => {
+    const ns = 'user:sync-prune-changed'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    // The local file is deleted, but a remote agent writes a newer version
+    // before the prune runs. Deleting it would destroy that write.
+    rmSync(join(dir, 'note.md'))
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'v2 from another agent' })
+
+    const r = await runSync(dir, client, { namespace: ns, statePath: state, prune: true })
+    expect(r.pruned).toEqual([])
+    expect(r.downloaded).toEqual([{ key: 'note.md', reason: 'remote-newer' }])
+    expect(await readFileUtf8(dir, 'note.md')).toBe('v2 from another agent')
+    expect((await other.pull(ns)).entries['note.md']).toBe('v2 from another agent')
+  })
+
+  test('a missing root with --prune deletes nothing', async () => {
+    const ns = 'user:sync-prune-missing-root'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'a.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    rmSync(dir, { recursive: true, force: true })
+    const r = await runSync(dir, client, { namespace: ns, statePath: state, prune: true })
+    expect(r.pruned).toEqual([])
+    expect((await (await realClient()).pull(ns)).entries['a.md']).toBe('v1')
+  })
+
+  test('an existing empty directory still prunes recorded keys', async () => {
+    const ns = 'user:sync-prune-empty'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'a.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    rmSync(join(dir, 'a.md'))
+    const r = await runSync(dir, client, { namespace: ns, statePath: state, prune: true })
+    expect(r.pruned).toEqual(['a.md'])
+    expect(Object.keys((await (await realClient()).pull(ns)).entries)).toEqual([])
   })
 
   test('without --prune a deleted local file leaves the remote entry alone', async () => {
@@ -463,6 +786,89 @@ describe('runSync --prune, guarded by pair state', () => {
     expect(r.pruned).toEqual([])
     expect(r.downloaded.map(d => d.key)).toEqual(['saved-remotely.md'])
     expect(await readFileUtf8(dir, 'saved-remotely.md')).toBe('never local')
+  })
+})
+
+describe('runSync remote deletions', () => {
+  test('a remote deletion is surfaced instead of being re-uploaded', async () => {
+    const ns = 'user:sync-remote-delete'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'keep.md', 'kept')
+    put(dir, 'gone.md', 'deleted remotely later')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.delete(ns, 'gone.md')
+
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.remoteDeleted).toEqual(['gone.md'])
+    expect(r.uploaded).toEqual([])
+    expect(r.downloaded).toEqual([])
+    expect(existsSync(join(dir, 'gone.md'))).toBe(true)
+  })
+
+  test('--prefer remote applies a remote deletion; --prefer local restores it', async () => {
+    const ns = 'user:sync-remote-delete-prefer'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'gone.md', 'local copy')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.delete(ns, 'gone.md')
+
+    const restore = await runSync(dir, client, {
+      namespace: ns,
+      statePath: state,
+      prefer: 'local',
+    })
+    expect(restore.uploaded).toEqual([{ key: 'gone.md', reason: 'prefer-local' }])
+    expect((await other.pull(ns)).entries['gone.md']).toBe('local copy')
+
+    await other.delete(ns, 'gone.md')
+    const remove = await runSync(dir, client, {
+      namespace: ns,
+      statePath: state,
+      prefer: 'remote',
+    })
+    expect(remove.removedLocal).toEqual(['gone.md'])
+    expect(existsSync(join(dir, 'gone.md'))).toBe(false)
+    expect(Object.keys((await other.pull(ns)).entries)).toEqual([])
+  })
+})
+
+describe('client.pull observation', () => {
+  test('observe: false keeps the metadata base, so a concurrent write is refused', async () => {
+    const ns = 'user:sync-pull-observe'
+    const client = await realClient()
+    await client.push(ns, { 'note.md': 'v1' })
+    await client.metadata(ns)
+
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'v2' })
+
+    const pulled = await client.pull(ns, { observe: false })
+    expect(pulled.entries['note.md']).toBe('v2')
+    // The base is still v1, so the delete must lose to the concurrent write.
+    await expect(client.delete(ns, 'note.md')).rejects.toThrow()
+    expect((await other.pull(ns)).entries['note.md']).toBe('v2')
+  })
+
+  test('a normal pull updates the base and the delete succeeds', async () => {
+    const ns = 'user:sync-pull-observe-control'
+    const client = await realClient()
+    await client.push(ns, { 'note.md': 'v1' })
+    await client.metadata(ns)
+
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'v2' })
+
+    expect((await client.pull(ns)).entries['note.md']).toBe('v2')
+    await client.delete(ns, 'note.md')
+    expect(Object.keys((await other.pull(ns)).entries)).toEqual([])
   })
 })
 

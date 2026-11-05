@@ -153,9 +153,13 @@ openrecall sync ~/memories --prune --watch # also propagate local deletions
 ```
 
 Per entry the newest write wins, decided by the server's per-entry write times
-against the file's mtime; unchanged entries transfer nothing. `--prune` only
-deletes an entry when a previous sync of the same directory saw its file, so
-another agent's saves are downloaded, never destroyed. See
+against the file's mtime; unchanged entries transfer nothing, and the state
+file's last-synced hash keeps clock skew from looking like a new edit. `--prune` only
+deletes a remote entry when a previous sync of the same directory recorded its
+file AND the remote hash still matches that recording, so another agent's
+concurrent saves are downloaded, never destroyed. A remote deletion is
+reported and the local file is kept; `--prefer remote` applies the deletion
+while `--prefer local` restores the file. See
 [README](../README.md#mirror-a-memory-directory) for the full contract.
 
 ## Troubleshooting

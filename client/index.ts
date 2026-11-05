@@ -497,8 +497,16 @@ export class OpenRecallClient {
     }
   }
 
-  /** Pull and decrypt all entries for a namespace. */
-  async pull(namespace: string): Promise<PullResult> {
+  /**
+   * Pull and decrypt all entries for a namespace.
+   *
+   * Records the decrypted keys as this client's write base, exactly like the
+   * caller-requested read it is. A caller that is only fetching bodies for a
+   * plan built from an earlier metadata read passes `observe: false`: the
+   * earlier read must stay the base, or a write that lands between the two
+   * reads would be silently overwritten instead of refused.
+   */
+  async pull(namespace: string, opts: { observe?: boolean } = {}): Promise<PullResult> {
     const res = await this.request('pull', namespace, this.endpoint(namespace), {
       headers: this.headers(),
     })
@@ -509,7 +517,9 @@ export class OpenRecallClient {
       // Enumerated, unlike every other pull: `empty` means no manifest exists,
       // so there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
-      lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      if (opts.observe !== false) {
+        lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      }
       return { namespace, version: 0, entries: {}, updatedAt: {} }
     }
     if (!res.ok) throw httpError(res)
@@ -544,7 +554,9 @@ export class OpenRecallClient {
       }
       seen[entryKey] = ciphertextHash(b64)
     }
-    lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
+    if (opts.observe !== false) {
+      lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
+    }
     return {
       namespace,
       version: data.version,

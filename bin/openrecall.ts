@@ -37,7 +37,14 @@ import {
   validateUrl,
   writeConfigFile,
 } from '../src/cli/settings.ts'
-import { runSync, type SyncReport, walkMemoryFiles, watchDirectory } from '../src/cli/sync.ts'
+import {
+  formatSyncReport,
+  runSync,
+  type SyncReport,
+  type WatchHandle,
+  walkMemoryFiles,
+  watchDirectory,
+} from '../src/cli/sync.ts'
 import { validateNamespace } from '../src/namespace.ts'
 import { version } from '../src/version.ts'
 
@@ -177,42 +184,23 @@ async function cmdPull(dir: string, namespace?: string) {
   console.log(`pulled ${ns} v${r.version}: ${n} files → ${dir}`)
 }
 
-const UPLOAD_REASONS: Record<string, string> = {
-  'remote-missing': 'new',
-  'local-newer': 'local newer',
-  'prefer-local': 'preferred local',
-}
-const DOWNLOAD_REASONS: Record<string, string> = {
-  'local-missing': 'new',
-  'remote-newer': 'remote newer',
-  'prefer-remote': 'preferred remote',
-}
-
+/**
+ * Print a sync report: primary results on stdout, warnings/refusals on stderr
+ * so stdout stays pipeable.
+ */
 function printSyncReport(r: SyncReport, dir: string) {
-  const summary = [
-    `${r.uploaded.length} uploaded`,
-    `${r.downloaded.length} downloaded`,
-    `${r.unchanged.length} unchanged`,
-  ]
-  if (r.pruned.length) summary.push(`${r.pruned.length} pruned`)
-  console.log(`${r.dryRun ? 'dry run — ' : ''}sync ${r.namespace} ↔ ${dir}: ${summary.join(', ')}`)
-  for (const u of r.uploaded) console.log(`  ↑ ${u.key} (${UPLOAD_REASONS[u.reason] ?? u.reason})`)
-  for (const d of r.downloaded)
-    console.log(`  ↓ ${d.key} (${DOWNLOAD_REASONS[d.reason] ?? d.reason})`)
-  for (const p of r.pruned) console.log(`  ✗ ${p} pruned (deleted from the namespace)`)
-  // Warnings go to stderr: stdout may be piped into a report, and these are
-  // the lines that need a human decision or a fix.
-  for (const key of r.unresolved)
-    console.error(
-      `  ! ${key} changed on both sides and the server reported no write times — ` +
-        'nothing was written for it. Re-run with --prefer local or --prefer remote.',
-    )
-  for (const x of r.skipped)
-    console.error(
-      `  ✗ ${flattenServerText(x.key, 300)} not stored (${flattenServerText(x.reason, 80)})`,
-    )
+  const { out, err } = formatSyncReport(r, dir)
+  for (const line of out) console.log(line)
+  for (const line of err) console.error(line)
 }
 
+/**
+ * `openrecall sync <dir> [namespace]` — mirror a directory and a namespace.
+ *
+ * In watch mode the watcher is installed BEFORE each sync, so an edit made
+ * while that sync is reading files schedules the next run instead of being
+ * lost between the read and the watcher registration.
+ */
 async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
   const s = resolveSettings()
   const ns = namespace ?? s.namespace
@@ -239,29 +227,45 @@ async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
       statePath: join(s.home, 'sync-state.json'),
     })
     printSyncReport(r, dir)
-    // Refusals and undecided conflicts are a sync that did not finish; say so
-    // through the exit code rather than a summary line that reads as success.
-    if (r.skipped.length > 0 || r.unresolved.length > 0) process.exitCode = 1
+    // Refusals, skipped downloads, undecided conflicts and unapplied remote
+    // deletions are a sync that did not finish; say so through the exit code
+    // rather than a summary line that reads as success.
+    if (
+      r.skipped.length > 0 ||
+      r.unresolved.length > 0 ||
+      r.downloadSkipped.length > 0 ||
+      r.remoteDeleted.length > 0
+    ) {
+      process.exitCode = 1
+    }
   }
 
   if (args.flags.watch !== true) {
     await once()
     return
   }
-  // Watch mode: run once, then again whenever the directory settles. The
-  // handle closes on each wake so a watcher is never stacked on the last one.
+
+  // Watch mode: always hold a watcher across the sync. If the directory
+  // settles during `once()`, the callback closes this watcher and resolves the
+  // promise, so the loop runs again with content it has not seen yet.
   for (;;) {
-    await once()
-    await new Promise<void>(resolve => {
-      const handle = watchDirectory(
+    let handle: WatchHandle | undefined
+    const changed = new Promise<void>(resolve => {
+      handle = watchDirectory(
         dir,
         () => {
-          handle.close()
+          handle?.close()
           resolve()
         },
         intervalSec !== undefined ? { intervalSec } : {},
       )
     })
+    try {
+      await once()
+      await changed
+    } finally {
+      handle?.close()
+    }
   }
 }
 
@@ -414,8 +418,9 @@ function usage(code = 1): never {
       '  openrecall sync <dir> [namespace]    mirror a memory directory and a namespace\n' +
       '                                       [--dry-run] [--prefer local|remote] [--prune] [--watch]\n' +
       '                                       [--interval <sec>]   bidirectional: newest write per\n' +
-      '                                       entry wins; --prune also deletes remote entries whose\n' +
-      '                                       local file a previous sync of this pair saw\n' +
+      '                                       entry wins; --prefer resolves conflicts and remote\n' +
+      '                                       deletions; --prune deletes remote entries whose local\n' +
+      '                                       file a previous sync of this pair saw unchanged\n' +
       '  openrecall mcp                       run the stdio MCP server (memory tools)\n' +
       '  openrecall serve                     run the openrecall server (needs Bun)',
   )

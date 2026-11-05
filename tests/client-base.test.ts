@@ -24,6 +24,9 @@ let DEFAULT_TIMEOUT_MS: number
 let MAX_TRACKED_NAMESPACES: number
 
 beforeAll(async () => {
+  // Earlier suites share the anonymous token bucket in this process; start
+  // clean so their traffic cannot 429 the first assertion here.
+  _reset()
   const { handleRequest } = await import('../src/handler.ts')
   ;({
     OpenRecallClient,
