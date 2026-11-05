@@ -169,6 +169,40 @@ lives in one place, [`skills/openrecall-memory/SKILL.md`](./skills/openrecall-me
 same text as its `memory_guide` prompt and in its startup instructions, so every
 client gets it.
 
+## Mirror a memory directory
+
+Agents that read memory FILES rather than call MCP tools — Claude Code and
+OpenClaude memory directories — change both sides at different times.
+`push` only uploads and `pull` only downloads; `sync` reconciles:
+
+```bash
+openrecall sync ./memories                 # bidirectional, one round trip
+openrecall sync ./memories --dry-run       # plan and report, write nothing
+openrecall sync ./memories --watch         # re-sync whenever the directory settles
+openrecall sync ./memories --prune         # also delete entries whose local file
+                                           # a previous sync of this pair saw
+```
+
+Per entry, the newest write wins. Unchanged entries cost no transfer in either
+direction: deterministic encryption means the client computes the ciphertext
+hash locally and compares it to the server's, so only entries whose hashes
+differ are moved. When both sides changed, the server's per-entry write times
+decide which is newer; if the server predates that field, the key is left
+untouched and reported, and `--prefer local` or `--prefer remote` decides.
+
+`--prune` is state-guarded: an entry is deleted only when a previous sync of
+the same (directory, namespace) pair saw a local file for it. A remote entry
+this directory has never seen is downloaded, never deleted, so a mirror cannot
+destroy a colleague's or another agent's concurrent writes. The guard lives in
+`~/.openrecall/sync-state.json`.
+
+`--watch` re-runs the sync when the directory settles (debounced); on platforms
+without recursive watching it falls back to polling, and `--interval <sec>`
+polls at a fixed cadence instead. `sync` also fixes an old asymmetry: `push`
+used to skip `.md` files more than three levels deep while `pull` wrote them at
+any depth, so a directory synced down and pushed back silently lost its deeper
+files — both now walk the whole tree.
+
 ## Self-host a server
 
 A server lets several machines share one memory. Install [Bun](https://bun.sh)
@@ -297,16 +331,18 @@ decrypting anything.
 |---|---|---|
 | `GET` | `/health` | liveness |
 | `GET` | `/api/memory/:ns` | full data (ciphertext entries + checksums) |
-| `GET` | `/api/memory/:ns?view=hashes` | per-key checksums only, for delta sync |
+| `GET` | `/api/memory/:ns?view=hashes` | per-key checksums + write times, for delta sync and directory mirrors |
 | `GET` | `/api/memory/:ns?view=entry&key=<entryKey>` | one entry's ciphertext, without fetching the rest |
 | `PUT` | `/api/memory/:ns` | delta upsert `{ entries, deletions?, base? }` |
 | `DELETE` | `/api/memory/:ns?key=<entryKey>[&base=sha256:<hex>]` | remove one entry |
 
 A *namespace* (`user:me`, `repo:owner/name`, `agent:intern`) is the unit of
 scoping, and entry keys mirror a memory directory (`MEMORY.md`,
-`feedback/x.md`). The hashes view also reports `supports` (capabilities a client
-can rely on) and `erasure` (whether this deployment's store really removes
-bytes on delete).
+`feedback/x.md`). The hashes view also reports `entryUpdatedAt` (per-key write
+times, the ordering evidence a directory sync needs), `supports` (capabilities
+a client can rely on, currently `base-precondition`, `entry-view` and
+`hashes-updated-at`) and `erasure` (whether this deployment's store really
+removes bytes on delete).
 
 `base` is an optional per-entry precondition: the ciphertext hash the caller
 believes a key holds, or `null` for "should not exist". A disagreement is

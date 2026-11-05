@@ -37,8 +37,12 @@ import {
  * Capabilities the hashes view advertises. Without this a client cannot tell a
  * server that enforces the write precondition from one that ignores an unknown
  * body field, so it would report a guarantee it is not getting.
+ *
+ * `hashes-updated-at` says the same response carries per-entry
+ * `entryUpdatedAt`, which is what lets a client order a two-sided change
+ * without downloading any ciphertext body.
  */
-const SUPPORTS = ['base-precondition', 'entry-view']
+const SUPPORTS = ['base-precondition', 'entry-view', 'hashes-updated-at']
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
 async function readManifest(nsSlug: string): Promise<Manifest> {
@@ -72,12 +76,19 @@ function checksumsFrom(m: Manifest): Record<string, string> {
 export async function getHashes(namespace: string, nsSlug: string): Promise<MemoryHashes> {
   const m = await readManifest(nsSlug)
   const entryChecksums = checksumsFrom(m)
+  // Copied from the manifest in the same pass as the checksums, so a timestamp
+  // never names a key the checksum map does not. Nothing here reads or derives
+  // anything from plaintext: `updatedAt` is the server's own record of when it
+  // last wrote each manifest row.
+  const entryUpdatedAt: Record<string, string> = {}
+  for (const [k, meta] of Object.entries(m.entries)) entryUpdatedAt[k] = meta.updatedAt
   return {
     namespace,
     version: m.version,
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
     entryChecksums,
+    entryUpdatedAt,
     erasure: getStore().erasure,
     supports: SUPPORTS,
   }

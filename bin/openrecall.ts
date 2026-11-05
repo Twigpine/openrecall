@@ -9,6 +9,7 @@
  *   openrecall card <owner> [url]         print the service paste-in card + a new passphrase
  *   openrecall push <dir> [namespace]   encrypt + upload changed .md entries
  *   openrecall pull <dir> [namespace]   download + decrypt into <dir>
+ *   openrecall sync <dir> [namespace]   bidirectional mirror (newest write wins)
  *   openrecall mcp                      run the stdio MCP server (memory tools)
  *   openrecall serve                    run the openrecall server (needs Bun)
  *
@@ -20,8 +21,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve, sep } from 'node:path'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { flattenServerText } from '../client/index.ts'
 import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
@@ -36,6 +37,7 @@ import {
   validateUrl,
   writeConfigFile,
 } from '../src/cli/settings.ts'
+import { runSync, type SyncReport, walkMemoryFiles, watchDirectory } from '../src/cli/sync.ts'
 import { validateNamespace } from '../src/namespace.ts'
 import { version } from '../src/version.ts'
 
@@ -62,21 +64,12 @@ function parseArgs(argv: string[]): Args {
   return { positional, flags }
 }
 
-const VALUE_FLAGS = new Set(['url', 'namespace', 'api-key', 'scan'])
+const VALUE_FLAGS = new Set(['url', 'namespace', 'api-key', 'scan', 'prefer', 'interval'])
 
 function flag(args: Args, name: string): string | undefined {
   const v = args.flags[name]
   if (v === true) throw new Error(`--${name} needs a value`)
   return v
-}
-
-async function walkMd(dir: string): Promise<string[]> {
-  const out: string[] = []
-  const entries = await readdir(dir, { recursive: true }).catch(() => [] as string[])
-  for (const rel of entries) {
-    if (rel.endsWith('.md') && rel.split(sep).length <= 3) out.push(rel)
-  }
-  return out
 }
 
 async function cmdInit(args: Args) {
@@ -148,11 +141,9 @@ async function cmdPush(dir: string, namespace?: string) {
   const s = resolveSettings()
   const ns = namespace ?? s.namespace
   const client = await makeClient(s)
-  const files = await walkMd(dir)
+  const files = await walkMemoryFiles(dir)
   const entries: Record<string, string> = {}
-  for (const rel of files) {
-    entries[rel.split(sep).join('/')] = await readFile(join(dir, rel), 'utf8')
-  }
+  for (const f of files) entries[f.key] = await readFile(f.path, 'utf8')
   const r = await client.push(ns, entries)
   const skipped = r.skipped ?? []
   const summary = [`${r.uploaded.length} uploaded`, `${r.unchanged.length} unchanged`]
@@ -184,6 +175,94 @@ async function cmdPull(dir: string, namespace?: string) {
     n++
   }
   console.log(`pulled ${ns} v${r.version}: ${n} files → ${dir}`)
+}
+
+const UPLOAD_REASONS: Record<string, string> = {
+  'remote-missing': 'new',
+  'local-newer': 'local newer',
+  'prefer-local': 'preferred local',
+}
+const DOWNLOAD_REASONS: Record<string, string> = {
+  'local-missing': 'new',
+  'remote-newer': 'remote newer',
+  'prefer-remote': 'preferred remote',
+}
+
+function printSyncReport(r: SyncReport, dir: string) {
+  const summary = [
+    `${r.uploaded.length} uploaded`,
+    `${r.downloaded.length} downloaded`,
+    `${r.unchanged.length} unchanged`,
+  ]
+  if (r.pruned.length) summary.push(`${r.pruned.length} pruned`)
+  console.log(`${r.dryRun ? 'dry run — ' : ''}sync ${r.namespace} ↔ ${dir}: ${summary.join(', ')}`)
+  for (const u of r.uploaded) console.log(`  ↑ ${u.key} (${UPLOAD_REASONS[u.reason] ?? u.reason})`)
+  for (const d of r.downloaded)
+    console.log(`  ↓ ${d.key} (${DOWNLOAD_REASONS[d.reason] ?? d.reason})`)
+  for (const p of r.pruned) console.log(`  ✗ ${p} pruned (deleted from the namespace)`)
+  // Warnings go to stderr: stdout may be piped into a report, and these are
+  // the lines that need a human decision or a fix.
+  for (const key of r.unresolved)
+    console.error(
+      `  ! ${key} changed on both sides and the server reported no write times — ` +
+        'nothing was written for it. Re-run with --prefer local or --prefer remote.',
+    )
+  for (const x of r.skipped)
+    console.error(
+      `  ✗ ${flattenServerText(x.key, 300)} not stored (${flattenServerText(x.reason, 80)})`,
+    )
+}
+
+async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
+  const s = resolveSettings()
+  const ns = namespace ?? s.namespace
+
+  const prefer = flag(args, 'prefer')
+  if (prefer !== undefined && prefer !== 'local' && prefer !== 'remote')
+    throw new Error('--prefer must be "local" or "remote"')
+
+  const intervalRaw = flag(args, 'interval')
+  let intervalSec: number | undefined
+  if (intervalRaw !== undefined) {
+    intervalSec = Number(intervalRaw)
+    if (!Number.isFinite(intervalSec) || intervalSec <= 0)
+      throw new Error('--interval must be a positive number of seconds')
+  }
+
+  const client = await makeClient(s)
+  const once = async () => {
+    const r = await runSync(dir, client, {
+      namespace: ns,
+      ...(prefer ? { prefer: prefer as 'local' | 'remote' } : {}),
+      prune: args.flags.prune === true,
+      dryRun: args.flags['dry-run'] === true,
+      statePath: join(s.home, 'sync-state.json'),
+    })
+    printSyncReport(r, dir)
+    // Refusals and undecided conflicts are a sync that did not finish; say so
+    // through the exit code rather than a summary line that reads as success.
+    if (r.skipped.length > 0 || r.unresolved.length > 0) process.exitCode = 1
+  }
+
+  if (args.flags.watch !== true) {
+    await once()
+    return
+  }
+  // Watch mode: run once, then again whenever the directory settles. The
+  // handle closes on each wake so a watcher is never stacked on the last one.
+  for (;;) {
+    await once()
+    await new Promise<void>(resolve => {
+      const handle = watchDirectory(
+        dir,
+        () => {
+          handle.close()
+          resolve()
+        },
+        intervalSec !== undefined ? { intervalSec } : {},
+      )
+    })
+  }
 }
 
 /**
@@ -286,6 +365,10 @@ try {
       if (!a) usage()
       await cmdPull(a, b)
       break
+    case 'sync':
+      if (!a) usage()
+      await cmdSync(a, b, args)
+      break
     case 'card':
       if (!a) usage()
       cmdCard(a, b)
@@ -328,6 +411,11 @@ function usage(code = 1): never {
       '  openrecall card <owner> [url]        print the service paste-in card + a new passphrase\n' +
       '  openrecall push <dir> [namespace]    encrypt + upload changed .md entries\n' +
       '  openrecall pull <dir> [namespace]    download + decrypt into <dir>\n' +
+      '  openrecall sync <dir> [namespace]    mirror a memory directory and a namespace\n' +
+      '                                       [--dry-run] [--prefer local|remote] [--prune] [--watch]\n' +
+      '                                       [--interval <sec>]   bidirectional: newest write per\n' +
+      '                                       entry wins; --prune also deletes remote entries whose\n' +
+      '                                       local file a previous sync of this pair saw\n' +
       '  openrecall mcp                       run the stdio MCP server (memory tools)\n' +
       '  openrecall serve                     run the openrecall server (needs Bun)',
   )

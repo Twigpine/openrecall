@@ -139,6 +139,25 @@ automatically:
 2. Switch to the remote URL with `openrecall init --url …`.
 3. Run `openrecall push ./backup`.
 
+## Keeping a memory directory mirrored
+
+Some agents read memory files rather than call MCP tools. `openrecall sync`
+mirrors a directory and a namespace in both directions, so edits made in the
+file and saves made through the tools converge instead of overwriting each
+other:
+
+```bash
+openrecall sync ~/memories                 # one round trip
+openrecall sync ~/memories --watch         # keep mirroring
+openrecall sync ~/memories --prune --watch # also propagate local deletions
+```
+
+Per entry the newest write wins, decided by the server's per-entry write times
+against the file's mtime; unchanged entries transfer nothing. `--prune` only
+deletes an entry when a previous sync of the same directory saw its file, so
+another agent's saves are downloaded, never destroyed. See
+[README](../README.md#mirror-a-memory-directory) for the full contract.
+
 ## Troubleshooting
 
 | Symptom | Fix |

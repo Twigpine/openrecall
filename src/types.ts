@@ -49,13 +49,30 @@ export type MemoryData = {
   }
 }
 
-/** GET ?view=hashes response — metadata only, no ciphertext bodies. */
+/**
+ * GET ?view=hashes response — metadata only, no ciphertext bodies.
+ */
 export type MemoryHashes = {
   namespace: string
   version: number
   lastModified: string
   checksum: string
   entryChecksums: Record<string, string>
+  /**
+   * entryKey -> ISO 8601 of that entry's last write, the same values the full
+   * read reports as `content.entryUpdatedAt`.
+   *
+   * A directory sync needs both halves of this view to resolve a conflict
+   * without downloading bodies: the checksums say WHICH entries changed, and
+   * these timestamps say which side changed last. Without them a client can
+   * only detect that both sides differ and must guess (or ask the user), so
+   * the pair ships together.
+   *
+   * Like every timestamp the server reports, this is server-authored metadata
+   * that nothing authenticates: a caller must treat it as a hint for ordering,
+   * never as proof of when a write happened.
+   */
+  entryUpdatedAt: Record<string, string>
   /** Whether this deployment's store actually erases on delete. */
   erasure: Erasure
   /**
