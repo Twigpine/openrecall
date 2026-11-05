@@ -262,6 +262,36 @@ describe('precondition advertisement', () => {
 // "absent". Each test below pins one consequence of splitting that apart into
 // a key->hash map plus whether the source enumerated the namespace.
 
+/**
+ * The real server as an older release presents itself: the hashes view with
+ * no capabilities and no timestamps, and no bulk view. Everything else is
+ * passed through, so the full view is the real full view.
+ */
+function legacyProxy(upstream: string) {
+  const searches: string[] = []
+  const s = Bun.serve({
+    port: 0,
+    fetch: async req => {
+      const u = new URL(req.url)
+      searches.push(u.search)
+      if (req.method === 'POST') return new Response(null, { status: 405 })
+      const res = await fetch(`${upstream}${u.pathname}${u.search}`, {
+        method: req.method,
+        headers: req.headers,
+        body: req.method === 'GET' || req.method === 'DELETE' ? undefined : await req.text(),
+      })
+      if (u.searchParams.get('view') !== 'hashes' || !res.ok) return res
+      const {
+        supports: _s,
+        entryUpdatedAt: _t,
+        ...rest
+      } = (await res.json()) as Record<string, unknown>
+      return Response.json({ ...rest, supports: [] })
+    },
+  })
+  return { url: `http://localhost:${s.port}`, searches, stop: () => s.stop(true) }
+}
+
 /** A server that answers every request with one canned body, verbatim. */
 function rawServer(status: number, body: string, contentType = 'application/json') {
   return Bun.serve({
@@ -311,13 +341,42 @@ describe('observed knowledge', () => {
     expect((await b.pull(ns)).entries['x.md']).toBe('from-b')
   })
 
-  test('a pull does not enumerate, so a key it did not return is left unasserted', async () => {
+  test('a full-view pull does not enumerate, so a key it did not return is left unasserted', async () => {
     // The negative half of the rule above, and the reason the drift test can
-    // pass: a pull of a namespace that HAS entries carries positive knowledge
-    // only, because getData drops an entry whose blob is missing and the client
-    // cannot tell that from a key that was never there. The empty-namespace
-    // case is the documented exception and is covered separately.
+    // pass: a pull through the full view carries positive knowledge only,
+    // because getData drops an entry whose blob is missing and the client
+    // cannot tell that from a key that was never there. The full view is what
+    // a server advertising neither entry view gets, so that server is stood
+    // up here: the real one, behind a proxy that strips what it advertises.
     const ns = 'user:cb-enum-pull'
+    const legacy = legacyProxy(base)
+    try {
+      const a = new OpenRecallClient({ url: legacy.url, passphrase: 'pw' })
+      const b = client()
+      await a.push(ns, { 'seed.md': 'seed' })
+      expect(Object.keys((await a.pull(ns)).entries)).toEqual(['seed.md'])
+      expect(legacy.searches).toContain('')
+
+      await b.pull(ns)
+      await b.push(ns, { 'x.md': 'from-b' })
+
+      // a never saw x.md, and cannot honestly claim it does not exist, so the
+      // write is unconditional rather than refused.
+      await a.push(ns, { 'x.md': 'from-a' })
+      expect((await b.pull(ns)).entries['x.md']).toBe('from-a')
+    } finally {
+      legacy.stop()
+    }
+  })
+
+  test('an incremental pull enumerates, so a key it did not return is asserted absent', async () => {
+    // The counterpart against the real server, which advertises the entry
+    // views: the pull starts from the hashes view, which lists the manifest
+    // entire, so a key missing from it provably does not exist and the next
+    // write may say so. The drift case that made the full view honest-only is
+    // covered in tests/client-sync.test.ts: a drifted key is still in the
+    // hashes view with its manifest hash, so it is never asserted absent.
+    const ns = 'user:cb-enum-incremental'
     const a = client()
     const b = client()
     await a.push(ns, { 'seed.md': 'seed' })
@@ -326,10 +385,10 @@ describe('observed knowledge', () => {
     await b.pull(ns)
     await b.push(ns, { 'x.md': 'from-b' })
 
-    // a never saw x.md, and cannot honestly claim it does not exist, so the
-    // write is unconditional rather than refused.
-    await a.push(ns, { 'x.md': 'from-a' })
-    expect((await b.pull(ns)).entries['x.md']).toBe('from-a')
+    const err = await a.push(ns, { 'x.md': 'from-a' }).catch(e => e)
+    expect(err).toBeInstanceOf(OpenRecallHttpError)
+    expect((err as InstanceType<typeof OpenRecallHttpError>).code).toBe('stale_base_version')
+    expect((await b.pull(ns)).entries['x.md']).toBe('from-b')
   })
 
   test('a write into a never-read namespace arms the precondition for the next one', async () => {
@@ -542,9 +601,14 @@ function stallingServer(stall: (req: Request) => boolean) {
     fetch: req =>
       stall(req)
         ? new Promise<Response>(() => {})
-        : new Response(JSON.stringify({ version: 1, entryChecksums: {}, supports: [] }), {
-            headers: { 'content-type': 'application/json' },
-          }),
+        : new Response(
+            JSON.stringify({
+              version: 1,
+              entryChecksums: { 'a.md': 'sha256:aa' },
+              supports: ['entry-view', 'entries-view'],
+            }),
+            { headers: { 'content-type': 'application/json' } },
+          ),
   })
 }
 
@@ -566,6 +630,8 @@ describe('bounded waits', () => {
     const c3 = stalled(writes.port)
     const c4 = stalled(writes.port)
     const c5 = stalled(writes.port)
+    const c6 = stalled(all.port)
+    const c7 = stalled(writes.port)
     // c4 has to enumerate first, or its delete takes the DELETE path (c5's)
     // rather than the assert-absence PUT.
     await c4.hashes('user:tmo')
@@ -576,6 +642,9 @@ describe('bounded waits', () => {
       await timedOut('push', () => c3.push('user:tmo', { 'a.md': 'x' })),
       await timedOut('delete-via-put', () => c4.delete('user:tmo', 'gone.md')),
       await timedOut('delete', () => c5.delete('user:tmo', 'a.md')),
+      await timedOut('entries', () => c6.entries('user:tmo', ['a.md'])),
+      // The POST half of a pull: the hashes view answers, the bulk read stalls.
+      await timedOut('pull-entries', () => c7.pull('user:tmo')),
     ]
     all.stop(true)
     writes.stop(true)

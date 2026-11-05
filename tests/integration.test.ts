@@ -270,17 +270,38 @@ describe('updatedAt sanitization', () => {
     globalThis.fetch = realFetch
   })
 
+  /**
+   * A fetch that answers the hashes view as an older server would (the real
+   * checksums, no capabilities, so the client takes the full-view path) and
+   * the full view with `body`. The full view is where the field under test
+   * rides on that path; the incremental path's copies of it are covered in
+   * tests/client-sync.test.ts.
+   */
+  async function legacyFetch(body: (real: FullView) => unknown): Promise<typeof fetch> {
+    const url = `${base}/api/memory/${encodeURIComponent(ns)}`
+    const real = (await (await realFetch(url)).json()) as FullView
+    const hashes = (await (await realFetch(`${url}?view=hashes`)).json()) as {
+      version: number
+      entryChecksums: Record<string, string>
+    }
+    return (async (input: RequestInfo | URL) => {
+      const href = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+      if (href.includes('view=hashes')) {
+        return Response.json({ version: hashes.version, entryChecksums: hashes.entryChecksums })
+      }
+      return Response.json(body(real))
+    }) as unknown as typeof fetch
+  }
+
+  type FullView = { version: number; content: { entries: Record<string, string> } }
+
   /** Serve one crafted `entryUpdatedAt` alongside genuine ciphertext. */
   async function pullWith(entryUpdatedAt: unknown) {
     const c = client()
-    const real = (await (
-      await realFetch(`${base}/api/memory/${encodeURIComponent(ns)}`)
-    ).json()) as { version: number; content: { entries: Record<string, string> } }
-    globalThis.fetch = (async () =>
-      Response.json({
-        version: real.version,
-        content: { entries: real.content.entries, entryUpdatedAt },
-      })) as unknown as typeof fetch
+    globalThis.fetch = await legacyFetch(real => ({
+      version: real.version,
+      content: { entries: real.content.entries, entryUpdatedAt },
+    }))
     try {
       return await c.pull(ns)
     } finally {
@@ -356,7 +377,7 @@ describe('updatedAt sanitization', () => {
       { version: 1, content: null },
       { version: 1, content: 'x' },
     ]) {
-      globalThis.fetch = (async () => Response.json(body)) as unknown as typeof fetch
+      globalThis.fetch = await legacyFetch(() => body)
       try {
         await expect(client().pull(ns)).rejects.toThrow(/malformed body/)
       } finally {

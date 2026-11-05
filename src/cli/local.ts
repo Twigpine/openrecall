@@ -138,9 +138,10 @@ export async function localFetch(dataDir: string): Promise<FetchLike> {
   return (input, init) => {
     const run = () => handleRequest(new Request(input, init))
     // PUT and DELETE both reach `upsert`, the read-modify-write the lock
-    // exists for. A GET reads without it (see the module comment), and every
-    // recall is a GET.
+    // exists for. A GET reads without it (see the module comment), and so
+    // does the POST of the bulk entries view, which is a read that carries
+    // its key list in a body; every recall is one or both of those.
     const method = (init?.method ?? 'GET').toUpperCase()
-    return method === 'GET' ? run() : withLockFile(lockPath, run)
+    return method === 'PUT' || method === 'DELETE' ? withLockFile(lockPath, run) : run()
   }
 }

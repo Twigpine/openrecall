@@ -15,6 +15,7 @@
  */
 
 import { config } from './config.ts'
+import type { Frame, FrameStatus } from './frames.ts'
 import { namespaceChecksum, sha256Hex, sha256Prefixed } from './hash.ts'
 import { withLock } from './lock.ts'
 import { logEvent } from './log.ts'
@@ -22,6 +23,8 @@ import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
 import { blobPrefix, contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
 import {
+  type EntriesRead,
+  type EntryMeta,
   type EntryRead,
   emptyManifest,
   type Manifest,
@@ -38,7 +41,41 @@ import {
  * server that enforces the write precondition from one that ignores an unknown
  * body field, so it would report a guarantee it is not getting.
  */
-const SUPPORTS = ['base-precondition', 'entry-view']
+const SUPPORTS = ['base-precondition', 'entry-view', 'entries-view']
+
+/**
+ * How many blob reads a namespace-wide read keeps in flight. Unbounded fan-out
+ * was fine on a local disk and is a problem on an object store, where 2,000
+ * simultaneous GETs are 2,000 sockets; 16 keeps a remote read pipelined
+ * without opening more than a handful of connections.
+ */
+const READ_CONCURRENCY = 16
+
+/**
+ * `Promise.all(items.map(fn))` with at most `limit` calls in flight. A small
+ * worker loop rather than a dependency: workers pull the next index off a
+ * shared counter until the items run out, and results land at their item's
+ * index, so the caller sees exactly what the unbounded form would have given.
+ */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T, index: number) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i] as T, i)
+    }
+  }
+  const workers: Promise<void>[] = []
+  for (let i = 0; i < Math.min(limit, items.length); i++) workers.push(worker())
+  await Promise.all(workers)
+  return out
+}
 
 // ─── Manifest helpers ───────────────────────────────────────────────────
 async function readManifest(nsSlug: string): Promise<Manifest> {
@@ -66,6 +103,12 @@ function checksumsFrom(m: Manifest): Record<string, string> {
   return out
 }
 
+function updatedAtFrom(m: Manifest): Record<string, string> {
+  const out: Record<string, string> = {}
+  for (const [k, meta] of Object.entries(m.entries)) out[k] = meta.updatedAt
+  return out
+}
+
 // ─── Read paths ─────────────────────────────────────────────────────────
 
 /** Hashes-only view: manifest metadata, no ciphertext bodies. */
@@ -78,6 +121,7 @@ export async function getHashes(namespace: string, nsSlug: string): Promise<Memo
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
     entryChecksums,
+    entryUpdatedAt: updatedAtFrom(m),
     erasure: getStore().erasure,
     supports: SUPPORTS,
   }
@@ -116,15 +160,13 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   const readKeys = async (keys: string[]): Promise<string[]> => {
     const missing: string[] = []
-    await Promise.all(
-      keys.map(async key => {
-        const meta = m.entries[key]
-        if (!meta) return
-        const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
-        if (bytes) bodies.set(key, { bytes, meta })
-        else missing.push(key)
-      }),
-    )
+    await mapLimit(keys, READ_CONCURRENCY, async key => {
+      const meta = m.entries[key]
+      if (!meta) return
+      const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+      if (bytes) bodies.set(key, { bytes, meta })
+      else missing.push(key)
+    })
     return missing
   }
 
@@ -217,6 +259,97 @@ export async function getEntry(namespace: string, nsSlug: string, key: string): 
       entry: Buffer.from(bytes).toString('base64'),
       entryChecksum: meta.hash,
     },
+  }
+}
+
+/**
+ * Bulk view: the ciphertext of the keys a client names, one frame each.
+ *
+ * The read an incremental pull makes after comparing the hashes view against
+ * what it already holds: it names only the keys whose hash moved, and gets
+ * raw bytes back rather than base64 in JSON. The store is asked only for
+ * those blobs, at most READ_CONCURRENCY at a time, through the same
+ * `readEntryBytes` the other two views use.
+ *
+ * Every key gets a frame and a status, so the view never has to choose
+ * between failing a 2,000-key read over one bad key and hiding the bad key.
+ * A key that fails validation is never looked up and comes back
+ * `invalid_key`; one the manifest lacks is `not_found`; one the manifest
+ * names and the store cannot produce is `unreadable`, after the same bounded
+ * manifest re-read `getData` and `getEntry` make, since a write landing
+ * between the manifest read and a blob read is the usual reason a blob is
+ * gone. A namespace with no manifest is `no_namespace`, so the handler can
+ * answer the `empty` the other reads answer.
+ */
+export async function getEntries(
+  namespace: string,
+  nsSlug: string,
+  keys: string[],
+): Promise<EntriesRead> {
+  let m = await readManifest(nsSlug)
+  if (m.version === 0 && Object.keys(m.entries).length === 0) return { status: 'no_namespace' }
+  const store = getStore()
+
+  type Slot = { key: string; meta?: EntryMeta; bytes: Uint8Array | null; status: FrameStatus }
+  const slots: Slot[] = keys.map(key => ({ key, bytes: null, status: 'not_found' }))
+  const read = async (slot: Slot): Promise<void> => {
+    // Own property only, as getEntry: `constructor` must miss, not resolve to
+    // something off the prototype and fail as an unreadable body.
+    const meta = Object.hasOwn(m.entries, slot.key) ? m.entries[slot.key] : undefined
+    slot.meta = meta
+    if (!meta) {
+      slot.status = 'not_found'
+      slot.bytes = null
+      return
+    }
+    slot.bytes = await readEntryBytes(store, nsSlug, slot.key, meta.hash)
+    slot.status = slot.bytes ? 'ok' : 'unreadable'
+  }
+
+  const lookups: Slot[] = []
+  for (const slot of slots) {
+    try {
+      validateEntryKey(slot.key)
+      lookups.push(slot)
+    } catch {
+      slot.status = 'invalid_key'
+    }
+  }
+  await mapLimit(lookups, READ_CONCURRENCY, read)
+
+  // Same drift guard as getData: a write between the manifest read and a blob
+  // read can move a key and reclaim its old blob, so look again under the
+  // manifest that write published before calling the key unreadable. Bounded,
+  // so a writer that never pauses cannot starve this read.
+  let missing = lookups.filter(s => s.status === 'unreadable')
+  for (let pass = 0; pass < 2 && missing.length > 0; pass++) {
+    const latest = await readManifest(nsSlug)
+    if (latest.version === m.version) break
+    m = latest
+    await mapLimit(missing, READ_CONCURRENCY, read)
+    missing = missing.filter(s => s.status === 'unreadable')
+  }
+
+  const frames: Frame[] = slots.map(slot => ({
+    meta: {
+      key: slot.key,
+      hash: slot.meta?.hash ?? null,
+      size: slot.meta?.size ?? 0,
+      updatedAt: slot.meta?.updatedAt ?? null,
+      status: slot.status,
+    },
+    bytes: slot.status === 'ok' && slot.bytes ? slot.bytes : new Uint8Array(0),
+  }))
+  return {
+    status: 'ok',
+    header: {
+      namespace,
+      version: m.version,
+      lastModified: m.lastModified,
+      erasure: store.erasure,
+      count: frames.length,
+    },
+    frames,
   }
 }
 

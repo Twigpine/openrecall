@@ -14,7 +14,16 @@
  *   const { entries } = await client.pull('user:me')
  */
 
-import { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'
+import { createHash } from 'node:crypto'
+import {
+  ciphertextHash,
+  ciphertextHashBytes,
+  decryptEntry,
+  decryptEntryBytes,
+  deriveKey,
+  encryptEntry,
+} from './crypto.ts'
+import { decodeFrames, FRAMES_HEADER, type Frame } from './frames.ts'
 import { enforce, type Finding, type ScanMode } from './secretscan.ts'
 
 export type OpenRecallClientOptions = {
@@ -41,17 +50,94 @@ export type OpenRecallClientOptions = {
    * serve requests in-process from an encrypted store on disk, with no server.
    */
   fetch?: FetchLike
+  /**
+   * Keep decrypted entries in memory between pulls, keyed by entry key and
+   * ciphertext hash, so a pull decrypts only what changed since the last one.
+   * Off by default for the library, since a long-lived process that pulls many
+   * namespaces would otherwise hold their plaintext resident without asking;
+   * the CLI and the MCP server turn it on. Bounded at MAX_TRACKED_NAMESPACES
+   * namespaces, each holding exactly its live entries.
+   */
+  cache?: boolean
+  /**
+   * An on-disk store of ciphertext blobs plus a manifest of keys, hashes,
+   * sizes and timestamps, never plaintext and never an index. With one, a
+   * pull fetches only the entries whose ciphertext is not already on disk,
+   * and `pull(ns, { allowStale: true })` can answer from it when the server
+   * cannot be reached. See {@link MirrorStore}.
+   */
+  mirror?: MirrorStore
 }
 
 /** The subset of `fetch` the client needs. */
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
 /**
+ * One namespace's mirror manifest: what the mirror held after the last pull
+ * that reached the server. Keys, hashes, sizes and timestamps only, the same
+ * metadata the server itself sees; the bodies are the blobs, by hash.
+ */
+export type MirrorManifest = {
+  namespace: string
+  version: number
+  /** The namespace checksum over `entries`, as the server computes it. */
+  checksum: string
+  /** ISO 8601 of the pull this manifest was written by; `staleMs` counts from it. */
+  fetchedAt: string
+  entries: Record<string, { hash: string; updatedAt?: string; size: number }>
+}
+
+/**
+ * Where a client keeps ciphertext between processes.
+ *
+ * Content-addressed: a blob is named by its own `sha256:<hex>`, so a blob can
+ * never be stale, only unreferenced, and the client verifies the digest on
+ * every read before it trusts a body (a mismatch is deleted and refetched).
+ * The interface is deliberately small and failure-tolerant in the client: a
+ * store that throws or returns null is treated as a miss, never as an error,
+ * because a cache that can fail a read is not a cache.
+ */
+export interface MirrorStore {
+  readManifest(namespace: string): Promise<MirrorManifest | null>
+  writeManifest(namespace: string, manifest: MirrorManifest): Promise<void>
+  getBlob(namespace: string, hash: string): Promise<Uint8Array | null>
+  putBlob(namespace: string, hash: string, bytes: Uint8Array): Promise<void>
+  deleteBlob(namespace: string, hash: string): Promise<void>
+  /** Every blob hash the mirror holds for the namespace, as `sha256:<hex>`. */
+  listBlobs(namespace: string): Promise<string[]>
+}
+
+export type PullOptions = {
+  /**
+   * When the server cannot be reached (a timeout or a transport failure, never
+   * an HTTP refusal: a 401, 403, 429 or 5xx is an answer and is reported as
+   * one), answer from the mirror instead and say so in `served`. Off by
+   * default: a caller that reads in order to write must not build on a
+   * namespace the server may have moved on from.
+   */
+  allowStale?: boolean
+}
+
+/** What a bulk `entries` read returned, decrypted, with one status per key asked for. */
+export type EntriesResult = {
+  /** entryKey -> plaintext, for the keys that came back `ok`. */
+  entries: Record<string, string>
+  /** entryKey -> ciphertext hash, for the same keys. */
+  hashes: Record<string, string>
+  /** entryKey -> ISO 8601 per the server's manifest, where it gave one. */
+  updatedAt: Record<string, string | undefined>
+  /** entryKey -> `ok`, `not_found`, `unreadable` or `invalid_key`, for every key asked for. */
+  statuses: Record<string, string>
+}
+
+/**
  * Where a pull's time went, in milliseconds, for the tool layer's per-stage
- * timings: the transport round trip, the JSON parse, and the AES-GCM pass
- * over every entry. `bytes` is the size of the response body. Optional on the
- * result: a test double need not produce it, and a caller that does not look
- * is not charged for it.
+ * timings: the round trips (the hashes view, then whatever bodies had to be
+ * fetched, plus any read from the on-disk mirror), the JSON or frame decode,
+ * and the AES-GCM pass over the entries this call actually decrypted. `bytes`
+ * is the size of every response body the call read. Optional on the result:
+ * a test double need not produce it, and a caller that does not look is not
+ * charged for it.
  */
 export type ReadTimings = { fetchMs: number; parseMs: number; decryptMs: number; bytes: number }
 
@@ -84,6 +170,20 @@ export type PullResult = {
    * handled.
    */
   updatedAt: Record<string, string | undefined>
+  /**
+   * entryKey -> the ciphertext hash each returned entry was decrypted from.
+   * A fingerprint for a caller keeping an index over the entries: it changes
+   * exactly when the content does. Optional, like every field added after
+   * the first release, so a test double need not carry it.
+   */
+  hashes?: Record<string, string>
+  /**
+   * Where the answer came from. `server` is the normal case. `mirror` means
+   * the server could not be reached, the caller allowed a stale answer, and
+   * this is what the on-disk mirror held as of `staleMs` milliseconds ago;
+   * see {@link PullOptions}.
+   */
+  served?: { source: 'server' | 'mirror'; staleMs: number }
   /** Stage timings of this read; see {@link ReadTimings}. */
   timings?: ReadTimings
 }
@@ -144,6 +244,58 @@ type Observed = {
 
 /** One answered request: the status line plus the body, already read. */
 type Answer = { ok: boolean; status: number; statusText: string; raw: string }
+
+/** The hashes view, parsed, plus whether it was the server's own `empty`. */
+type HashesView = {
+  version: number
+  entryChecksums: Record<string, string>
+  entryUpdatedAt: unknown
+  supports: string[]
+  empty: boolean
+  bytes: number
+}
+
+/** A decrypted entry held in memory: its plaintext and its ciphertext size. */
+type Cached = { plaintext: string; size: number }
+
+/** What a pull holds for one key while it assembles its answer. */
+type Held = {
+  hash: string
+  size: number
+  plaintext?: string
+  bytes?: Uint8Array
+  /** Fetched from the server this call, so the mirror does not have it yet. */
+  fresh?: boolean
+}
+type Fresh = Held & { bytes: Uint8Array }
+
+/** The running stage totals of one read; becomes its `timings`. */
+type Clock = { fetchMs: number; parseMs: number; decryptMs: number; bytes: number }
+
+/** The in-memory cache's key: the entry key and the hash it was decrypted from. */
+function cacheKey(entryKey: string, hash: string): string {
+  return `${hash} ${entryKey}`
+}
+
+/**
+ * How many keys one bulk read names. The server caps a request at the
+ * namespace entry cap (2,000); half of that keeps a request body and its
+ * answer a size a slow link finishes inside the per-request timeout.
+ */
+const MAX_ENTRIES_BATCH = 1000
+
+/**
+ * Up to how many changed keys are read one at a time against a server that
+ * has the single-entry view and not the bulk one. Past this the full view is
+ * cheaper than the round trips.
+ */
+const MAX_SINGLE_READS = 25
+
+/** Mirror blob writes in flight at once; see FsBlobStore's temp-name note. */
+const MIRROR_WRITE_CONCURRENCY = 16
+
+/** Every this-many pulls, the mirror drops blobs no manifest references. */
+const MIRROR_GC_EVERY = 32
 
 /**
  * A refusal from the server, carrying what it actually said.
@@ -301,13 +453,24 @@ export class OpenRecallClient {
    *
    * The `enumerated` flag is the part that matters. A `hashes` read returns the
    * manifest's checksums entire, so a key missing from it provably does not
-   * exist and a later write may assert that absence with a null base. A `pull`
-   * cannot make that claim: the server skips an entry whose blob has gone from
-   * both `content.entries` and `content.entryChecksums`, so a key can be in the
-   * manifest and invisible to the read. A pull therefore records only what it
-   * decrypted, and a key it did not see is unknown rather than absent. Asserting
-   * absence from a pull locked a drifted key out of every future write, since
-   * the server refused the null base and re-pulling could never clear it.
+   * exist and a later write may assert that absence with a null base. The
+   * full-view `pull` cannot make that claim: the server skips an entry whose
+   * blob has gone from both `content.entries` and `content.entryChecksums`, so
+   * a key can be in the manifest and invisible to the read. That pull therefore
+   * records only what it decrypted, and a key it did not see is unknown rather
+   * than absent. Asserting absence from it locked a drifted key out of every
+   * future write, since the server refused the null base and re-pulling could
+   * never clear it.
+   *
+   * The incremental pull (every server that advertises `entry-view` or
+   * `entries-view`) starts from the hashes view, so it DOES enumerate, and it
+   * records the manifest's own checksums rather than what it decrypted. That
+   * is a deliberate upgrade over the full view's `enumerated: false`, and the
+   * old lockout cannot recur through it: a drifted key is still in the hashes
+   * view with its manifest hash, so the base sent for it is that hash, which
+   * the server accepts, and a null base is only ever sent for a key the
+   * manifest does not name at all. Against a server advertising neither view
+   * the pull is the full view and records exactly as before.
    *
    * Deliberately not filled by `push`'s internal pre-flight read: that happens
    * milliseconds before the PUT, so a base taken from it would guard a window
@@ -332,6 +495,22 @@ export class OpenRecallClient {
   /** Derived keys, LRU-bounded: see MAX_TRACKED_NAMESPACES. */
   private readonly keyCache = new Map<string, Buffer>()
   private readonly fetch: FetchLike
+  /**
+   * Decrypted entries by namespace, then by `cacheKey(entryKey, hash)`, so a
+   * pull decrypts only the keys whose ciphertext hash moved. Keyed on the
+   * entry key as well as the hash on purpose: the cipher binds a body to its
+   * key through the GCM additional data, and a map keyed on the hash alone
+   * would let a server that listed one key under another key's hash have the
+   * wrong plaintext served without the cipher ever being asked. Rebuilt on
+   * every pull to hold exactly the live entries, and LRU-bounded across
+   * namespaces like the other two maps. Empty, and never written, unless
+   * `cache: true` was given.
+   */
+  private readonly plaintext = new Map<string, Map<string, Cached>>()
+  private readonly cacheEnabled: boolean
+  private readonly mirror?: MirrorStore
+  /** Pulls made through this client, for the mirror's collection cadence. */
+  private pulls = 0
 
   constructor(opts: OpenRecallClientOptions) {
     this.url = opts.url.replace(/\/$/, '')
@@ -341,6 +520,8 @@ export class OpenRecallClient {
     this.onScanWarning = opts.onScanWarning
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS
     this.fetch = opts.fetch ?? ((input, init) => fetch(input, init))
+    this.cacheEnabled = opts.cache ?? false
+    this.mirror = opts.mirror
   }
 
   private key(namespace: string): Buffer {
@@ -402,6 +583,40 @@ export class OpenRecallClient {
   }
 
   /**
+   * `request`, for a body that is bytes rather than text: the frames view.
+   * The same clock and the same timeout mapping. A refusal's body is read as
+   * text so `httpError` can report what the server said, exactly as for the
+   * JSON routes; a success's body is handed back untouched.
+   */
+  private async requestBytes(
+    operation: string,
+    namespace: string,
+    url: string,
+    init?: RequestInit,
+  ): Promise<Answer & { bytes: Uint8Array; headers: Headers }> {
+    try {
+      const res = await this.fetch(url, { ...init, signal: AbortSignal.timeout(this.timeoutMs) })
+      const buf = await res.arrayBuffer().catch((err: unknown) => {
+        if ((err as Error)?.name === 'TimeoutError') throw err
+        return new ArrayBuffer(0)
+      })
+      const bytes = new Uint8Array(buf)
+      return {
+        ok: res.ok,
+        status: res.status,
+        statusText: res.statusText,
+        raw: res.ok ? '' : new TextDecoder().decode(bytes),
+        bytes,
+        headers: res.headers,
+      }
+    } catch (err) {
+      if ((err as Error)?.name === 'TimeoutError')
+        throw new OpenRecallTimeoutError(operation, namespace, this.timeoutMs)
+      throw err
+    }
+  }
+
+  /**
    * Fetch per-key ciphertext checksums (no bodies). Empty if namespace is new.
    *
    * By default the checksums become this client's base for later writes: they
@@ -439,9 +654,7 @@ export class OpenRecallClient {
    * its delta computation, which must not count as the caller having read the
    * namespace; see `observed`.
    */
-  private async hashesView(
-    namespace: string,
-  ): Promise<{ version: number; entryChecksums: Record<string, string>; supports: string[] }> {
+  private async hashesView(namespace: string): Promise<HashesView> {
     const res = await this.request('hashes', namespace, `${this.endpoint(namespace)}?view=hashes`, {
       headers: this.headers(),
     })
@@ -451,43 +664,271 @@ export class OpenRecallClient {
       // Any other 404 is a wrong URL or something in front of the server, and
       // reporting it as an empty namespace is a denial rendered as success.
       if (err.code !== 'empty') throw err
-      return { version: 0, entryChecksums: {}, supports: [] }
+      return {
+        version: 0,
+        entryChecksums: {},
+        entryUpdatedAt: undefined,
+        supports: [],
+        empty: true,
+        bytes: res.raw.length,
+      }
     }
     if (!res.ok) throw httpError(res)
     const data = JSON.parse(res.raw) as {
       version?: number
       entryChecksums?: Record<string, string>
+      entryUpdatedAt?: unknown
       supports?: string[]
+    }
+    // Rebuilt from own string properties, as `sanitizeUpdatedAt` does for the
+    // timestamps: the map becomes this client's write base and the keys it
+    // asks the server for, so a prototype-polluting key or a non-string
+    // value must not survive the parse.
+    const entryChecksums: Record<string, string> = {}
+    const raw = data.entryChecksums
+    if (raw && typeof raw === 'object' && !Array.isArray(raw)) {
+      for (const k of Object.keys(raw)) {
+        const v = raw[k]
+        if (typeof v === 'string') entryChecksums[k] = v
+      }
     }
     return {
       version: data.version ?? 0,
-      entryChecksums: data.entryChecksums ?? {},
-      supports: data.supports ?? [],
+      entryChecksums,
+      entryUpdatedAt: data.entryUpdatedAt,
+      supports: Array.isArray(data.supports)
+        ? data.supports.filter(s => typeof s === 'string')
+        : [],
+      empty: false,
+      bytes: res.raw.length,
     }
   }
 
-  /** Pull and decrypt all entries for a namespace. */
-  async pull(namespace: string): Promise<PullResult> {
-    const fetchStarted = performance.now()
-    const res = await this.request('pull', namespace, this.endpoint(namespace), {
-      headers: this.headers(),
-    })
-    const fetchMs = performance.now() - fetchStarted
-    if (res.status === 404) {
-      const err = httpError(res)
-      // See hashesView: only the server's own `empty` is an empty namespace.
-      if (err.code !== 'empty') throw err
-      // Enumerated, unlike every other pull: `empty` means no manifest exists,
-      // so there is no entry a drifted blob could have hidden. A create after
+  /**
+   * Pull and decrypt all entries for a namespace.
+   *
+   * Incremental. The hashes view says what the namespace holds, by ciphertext
+   * hash; everything whose hash this client already holds decrypted (the
+   * in-memory cache) or holds as ciphertext (the mirror) is reused, and only
+   * the rest is fetched, through the bulk entries view where the server has
+   * it, the single-entry view for a handful of keys where it has only that,
+   * and the full JSON view otherwise. So a warm pull of an unchanged namespace
+   * costs one bodyless round trip and no decryption at all, and a changed one
+   * costs that plus the changed entries. Against a server that advertises no
+   * view at all the body read is the full view it has always been.
+   *
+   * With `allowStale` and a mirror, a server that cannot be reached is answered
+   * from the mirror; see {@link PullOptions} for what "cannot be reached"
+   * excludes.
+   */
+  async pull(namespace: string, opts: PullOptions = {}): Promise<PullResult> {
+    const clock: Clock = { fetchMs: 0, parseMs: 0, decryptMs: 0, bytes: 0 }
+    let view: HashesView
+    const started = performance.now()
+    try {
+      view = await this.hashesView(namespace)
+    } catch (err) {
+      clock.fetchMs += performance.now() - started
+      if (opts.allowStale && this.mirror && isUnreachable(err)) {
+        const stale = await this.pullFromMirror(namespace, clock)
+        if (stale) return stale
+      }
+      throw err
+    }
+    clock.fetchMs += performance.now() - started
+    clock.bytes += view.bytes
+
+    if (view.empty) {
+      // Enumerated, unlike the full view: `empty` means no manifest exists, so
+      // there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
       lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      this.remember(namespace, new Map())
+      await this.mirrorWrite(namespace, 0, [], {})
       return {
         namespace,
         version: 0,
         entries: {},
         updatedAt: {},
-        timings: { fetchMs, parseMs: 0, decryptMs: 0, bytes: res.raw.length },
+        hashes: {},
+        served: { source: 'server', staleMs: 0 },
+        timings: clock,
       }
+    }
+
+    const key = this.key(namespace)
+    const cache = this.cacheFor(namespace)
+    const legacy = !view.supports.includes('entries-view') && !view.supports.includes('entry-view')
+    // What this call ends up holding, by key: the hash it was decrypted from
+    // and, for a body fetched or read from disk this call, that body.
+    const held = new Map<string, Held>()
+    // The manifest's word on each key, adjusted by what the body reads said.
+    const live: Record<string, string> = { ...view.entryChecksums }
+    const stamps: Record<string, unknown>[] = []
+    if (view.entryUpdatedAt !== undefined)
+      stamps.push(view.entryUpdatedAt as Record<string, unknown>)
+
+    let need: string[] = []
+    for (const [entryKey, hash] of Object.entries(view.entryChecksums)) {
+      const hit = cache?.get(cacheKey(entryKey, hash))
+      if (hit) held.set(entryKey, { hash, size: hit.size, plaintext: hit.plaintext })
+      else need.push(entryKey)
+    }
+
+    // Ciphertext already on disk, verified against its name before it is
+    // trusted. Counted as fetch time: it is where the bytes came from.
+    if (need.length > 0 && this.mirror) {
+      const t = performance.now()
+      const rest: string[] = []
+      for (const entryKey of need) {
+        const hash = view.entryChecksums[entryKey] as string
+        const bytes = await this.mirrorRead(namespace, hash)
+        if (bytes) held.set(entryKey, { hash, size: bytes.byteLength, bytes })
+        else rest.push(entryKey)
+      }
+      need = rest
+      clock.fetchMs += performance.now() - t
+    }
+
+    let enumerated = !legacy
+    let version = view.version
+    if (need.length > 0) {
+      if (view.supports.includes('entries-view')) {
+        const frames = await this.fetchFrames(namespace, need, clock)
+        if (frames === null) {
+          // The namespace vanished between the two reads. Nothing it listed
+          // can be held, and nothing can be asserted about it either.
+          for (const k of need) delete live[k]
+        } else {
+          // One map for every frame's timestamp, prototype-less because the
+          // keys are the server's. Sanitized once below, with the view's.
+          const fromFrames = Object.create(null) as Record<string, unknown>
+          for (const f of frames) {
+            const k = f.meta.key
+            if (f.meta.status === 'ok' && f.meta.hash) {
+              held.set(k, {
+                hash: f.meta.hash,
+                size: f.bytes.byteLength,
+                bytes: f.bytes,
+                fresh: true,
+              })
+              live[k] = f.meta.hash
+              if (f.meta.updatedAt !== null) fromFrames[k] = f.meta.updatedAt
+            } else if (f.meta.status === 'not_found') {
+              delete live[k]
+            }
+            // `unreadable` and `invalid_key` keep the manifest's hash: the key
+            // exists, this client just has no body for it.
+          }
+          stamps.push(fromFrames)
+        }
+      } else if (view.supports.includes('entry-view') && need.length <= MAX_SINGLE_READS) {
+        let fallBack = false
+        for (const k of need) {
+          try {
+            const one = await this.entryRaw(namespace, k, clock)
+            if (one.status === 'ok') {
+              held.set(k, {
+                hash: one.hash,
+                size: one.bytes.byteLength,
+                bytes: one.bytes,
+                fresh: true,
+              })
+              live[k] = one.hash
+            } else if (one.status === 'gone') {
+              delete live[k]
+            }
+          } catch (err) {
+            // A server that advertised the view and answered something else:
+            // fall back to the read every server understands.
+            if (err instanceof OpenRecallProtocolError) {
+              fallBack = true
+              break
+            }
+            throw err
+          }
+        }
+        if (fallBack) {
+          const full = await this.pullFull(namespace, cache, held, live, clock)
+          version = full.version
+          stamps.push(full.stamps)
+          enumerated = false
+        }
+      } else {
+        const full = await this.pullFull(namespace, cache, held, live, clock)
+        version = full.version
+        stamps.push(full.stamps)
+        enumerated = false
+      }
+    }
+
+    // The one AES pass, over exactly the bodies that were not already
+    // plaintext. A failure here is the one error a caller may blame on the
+    // passphrase, so it is raised only out of a decryption and nowhere else.
+    this.decryptHeld(namespace, key, held, clock)
+
+    const entries: Record<string, string> = {}
+    const hashes: Record<string, string> = {}
+    const next = new Map<string, Cached>()
+    for (const [entryKey, h] of held) {
+      if (h.plaintext === undefined) continue
+      entries[entryKey] = h.plaintext
+      hashes[entryKey] = h.hash
+      next.set(cacheKey(entryKey, h.hash), { plaintext: h.plaintext, size: h.size })
+    }
+    const updatedAt: Record<string, string> = {}
+    for (const stamp of stamps) Object.assign(updatedAt, sanitizeUpdatedAt(stamp, entries))
+
+    this.remember(namespace, next)
+    // The legacy path records what it decrypted, exactly as the full view
+    // always has; the incremental path records the manifest. See `observed`.
+    lruSet(this.observed, namespace, {
+      hashes: enumerated ? live : { ...hashes },
+      enumerated,
+    })
+    await this.mirrorWrite(
+      namespace,
+      version,
+      [...held.values()].filter(h => h.fresh && h.bytes) as Fresh[],
+      manifestRows(held, updatedAt),
+    )
+
+    return {
+      namespace,
+      version,
+      entries,
+      updatedAt,
+      hashes,
+      served: { source: 'server', staleMs: 0 },
+      timings: clock,
+    }
+  }
+
+  /**
+   * The full JSON view, as every server serves it. Bodies this client already
+   * holds decrypted are matched by hash and not decrypted again; the rest are
+   * handed back as bytes for the one decrypt pass in `pull`.
+   */
+  private async pullFull(
+    namespace: string,
+    cache: Map<string, Cached> | undefined,
+    held: Map<string, Held>,
+    live: Record<string, string>,
+    clock: Clock,
+  ): Promise<{ version: number; stamps: Record<string, unknown> }> {
+    const t = performance.now()
+    const res = await this.request('pull', namespace, this.endpoint(namespace), {
+      headers: this.headers(),
+    })
+    clock.fetchMs += performance.now() - t
+    clock.bytes += res.raw.length
+    if (res.status === 404) {
+      const err = httpError(res)
+      // See hashesView: only the server's own `empty` is an empty namespace.
+      if (err.code !== 'empty') throw err
+      for (const k of Object.keys(live)) delete live[k]
+      held.clear()
+      return { version: 0, stamps: {} }
     }
     if (!res.ok) throw httpError(res)
     const parseStarted = performance.now()
@@ -495,12 +936,10 @@ export class OpenRecallClient {
       version: number
       content?: { entries?: Record<string, string>; entryUpdatedAt?: unknown }
     }
-    const parseMs = performance.now() - parseStarted
-    // Pre-existing gap, closed here because this method now hardens the sibling
-    // field against exactly this class and leaving the container unchecked
-    // would be inconsistent. A 200 whose body is missing `content.entries`
-    // used to throw a raw TypeError out of Object.entries; it fails closed
-    // either way, but a protocol error names what went wrong.
+    clock.parseMs += performance.now() - parseStarted
+    // A 200 whose body is missing `content.entries` used to throw a raw
+    // TypeError out of Object.entries; it fails closed either way, but a
+    // protocol error names what went wrong.
     const entriesRaw = data.content?.entries
     if (!entriesRaw || typeof entriesRaw !== 'object') {
       throw new OpenRecallProtocolError(
@@ -509,31 +948,284 @@ export class OpenRecallClient {
         `${res.status} ${res.statusText}: malformed body (no content.entries)`,
       )
     }
-    const key = this.key(namespace)
-    const entries: Record<string, string> = {}
-    // The base is derived from the bodies rather than the response's checksum
-    // map, so it reflects what was actually decrypted here. This is a read the
-    // caller asked for, so it is what a later write's base is measured
-    // against, but positive knowledge only, hence `enumerated: false`; see
-    // `observed`.
-    const seen: Record<string, string> = {}
-    const decryptStarted = performance.now()
+    // The full view is the whole truth about what can be served: anything held
+    // from an earlier step that it does not carry is not in this answer.
+    held.clear()
     for (const [entryKey, b64] of Object.entries(entriesRaw)) {
+      if (typeof b64 !== 'string') continue
+      const bytes = new Uint8Array(Buffer.from(b64, 'base64'))
+      const hash = ciphertextHashBytes(bytes)
+      const hit = cache?.get(cacheKey(entryKey, hash))
+      held.set(
+        entryKey,
+        hit
+          ? { hash, size: hit.size, plaintext: hit.plaintext }
+          : { hash, size: bytes.byteLength, bytes, fresh: true },
+      )
+      live[entryKey] = hash
+    }
+    const stamps = data.content?.entryUpdatedAt
+    return {
+      version: data.version,
+      stamps: stamps && typeof stamps === 'object' ? (stamps as Record<string, unknown>) : {},
+    }
+  }
+
+  /**
+   * The bulk entries view, in batches of at most MAX_ENTRIES_BATCH keys,
+   * every frame checked before it is believed: the body must be the frames
+   * view (not a JSON answer from something that ignored the query), it must
+   * decode, every frame must answer a key that was asked for, and an `ok`
+   * frame's bytes must hash to the hash it claims. Each of those is a protocol
+   * error, never a decryption failure. Null when the server says the namespace
+   * no longer exists at all.
+   */
+  private async fetchFrames(
+    namespace: string,
+    keys: string[],
+    clock: Clock,
+  ): Promise<Frame[] | null> {
+    const out: Frame[] = []
+    for (let i = 0; i < keys.length; i += MAX_ENTRIES_BATCH) {
+      const batch = keys.slice(i, i + MAX_ENTRIES_BATCH)
+      const t = performance.now()
+      const res = await this.requestBytes(
+        'entries',
+        namespace,
+        `${this.endpoint(namespace)}?view=entries`,
+        {
+          method: 'POST',
+          headers: this.headers({ 'content-type': 'application/json' }),
+          body: JSON.stringify({ keys: batch }),
+        },
+      )
+      clock.fetchMs += performance.now() - t
+      clock.bytes += res.bytes.byteLength
+      if (!res.ok) {
+        const err = httpError(res)
+        if (res.status === 404 && err.code === 'empty') return null
+        throw err
+      }
+      if (res.headers.get(FRAMES_HEADER) !== '1') {
+        throw new OpenRecallProtocolError('entries', namespace, 'the answer is not an entries view')
+      }
+      const parseStarted = performance.now()
+      let decoded: ReturnType<typeof decodeFrames>
       try {
-        entries[entryKey] = decryptEntry(key, entryKey, b64)
+        decoded = decodeFrames(res.bytes)
+      } catch (err) {
+        throw new OpenRecallProtocolError('entries', namespace, (err as Error).message)
+      }
+      clock.parseMs += performance.now() - parseStarted
+      const asked = new Set(batch)
+      for (const f of decoded.frames) {
+        if (!asked.has(f.meta.key)) {
+          throw new OpenRecallProtocolError(
+            'entries',
+            namespace,
+            `the answer names a key that was not asked for: "${flattenServerText(f.meta.key, 120)}"`,
+          )
+        }
+        if (f.meta.status === 'ok') {
+          if (f.meta.hash === null || ciphertextHashBytes(f.bytes) !== f.meta.hash) {
+            throw new OpenRecallProtocolError(
+              'entries',
+              namespace,
+              `the body served for "${flattenServerText(f.meta.key, 120)}" does not match its hash`,
+            )
+          }
+        }
+        out.push(f)
+      }
+    }
+    return out
+  }
+
+  /**
+   * Pull and decrypt the entries a caller names, through the bulk view.
+   *
+   * The bounded counterpart to `pull` for more than one key: a caller that
+   * already knows which keys it wants (from a hashes read, say) gets exactly
+   * those, with a status per key, and never the rest of the namespace. What
+   * it records is what `entry` records, per key: positive knowledge about
+   * the keys that came back `ok`, nothing about any other, and `enumerated`
+   * untouched.
+   */
+  async entries(namespace: string, keys: string[]): Promise<EntriesResult> {
+    const clock: Clock = { fetchMs: 0, parseMs: 0, decryptMs: 0, bytes: 0 }
+    const frames = await this.fetchFrames(namespace, keys, clock)
+    const result: EntriesResult = { entries: {}, hashes: {}, updatedAt: {}, statuses: {} }
+    if (frames === null) {
+      for (const k of keys) result.statuses[k] = 'not_found'
+      return result
+    }
+    const key = this.key(namespace)
+    const stamps: Record<string, unknown> = {}
+    const seen: Record<string, string> = {}
+    for (const f of frames) {
+      const k = f.meta.key
+      result.statuses[k] = f.meta.status
+      if (f.meta.status !== 'ok' || f.meta.hash === null) continue
+      try {
+        result.entries[k] = decryptEntryBytes(key, k, f.bytes)
+      } catch (err) {
+        throw new OpenRecallDecryptError(k, namespace, (err as Error).message)
+      }
+      result.hashes[k] = f.meta.hash
+      seen[k] = f.meta.hash
+      if (f.meta.updatedAt !== null) stamps[k] = f.meta.updatedAt
+    }
+    result.updatedAt = sanitizeUpdatedAt(stamps, result.entries)
+    this.record(namespace, seen, [])
+    return result
+  }
+
+  /**
+   * Answer a pull from the mirror alone. Null when there is nothing on disk
+   * for the namespace, so the caller reports the server failure it got. What
+   * it records is not enumerated: the manifest on disk is this client's
+   * memory of the server, not the server.
+   */
+  private async pullFromMirror(namespace: string, clock: Clock): Promise<PullResult | null> {
+    const mirror = this.mirror
+    if (!mirror) return null
+    const t = performance.now()
+    const m = await this.mirrorTry(() => mirror.readManifest(namespace))
+    if (!m || m.namespace !== namespace || !m.entries || typeof m.entries !== 'object') return null
+    const key = this.key(namespace)
+    const cache = this.cacheFor(namespace)
+    const held = new Map<string, Held>()
+    const stamps: Record<string, unknown> = {}
+    for (const entryKey of Object.keys(m.entries)) {
+      const row = m.entries[entryKey]
+      if (!row || typeof row.hash !== 'string') continue
+      if (typeof row.updatedAt === 'string') stamps[entryKey] = row.updatedAt
+      const hit = cache?.get(cacheKey(entryKey, row.hash))
+      if (hit) {
+        held.set(entryKey, { hash: row.hash, size: hit.size, plaintext: hit.plaintext })
+        continue
+      }
+      const bytes = await this.mirrorRead(namespace, row.hash)
+      if (bytes) held.set(entryKey, { hash: row.hash, size: bytes.byteLength, bytes })
+    }
+    clock.fetchMs += performance.now() - t
+    this.decryptHeld(namespace, key, held, clock)
+
+    const entries: Record<string, string> = {}
+    const hashes: Record<string, string> = {}
+    const next = new Map<string, Cached>()
+    for (const [entryKey, h] of held) {
+      if (h.plaintext === undefined) continue
+      entries[entryKey] = h.plaintext
+      hashes[entryKey] = h.hash
+      next.set(cacheKey(entryKey, h.hash), { plaintext: h.plaintext, size: h.size })
+    }
+    this.remember(namespace, next)
+    lruSet(this.observed, namespace, { hashes: { ...hashes }, enumerated: false })
+    const fetched = Date.parse(m.fetchedAt)
+    const staleMs = Number.isFinite(fetched) ? Math.max(0, Date.now() - fetched) : 0
+    return {
+      namespace,
+      version: typeof m.version === 'number' ? m.version : 0,
+      entries,
+      updatedAt: sanitizeUpdatedAt(stamps, entries),
+      hashes,
+      served: { source: 'mirror', staleMs },
+      timings: clock,
+    }
+  }
+
+  /**
+   * Decrypt every held body that is not already plaintext, in place. Timed
+   * only when there is something to decrypt, so a pull that reused everything
+   * reports a decrypt stage of exactly zero rather than the cost of a loop
+   * that did nothing.
+   */
+  private decryptHeld(namespace: string, key: Buffer, held: Map<string, Held>, clock: Clock): void {
+    const t = performance.now()
+    let decrypted = 0
+    for (const [entryKey, h] of held) {
+      if (h.plaintext !== undefined || !h.bytes) continue
+      try {
+        h.plaintext = decryptEntryBytes(key, entryKey, h.bytes)
       } catch (err) {
         throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
       }
-      seen[entryKey] = ciphertextHash(b64)
+      decrypted += 1
     }
-    const decryptMs = performance.now() - decryptStarted
-    lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
-    return {
+    if (decrypted > 0) clock.decryptMs += performance.now() - t
+  }
+
+  /** The namespace's plaintext cache, when caching is on. */
+  private cacheFor(namespace: string): Map<string, Cached> | undefined {
+    return this.cacheEnabled ? this.plaintext.get(namespace) : undefined
+  }
+
+  /** Replace the namespace's plaintext cache with exactly what a pull holds. */
+  private remember(namespace: string, next: Map<string, Cached>): void {
+    if (this.cacheEnabled) lruSet(this.plaintext, namespace, next)
+  }
+
+  /** A mirror call that can only ever miss: a throw is a null. */
+  private async mirrorTry<T>(fn: () => Promise<T>): Promise<T | null> {
+    try {
+      return await fn()
+    } catch {
+      return null
+    }
+  }
+
+  /**
+   * A blob from the mirror, verified against its name. A mismatch (a bit
+   * flipped on disk, a partial write that somehow landed) is deleted so the
+   * next pull refetches it, and reported as a miss.
+   */
+  private async mirrorRead(namespace: string, hash: string): Promise<Uint8Array | null> {
+    const mirror = this.mirror
+    if (!mirror) return null
+    const bytes = await this.mirrorTry(() => mirror.getBlob(namespace, hash))
+    if (!bytes) return null
+    if (ciphertextHashBytes(bytes) !== hash) {
+      await this.mirrorTry(() => mirror.deleteBlob(namespace, hash))
+      return null
+    }
+    return bytes
+  }
+
+  /**
+   * Record a server-backed pull on disk: the bodies fetched this call, then
+   * the manifest that names everything held. Blobs before the manifest, as
+   * the server commits, so a crash between the two leaves unreferenced blobs
+   * rather than a manifest naming bodies that are not there. Every
+   * MIRROR_GC_EVERY pulls the blobs no manifest references are deleted, so a
+   * namespace that keeps changing does not keep every ciphertext it ever held.
+   */
+  private async mirrorWrite(
+    namespace: string,
+    version: number,
+    fresh: Fresh[],
+    rows: MirrorManifest['entries'],
+  ): Promise<void> {
+    const mirror = this.mirror
+    if (!mirror) return
+    await mapLimit(fresh, MIRROR_WRITE_CONCURRENCY, h =>
+      this.mirrorTry(() => mirror.putBlob(namespace, h.hash, h.bytes)),
+    )
+    const hashes: Record<string, string> = {}
+    for (const [k, row] of Object.entries(rows)) hashes[k] = row.hash
+    const manifest: MirrorManifest = {
       namespace,
-      version: data.version,
-      entries,
-      updatedAt: sanitizeUpdatedAt(data.content?.entryUpdatedAt, entries),
-      timings: { fetchMs, parseMs, decryptMs, bytes: res.raw.length },
+      version,
+      checksum: namespaceChecksum(hashes),
+      fetchedAt: new Date().toISOString(),
+      entries: rows,
+    }
+    await this.mirrorTry(() => mirror.writeManifest(namespace, manifest))
+    if (++this.pulls % MIRROR_GC_EVERY !== 0) return
+    const referenced = new Set(Object.values(hashes))
+    const onDisk = (await this.mirrorTry(() => mirror.listBlobs(namespace))) ?? []
+    for (const hash of onDisk) {
+      if (!referenced.has(hash)) await this.mirrorTry(() => mirror.deleteBlob(namespace, hash))
     }
   }
 
@@ -588,8 +1280,54 @@ export class OpenRecallClient {
     } catch (err) {
       throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
     }
-    this.record(namespace, { [entryKey]: data.entry }, [])
+    this.record(namespace, { [entryKey]: ciphertextHash(data.entry) }, [])
     return plaintext
+  }
+
+  /**
+   * The single-entry view as `pull` uses it for a handful of changed keys
+   * against a server that has that view and not the bulk one: ciphertext
+   * bytes, not plaintext, so the one decrypt pass in `pull` covers it, and
+   * the two 404s and the drift 503 are answers rather than throws, since a
+   * key that went missing between the hashes view and this read is not a
+   * failed pull.
+   */
+  private async entryRaw(
+    namespace: string,
+    entryKey: string,
+    clock: Clock,
+  ): Promise<
+    | { status: 'ok'; hash: string; bytes: Uint8Array }
+    | { status: 'gone' }
+    | { status: 'unreadable' }
+  > {
+    const t = performance.now()
+    const res = await this.request(
+      'entry',
+      namespace,
+      `${this.endpoint(namespace)}?view=entry&key=${encodeURIComponent(entryKey)}`,
+      { headers: this.headers() },
+    )
+    clock.fetchMs += performance.now() - t
+    clock.bytes += res.raw.length
+    if (!res.ok) {
+      const err = httpError(res)
+      if (res.status === 404 && (err.code === 'empty' || err.code === 'entry_not_found'))
+        return { status: 'gone' }
+      if (res.status === 503 && err.code === 'entry_unreadable') return { status: 'unreadable' }
+      throw err
+    }
+    const parseStarted = performance.now()
+    const data = JSON.parse(res.raw) as { entry?: unknown }
+    clock.parseMs += performance.now() - parseStarted
+    if (typeof data.entry !== 'string')
+      throw new OpenRecallProtocolError(
+        'entry',
+        namespace,
+        `no entry in the response for "${entryKey}"`,
+      )
+    const bytes = new Uint8Array(Buffer.from(data.entry, 'base64'))
+    return { status: 'ok', hash: ciphertextHashBytes(bytes), bytes }
   }
 
   /**
@@ -662,7 +1400,8 @@ export class OpenRecallClient {
     const skipped = result.skipped ?? []
     const refused = new Set(skipped.map(s => s.key))
     const stored: Record<string, string> = {}
-    for (const [k, b64] of Object.entries(toUpload)) if (!refused.has(k)) stored[k] = b64
+    for (const [k, b64] of Object.entries(toUpload))
+      if (!refused.has(k)) stored[k] = ciphertextHash(b64)
     this.record(
       namespace,
       stored,
@@ -777,9 +1516,72 @@ export class OpenRecallClient {
     let observed = this.observed.get(namespace)
     if (!observed) observed = { hashes: {}, enumerated: false }
     lruSet(this.observed, namespace, observed)
-    for (const [k, b64] of Object.entries(written)) observed.hashes[k] = ciphertextHash(b64)
+    for (const [k, hash] of Object.entries(written)) observed.hashes[k] = hash
     for (const k of deleted) delete observed.hashes[k]
   }
+}
+
+/**
+ * A server that could not be reached, as opposed to one that answered. A
+ * refusal (`OpenRecallHttpError`), a malformed answer (`OpenRecallProtocolError`)
+ * and a body that would not decrypt are all answers; only a timeout and a
+ * transport throw (a refused connection, a reset, a DNS failure) mean the
+ * mirror is entitled to speak for the server.
+ */
+function isUnreachable(err: unknown): boolean {
+  if (err instanceof OpenRecallTimeoutError) return true
+  return !(
+    err instanceof OpenRecallHttpError ||
+    err instanceof OpenRecallProtocolError ||
+    err instanceof OpenRecallDecryptError
+  )
+}
+
+/** The namespace checksum as src/hash.ts computes it: sorted `key\thash` lines. */
+function namespaceChecksum(entryChecksums: Record<string, string>): string {
+  const lines = Object.keys(entryChecksums)
+    .sort()
+    .map(k => `${k}\t${entryChecksums[k]}`)
+    .join('\n')
+  return `sha256:${createHash('sha256').update(lines).digest('hex')}`
+}
+
+/** The mirror manifest rows for what a pull holds. */
+function manifestRows(
+  held: Map<string, Held>,
+  updatedAt: Record<string, string>,
+): MirrorManifest['entries'] {
+  const rows: MirrorManifest['entries'] = {}
+  for (const [k, h] of held) {
+    if (h.plaintext === undefined) continue
+    const stamp = Object.hasOwn(updatedAt, k) ? updatedAt[k] : undefined
+    rows[k] =
+      stamp === undefined
+        ? { hash: h.hash, size: h.size }
+        : { hash: h.hash, size: h.size, updatedAt: stamp }
+  }
+  return rows
+}
+
+/** `Promise.all` with at most `limit` calls in flight; see src/memory.ts for the shape. */
+async function mapLimit<T, R>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<R>,
+): Promise<R[]> {
+  const out = new Array<R>(items.length)
+  let next = 0
+  const worker = async () => {
+    for (;;) {
+      const i = next++
+      if (i >= items.length) return
+      out[i] = await fn(items[i] as T)
+    }
+  }
+  const workers: Promise<void>[] = []
+  for (let i = 0; i < Math.min(limit, items.length); i++) workers.push(worker())
+  await Promise.all(workers)
+  return out
 }
 
 /**
@@ -833,7 +1635,14 @@ export function flattenServerText(text: string, max = 200): string {
   return clean.length > max ? `${clean.slice(0, max)}...` : clean
 }
 
-export { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from './crypto.ts'
+export {
+  ciphertextHash,
+  ciphertextHashBytes,
+  decryptEntry,
+  decryptEntryBytes,
+  deriveKey,
+  encryptEntry,
+} from './crypto.ts'
 export {
   type Finding,
   type ScanMode,

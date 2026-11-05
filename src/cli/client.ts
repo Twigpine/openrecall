@@ -5,6 +5,7 @@
 
 import { type Finding, OpenRecallClient } from '../../client/index.ts'
 import { LOCAL_ORIGIN, localFetch } from './local.ts'
+import { cacheDir, FsMirror } from './mirror.ts'
 import { LOCAL_URL, type Settings } from './settings.ts'
 
 export class MissingPassphraseError extends Error {
@@ -17,6 +18,15 @@ export class MissingPassphraseError extends Error {
   }
 }
 
+/**
+ * Both modes get the in-memory plaintext cache, so a recall decrypts only what
+ * changed since the last one. Only remote mode gets the on-disk mirror: local
+ * mode's data directory already is a ciphertext store on this machine, read
+ * in-process, and a copy of it next door would cost writes and buy nothing.
+ * The client never reads that directory itself; it goes through the handler
+ * like any other caller. `OPENRECALL_CACHE=off` (or `"cache": false` in the
+ * config file) turns both off.
+ */
 export async function makeClient(
   s: Settings,
   opts?: { onScanWarning?: (findings: Finding[]) => void; timeoutMs?: number },
@@ -31,6 +41,8 @@ export async function makeClient(
     onScanWarning: opts?.onScanWarning,
     ...(opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
     fetch: local ? await localFetch(s.dataDir) : undefined,
+    cache: s.cache,
+    mirror: !local && s.cache ? new FsMirror(cacheDir(s.home)) : undefined,
   })
 }
 

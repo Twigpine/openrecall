@@ -42,6 +42,18 @@ The passphrase lives in `~/.openrecall/config.json` (created owner-only, 0600)
 or the environment, and is read only by the local CLI / MCP server process.
 Agent configs written by `openrecall setup` never contain it.
 
+In remote mode the client also keeps a cache under `~/.openrecall/cache`: the
+ciphertext blobs it has already fetched, named by their own hash, plus one
+`mirror.json` per namespace holding entry keys, ciphertext hashes, sizes and
+timestamps. That is exactly the metadata the server sees and nothing more:
+no plaintext and no search index is ever written there, and decrypted entries
+live only in the memory of the running process. The directory is created
+0700 and its files 0600, the same custody model as `config.json`, so it is
+as exposed as the passphrase already is and no more. It lets a recall against
+an unchanged namespace cost one bodyless request, and lets a recall be
+answered from disk when the server cannot be reached (the result says so).
+The server still sees only ciphertext. `OPENRECALL_CACHE=off` turns it off.
+
 **The server can see:** namespace ids, entry keys (paths), ciphertext blobs,
 ciphertext byte sizes and hashes, and timestamps. **The server cannot see:**
 memory plaintext, your passphrase, or the derived key.
