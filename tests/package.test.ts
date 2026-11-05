@@ -11,7 +11,8 @@
  * by name, so nothing noticed.
  *
  * Needs `bun run build` first (dist/client is what it tests), as CI does, and
- * skips itself otherwise, like the stdio suite does for dist/openrecall.js.
+ * skips itself otherwise. The Node launcher suites do not share this
+ * dependency: they bundle the CLI themselves (tests/node-bundle.ts).
  * No network: the package has no runtime dependencies to fetch.
  */
 
@@ -86,6 +87,7 @@ describe.skipIf(!BUILT)('the published package, installed and used under Node', 
   test('the tarball carries the CLI bundle, the library, its declarations, and no tests', () => {
     for (const p of [
       'dist/openrecall.js',
+      'dist/openrecall.cli.js',
       'dist/client/index.js',
       'dist/client/index.d.ts',
       'dist/client/crypto.js',

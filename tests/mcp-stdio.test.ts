@@ -1,8 +1,8 @@
 /**
  * Drives `openrecall mcp` exactly as an agent does: spawn it, speak MCP over
- * stdio, call the tools. Runs against the source (Bun) and, when present, the
- * published Node bundle (dist/openrecall.js — `bun run build` first), so we know
- * `npx -y @twigpine/openrecall mcp` works without Bun.
+ * stdio, call the tools. Runs against the source (Bun) and against a Node
+ * bundle built from that same source for this run (tests/node-bundle.ts), so
+ * we know `npx -y @twigpine/openrecall mcp` works without Bun.
  *
  * Two server processes share one local store to prove what one agent saves,
  * another agent recalls.
@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { NODE, nodeBundle } from './node-bundle.ts'
 
 const homes: string[] = []
 afterAll(() => {
@@ -30,9 +31,9 @@ type Launcher = { name: string; command: string; args: string[] }
 const launchers: Launcher[] = [
   { name: 'source (bun)', command: process.execPath, args: ['bin/openrecall.ts'] },
 ]
-if (existsSync('dist/openrecall.js')) {
-  launchers.push({ name: 'dist (node)', command: 'node', args: ['dist/openrecall.js'] })
-}
+// Never a stale dist/: the bundle is built from the current source, so the Node
+// launcher is exercised on every run that has a `node`.
+if (NODE) launchers.push({ name: 'bundle (node)', command: NODE, args: [await nodeBundle()] })
 
 async function connect(l: Launcher, env: Record<string, string>): Promise<Client> {
   // Strip the test preload's server env so the child resolves its own settings.
