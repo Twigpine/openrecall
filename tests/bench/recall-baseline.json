@@ -8,16 +8,16 @@
   "answerable": 180,
   "systems": {
     "tfidf": {
-      "recallAt1": 0.3778,
-      "recallAt5": 0.6278,
-      "recallAt10": 0.6833,
-      "mrr": 0.493,
-      "ndcg10": 0.5397,
-      "staleAboveGold": 0.4,
-      "abstentionPrecision": null,
-      "abstentionRecall": 0,
-      "falseAnswerRate": 0.6683,
-      "bytesPerQuery": 9798
+      "recallAt1": 0.4389,
+      "recallAt5": 0.6167,
+      "recallAt10": 0.6389,
+      "mrr": 0.5234,
+      "ndcg10": 0.5524,
+      "staleAboveGold": 0.525,
+      "abstentionPrecision": 0.1702,
+      "abstentionRecall": 0.32,
+      "falseAnswerRate": 0.3854,
+      "bytesPerQuery": 6700
     },
     "substring": {
       "recallAt1": 0.0389,

@@ -56,8 +56,14 @@ is never printed.
 
 ## Recall quality harness
 
-`memory_recall` ranks locally with the TF-IDF ranker in `src/mcp/relevance.ts`.
-The harness in `tests/bench/` is the yardstick a ranker change is judged by.
+`memory_recall` ranks locally with the BM25F ranker in `src/mcp/relevance.ts`,
+over an in-process index per namespace that is brought up to date from each
+pull's entry fingerprints, so an unchanged entry is never re-tokenized. The
+harness in `tests/bench/` is the yardstick a ranker change is judged by; it
+calls the ranker as a pure function, which builds a transient index per
+query, so its `ms/q` column is the cold cost (tokenize plus score), not the
+warm one. The row name `tfidf` is kept for the baseline's sake: it is the
+product ranker, whatever it is called.
 
 **What it measures.** `tests/bench/recall-fixture.ts` generates, from a seed, a
 corpus of 2,000 (or 10,000) notes in the shape the memory guide prescribes:
@@ -98,11 +104,31 @@ substring  0.0389  0.6056  0.6667  0.2934   0.3869  0.5000   n/a  0.0000  0.9659
 full       0.0000  0.0111  0.0167  0.0050   0.0077  0.0250   n/a  0.0000  1.0000   984323   0.0
 ```
 
-At 10,000 entries the same questions drop to R@1 0.26 and R@10 0.58 for
-`tfidf` at ~130 ms per query: more notes about a topic bury the short note
-that answers it, which is the failure the fixture is built to reproduce.
-Neither the ranker nor grep ever abstains at this scale; every unanswerable
-question gets an answer.
+At 10,000 entries the same questions dropped to R@1 0.26 and R@10 0.58 for
+that ranker at ~130 ms per query: more notes about a topic bury the short
+note that answers it, which is the failure the fixture is built to reproduce.
+Neither that ranker nor grep ever abstained; every unanswerable question got
+an answer.
+
+Measured with the BM25F ranker and the relevance floor fitted in
+`src/mcp/relevance.ts` (same seed, corpus and questions):
+
+```
+system        R@1     R@5    R@10     MRR  nDCG@10   stale    absP    absR   false  bytes/q  ms/q
+tfidf      0.4389  0.6167  0.6389  0.5234   0.5524  0.5250  0.1702  0.3200  0.3854     6700  24.9
+```
+
+Length normalization is what moved R@1 and MRR: a one-fact note now beats a
+long note that repeats its topic words. The floor is what moved abstention
+and the false-answer rate: 8 of the 25 unanswerable questions come back
+empty, where none did. It also costs R@10: 12 paraphrase questions whose gold
+sat inside a ten-way tie on one shared word (a person's name) are now
+withheld, because that is the same lexical shape as an unanswerable question
+and no floor tells them apart. `stale` moved the wrong way for a reason the
+fixture makes visible: the newer note of each update pair carries an extra
+"replaces the earlier note" sentence, and a length-normalizing ranker prefers
+the shorter, older one; both rankers are recency-blind, and the tiebreak on
+`updatedAt` that fixes this is a later change.
 
 **The preregistered rule.** `tests/bench/recall-baseline.json` holds the
 numbers the committed ranker produces for the committed seed and corpus
