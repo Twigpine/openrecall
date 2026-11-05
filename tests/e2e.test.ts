@@ -217,6 +217,28 @@ describe('e2e: operational surfaces', () => {
     expect(await res.json()).toEqual({ ok: true, service: 'openrecall' })
   })
 
+  test('HEAD over the socket mirrors GET, including the declared length', async () => {
+    // The handler-level suite cannot prove this: content-length is the one
+    // header the runtime derives, and a bodyless Response is derived as 0.
+    const get = await fetch(`${base}/health`)
+    const payload = await get.text()
+    const head = await fetch(`${base}/health`, { method: 'HEAD' })
+
+    expect(head.status).toBe(get.status)
+    for (const name of [
+      'content-type',
+      'cache-control',
+      'x-content-type-options',
+      'referrer-policy',
+    ]) {
+      expect(head.headers.get(name)).toBe(get.headers.get(name))
+    }
+    expect(head.headers.get('content-length')).toBe(
+      String(new TextEncoder().encode(payload).byteLength),
+    )
+    expect(await head.text()).toBe('')
+  })
+
   test('a namespace whose index is corrupt answers 503 rather than looking empty', async () => {
     const ns = 'user:e2e-corrupt'
     const c = client()
