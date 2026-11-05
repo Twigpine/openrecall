@@ -132,10 +132,20 @@ async function cmdStatus(timings: boolean) {
   )
   console.log(`store      ${describeTarget(s)}`)
   console.log(`namespace  ${s.namespace}`)
+  // Remote mode only: local mode has no mirror, its data dir already is one.
+  if (s.url !== LOCAL_URL && s.cache) {
+    const { describeMirror } = await import('../src/cli/mirror.ts')
+    const m = await describeMirror(s.home, s.namespace)
+    if (m)
+      console.log(
+        `cache      ${m.path} (${m.entries} ${m.entries === 1 ? 'entry' : 'entries'}, ${Math.round(m.bytes / 1024)} KB of ciphertext)`,
+      )
+  }
   // Secrets are reported as present/absent only — never their values.
   console.log(`passphrase ${s.passphrase ? 'set' : 'MISSING'}`)
   console.log(`api key    ${s.apiKey ? 'set' : 'none'}`)
   console.log(`scan       ${s.scan}`)
+  if (!s.cache) console.log('cache      off')
   const overrides = envOverrides()
   if (overrides.length)
     console.log(`env        ${overrides.join(', ')} (overriding the config file)`)

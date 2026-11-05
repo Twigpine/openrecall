@@ -115,6 +115,9 @@ the first two.
     8-second MCP connect timeout.
   - A **remote** store additionally needs `"sandbox": {"network": "allow"}` in
     your Zero config. `setup` points this out but never changes it for you.
+    When the server cannot be reached, a recall in remote mode is answered
+    from the ciphertext cache under `~/.openrecall/cache` and says so; saves
+    still need the server.
 - **Use Ask mode.** Zero hides tools that need approval in Auto mode, and
   every MCP tool needs approval. Approve the memory tools when Zero asks.
 - **Tool names.** Tools appear as `mcp_openrecall_memory_recall` and so on.

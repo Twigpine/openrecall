@@ -17,7 +17,14 @@ import { setEventSink } from '../src/log.ts'
 import { getData, getHashes, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
-import { contentPath, getStore, resetStore, setStore } from '../src/store/index.ts'
+import {
+  blobPrefix,
+  contentPath,
+  getStore,
+  manifestPath,
+  resetStore,
+  setStore,
+} from '../src/store/index.ts'
 import { UnreadableManifestError } from '../src/types.ts'
 
 const NOW = '2026-06-24T00:00:00.000Z'
@@ -428,5 +435,120 @@ describe('crash visibility across the commit sequence', () => {
     expect(await store.get(legacy)).toBeNull()
     const after = await assertConsistent(ns)
     expect(Object.keys(after.content.entries)).toEqual(['keep.md'])
+  })
+})
+
+/**
+ * The full read takes no namespace lock (local mode's cross-process lock covers
+ * writes only), so a write can land between its manifest read and a blob read.
+ * tests/local-concurrency.test.ts races real processes for this; here the
+ * writer is made to land in exactly that gap, every time.
+ */
+describe('a lock-free read against a writer replacing an entry', () => {
+  /**
+   * Plays the writer. When the reader asks for the blob its manifest names for
+   * `key`, this store first commits a replacement through the real write path
+   * (new blob, new manifest, old blob reclaimed) and only then answers, so the
+   * answer is null: what a reader on disk gets when reclaim beat it to the old
+   * blob. It does so for the first `moves` such reads, so the writer can be
+   * made to keep moving for as long as the reader keeps looking.
+   */
+  function racing(inner: BlobStore, ns: string, key: string, moves: number) {
+    const slug = namespaceSlug(ns)
+    // The reader's reads only: the writer's own commit reads the manifest
+    // through this same store, and its turn must not count against the reader.
+    const counts = { moves: 0, manifestReads: 0, keyReads: 0 }
+    let writing = false
+    const store: BlobStore = {
+      get: async p => {
+        if (p === manifestPath(slug) && !writing) counts.manifestReads++
+        if (p.startsWith(blobPrefix(slug))) {
+          const raw = (await inner.get(manifestPath(slug))) as Uint8Array
+          const m = JSON.parse(new TextDecoder().decode(raw)) as {
+            entries: Record<string, { hash: string }>
+          }
+          const current = m.entries[key]
+          if (current && p === contentPath(slug, current.hash)) {
+            counts.keyReads++
+            if (counts.moves < moves) {
+              counts.moves++
+              const body = b64(`hot ${counts.moves}`)
+              writing = true
+              try {
+                await upsert(ns, slug, 'local', { entries: { [key]: body } }, NOW)
+              } finally {
+                writing = false
+              }
+            }
+          }
+        }
+        return inner.get(p)
+      },
+      put: (p, b) => inner.put(p, b),
+      delete: p => inner.delete(p),
+      list: p => inner.list(p),
+      describe: () => `racing(${inner.describe()})`,
+      erasure: inner.erasure,
+    }
+    return { store, counts }
+  }
+
+  test('a key replaced under the reader is re-read from the manifest the writer published', async () => {
+    const ns = 'user:race-once'
+    await seed(ns, { 'a.md': b64('a1'), 'hot.md': b64('hot 0') })
+    const r = racing(getStore(), ns, 'hot.md', 1)
+    setStore(r.store)
+
+    const data = await getData(ns, namespaceSlug(ns))
+    expect(r.counts.moves).toBe(1) // the writer did land in the gap
+    expect(Buffer.from(data.content.entries['hot.md'] as string, 'base64').toString()).toBe('hot 1')
+    expect(data.content.entryChecksums['hot.md']).toBe(
+      sha256Prefixed(new Uint8Array(Buffer.from('hot 1'))),
+    )
+    expect(data.content.entryUpdatedAt['hot.md']).toBe(NOW)
+    expect(Buffer.from(data.content.entries['a.md'] as string, 'base64').toString()).toBe('a1')
+    expect(data.version).toBe(2)
+    // One re-read of the manifest, and only the moved key read again.
+    expect(r.counts.manifestReads).toBe(2)
+    expect(r.counts.keyReads).toBe(2)
+  })
+
+  test('a writer that moves on every look is given up after two more looks, not followed forever', async () => {
+    const ns = 'user:race-forever'
+    await seed(ns, { 'a.md': b64('a1'), 'hot.md': b64('hot 0') })
+    const r = racing(getStore(), ns, 'hot.md', Number.POSITIVE_INFINITY)
+    setStore(r.store)
+
+    const data = await getData(ns, namespaceSlug(ns))
+    expect(r.counts.moves).toBe(3)
+    expect(r.counts.manifestReads).toBe(3)
+    expect(r.counts.keyReads).toBe(3)
+    // The key is skipped as drift would be, and nothing else is disturbed.
+    expect(data.content.entries['hot.md']).toBeUndefined()
+    expect(data.content.entryChecksums['hot.md']).toBeUndefined()
+    expect(data.content.entryUpdatedAt['hot.md']).toBeUndefined()
+    expect(Buffer.from(data.content.entries['a.md'] as string, 'base64').toString()).toBe('a1')
+    // What is served is the manifest the reader last looked at; the writer's
+    // third move landed after that look and is only visible to the next read.
+    expect(data.version).toBe(3)
+    expect((await getHashes(ns, namespaceSlug(ns))).version).toBe(4)
+  })
+
+  test('control: a blob that is simply gone costs one manifest re-read and no second blob read', async () => {
+    const ns = 'user:race-drift'
+    await seed(ns, { 'a.md': b64('a1'), 'hot.md': b64('hot 0') })
+    const slug = namespaceSlug(ns)
+    const hash = (await getHashes(ns, slug)).entryChecksums['hot.md'] as string
+    await getStore().delete(contentPath(slug, hash))
+    const r = racing(getStore(), ns, 'hot.md', 0)
+    setStore(r.store)
+
+    const data = await getData(ns, slug)
+    expect(data.content.entries['hot.md']).toBeUndefined()
+    expect(Buffer.from(data.content.entries['a.md'] as string, 'base64').toString()).toBe('a1')
+    expect(data.version).toBe(1)
+    // The manifest is looked at again, found unchanged, and that settles it.
+    expect(r.counts.manifestReads).toBe(2)
+    expect(r.counts.keyReads).toBe(1)
   })
 })

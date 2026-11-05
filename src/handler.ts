@@ -8,11 +8,25 @@
  *   GET|HEAD /api/memory/:ns               → full data (ciphertext entries)
  *   GET|HEAD /api/memory/:ns?view=hashes   → metadata + per-key checksums only
  *   GET|HEAD /api/memory/:ns?view=entry&key=:key → ONE entry's ciphertext
+ *   POST     /api/memory/:ns?view=entries      → the ciphertext of the keys in the body
+ *                                            `{ keys: string[] }`, as binary frames
  *   PUT      /api/memory/:ns               → delta upsert (+ optional deletions)
  *   DELETE   /api/memory/:ns?key=:key      → remove one entry
  *
  * Every other method on a known route is a 405 with an `Allow` header. A
  * malformed percent-escape in the path is a 400, not a 500.
+ *
+ * `view=entries` is the bulk read an incremental pull makes for the keys whose
+ * hash moved since it last looked. It is a POST with a `view` query rather
+ * than a GET or a path suffix because two thousand keys overflow a URL, and a
+ * namespace may contain `/`, so a key after it would be ambiguous. The body
+ * answers `application/octet-stream` in the frame layout src/frames.ts
+ * documents, with `x-openrecall-frames: 1` so a client can tell it from a
+ * JSON answer, and one status per key (`ok`, `not_found`, `unreadable`,
+ * `invalid_key`) in place of per-request refusals. Its request-level refusals:
+ *   404 empty             → no such namespace, as the other reads
+ *   400 bad_request       → no `keys` array, or none, or more than the entry cap
+ *   413 payload_too_large → the same body cap the PUT has
  *
  * `view=entry` is the bounded read. Proving a passphrase decrypts what is
  * stored needs one entry, and before it the only read returning ciphertext was
@@ -32,8 +46,9 @@
 
 import { authenticate, authorizeNamespace } from './auth.ts'
 import { config } from './config.ts'
+import { encodeFrames, FRAMES_HEADER } from './frames.ts'
 import { logRejection } from './log.ts'
-import { getData, getEntry, getHashes, upsert } from './memory.ts'
+import { getData, getEntries, getEntry, getHashes, upsert } from './memory.ts'
 import {
   InvalidNameError,
   namespaceSlug,
@@ -42,10 +57,17 @@ import {
 } from './namespace.ts'
 import { QuotaError } from './quota.ts'
 import { take } from './ratelimit.ts'
-import { isBaseHash, parseUpsertRequest, StaleBaseError, UnreadableManifestError } from './types.ts'
+import {
+  isBaseHash,
+  parseEntriesRequest,
+  parseUpsertRequest,
+  StaleBaseError,
+  UnreadableManifestError,
+} from './types.ts'
 
-// Applied to every response. The API serves only JSON and is consumed by
-// programmatic clients, so we lock down sniffing/caching/referrer leakage.
+// Applied to every response. The API serves JSON, and binary frames on one
+// route, to programmatic clients only, so we lock down sniffing/caching/referrer
+// leakage.
 const SECURITY_HEADERS = {
   'x-content-type-options': 'nosniff',
   'referrer-policy': 'no-referrer',
@@ -81,7 +103,7 @@ function apiError(
 }
 
 const HEALTH_METHODS = 'GET, HEAD'
-const MEMORY_METHODS = 'GET, HEAD, PUT, DELETE'
+const MEMORY_METHODS = 'GET, HEAD, POST, PUT, DELETE'
 
 function methodNotAllowed(method: string, allow: string): Response {
   return apiError(
@@ -314,6 +336,59 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
       // await, not return: the rejection must be caught by this try block so a
       // corrupt manifest maps to 503 rather than escaping as a 500.
       return await read()
+    }
+
+    if (req.method === 'POST') {
+      if (url.searchParams.get('view') !== 'entries') {
+        return apiError('method_not_allowed', 'POST supports only ?view=entries', 405, undefined, {
+          allow: MEMORY_METHODS,
+        })
+      }
+      const declared = declaredBodyBytes(req)
+      if (declared === 'invalid') {
+        return apiError('bad_request', 'invalid content-length header', 400)
+      }
+      if (declared !== null && declared > config.limits.maxBodyBytes) {
+        return apiError('payload_too_large', 'request body too large', 413, {
+          max_bytes: config.limits.maxBodyBytes,
+        })
+      }
+      let body: unknown
+      try {
+        body = await req.json()
+      } catch {
+        return apiError('bad_request', 'body is not valid JSON', 400)
+      }
+      let keys: string[]
+      try {
+        keys = parseEntriesRequest(body)
+      } catch (err) {
+        return apiError('bad_request', (err as Error).message, 400)
+      }
+      // Bounded by the same cap a namespace is, since no namespace can hold
+      // more keys than that and a request naming more is asking for work the
+      // manifest cannot have. Each key's own validity is a per-frame status.
+      const max = config.limits.maxEntriesPerNamespace
+      if (keys.length === 0 || keys.length > max) {
+        return apiError('bad_request', `\`keys\` must name between 1 and ${max} entries`, 400, {
+          max_keys: max,
+        })
+      }
+      const found = await getEntries(namespace, nsSlug, keys)
+      if (found.status === 'no_namespace') {
+        return apiError('empty', 'no memory for this namespace yet', 404)
+      }
+      const frames = encodeFrames(found.header, found.frames)
+      // A Uint8Array is a BodyInit at runtime; the DOM typing of typed arrays
+      // under TS 5.7 is what the cast is for, not the value.
+      return new Response(frames as unknown as BodyInit, {
+        status: 200,
+        headers: {
+          'content-type': 'application/octet-stream',
+          [FRAMES_HEADER]: '1',
+          ...SECURITY_HEADERS,
+        },
+      })
     }
 
     if (req.method === 'PUT') {

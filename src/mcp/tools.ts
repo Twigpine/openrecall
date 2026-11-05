@@ -15,6 +15,7 @@ import {
   OpenRecallHttpError,
   OpenRecallProtocolError,
   OpenRecallTimeoutError,
+  type PullOptions,
   type PullResult,
 } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
@@ -617,7 +618,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
    * because the `### key (ns)` header in the output keys off its presence.
    */
   function docsOf(r: PullResult, source: string, labelled: boolean): IndexDoc[] {
-    const hashes = (r as PullResult & { hashes?: Record<string, string> }).hashes
+    const hashes = r.hashes
     return Object.entries(r.entries).map(([key, content]) => {
       const updatedAt = r.updatedAt[key]
       return {
@@ -637,9 +638,9 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
    * decrypted and one key picked out of it.
    */
   /** `client.pull`, with its stage timings and entry count credited to the timer. */
-  async function pullTimed(timer: Timer, source: string): Promise<PullResult> {
+  async function pullTimed(timer: Timer, source: string, opts?: PullOptions): Promise<PullResult> {
     const started = performance.now()
-    const r = await client.pull(source)
+    const r = await client.pull(source, opts)
     timer.pulled(r, performance.now() - started)
     return r
   }
@@ -701,11 +702,18 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             ? [...new Set(namespaces.map(ns => validateNamespace(ns.trim())))]
             : [nsOf(namespace)]
           const ns = sources.join(', ')
+          // Recall is the one read that may be answered from the local cache
+          // while the server is unreachable: it is read-only, it is what an
+          // agent needs first, and the lead line says so when it happens.
+          // `get` and `search` do not allow it, nor does any write.
+          let staleMs: number | null = null
           const pulled = await Promise.all(
             sources.map(async source => {
               try {
-                const r = await pullTimed(timer, source)
-                if (Object.keys(r.entries).length === 0) {
+                const r = await pullTimed(timer, source, { allowStale: true })
+                if (r.served?.source === 'mirror')
+                  staleMs = Math.max(staleMs ?? 0, r.served.staleMs)
+                if (Object.keys(r.entries).length === 0 && r.served?.source !== 'mirror') {
                   const lost = await lostEntries(client, source, r.version)
                   if (lost) throw new Rendered(lost)
                 }
@@ -805,8 +813,12 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           // the tail is present and its count is as wide as it can get) because
           // both lengths depend on numbers that are only known once the loop that
           // spends the budget has finished.
+          const staleNote =
+            staleMs === null
+              ? ''
+              : ` (served from the local cache, ${Math.round(staleMs / 1000)}s stale: the server could not be reached)`
           const leadFor = (n: number) =>
-            `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}:\n\n`
+            `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}${staleNote}:\n\n`
           // Two different reasons a relevant entry is missing, and both have to be
           // reported. Only budget omissions were counted, so `limit` trimming was
           // silent: a namespace with 15 entries above the floor and a limit of 5

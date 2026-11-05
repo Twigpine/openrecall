@@ -141,7 +141,7 @@ describe('e2e: a client that has not adopted the new contract still works', () =
       entryChecksums: Record<string, string>
     }
     // The server advertises both; the client reads neither and still works.
-    expect(raw.supports).toEqual(['base-precondition', 'entry-view'])
+    expect(raw.supports).toEqual(['base-precondition', 'entry-view', 'entries-view'])
     expect(raw.erasure).toBe('erases')
     expect(await client().hashes(ns)).toEqual(raw.entryChecksums)
   })

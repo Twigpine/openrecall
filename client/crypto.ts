@@ -63,7 +63,16 @@ export function encryptEntry(key: Buffer, entryKey: string, plaintext: string): 
 
 /** Decrypt a base64 ciphertext blob → plaintext. Throws on tamper/wrong key. */
 export function decryptEntry(key: Buffer, entryKey: string, b64: string): string {
-  const blob = Buffer.from(b64, 'base64')
+  return decryptEntryBytes(key, entryKey, Buffer.from(b64, 'base64'))
+}
+
+/**
+ * Decrypt raw ciphertext bytes → plaintext. The bulk entries view and the
+ * on-disk mirror hold bytes, not base64, and re-encoding them only to decode
+ * them again would cost more than the cipher does.
+ */
+export function decryptEntryBytes(key: Buffer, entryKey: string, bytes: Uint8Array): string {
+  const blob = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength)
   if (blob.length < 1 + NONCE_LEN + TAG_LEN) throw new Error('ciphertext too short')
   const version = blob[0]
   if (version !== VERSION) throw new Error(`unsupported ciphertext version ${version}`)
@@ -78,5 +87,10 @@ export function decryptEntry(key: Buffer, entryKey: string, b64: string): string
 
 /** sha256:<hex> of the base64-decoded ciphertext — matches the server's hash. */
 export function ciphertextHash(b64: string): string {
-  return `sha256:${createHash('sha256').update(Buffer.from(b64, 'base64')).digest('hex')}`
+  return ciphertextHashBytes(Buffer.from(b64, 'base64'))
+}
+
+/** sha256:<hex> of raw ciphertext bytes — the same digest, for bodies not in base64. */
+export function ciphertextHashBytes(bytes: Uint8Array): string {
+  return `sha256:${createHash('sha256').update(bytes).digest('hex')}`
 }

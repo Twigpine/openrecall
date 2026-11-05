@@ -56,6 +56,7 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { ciphertextHash, OpenRecallClient } from '../client/index.ts'
+import { encodeFrames } from '../src/frames.ts'
 import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import {
@@ -1761,6 +1762,97 @@ function ciphertextServer() {
 }
 
 /**
+ * `ciphertextServer` as a current release presents itself: it advertises the
+ * single-entry and bulk entries views and answers them, the latter as the
+ * binary frames the client decodes. The stub above sends no `supports`, so
+ * every read it answers goes through the full JSON view; this one drives the
+ * incremental path (hashes view, then frames), which is the path a current
+ * client takes against a current server, and it has to be as plaintext-free.
+ */
+function framesServer() {
+  const entries = new Map<string, string>()
+  let version = 0
+  const stamp = '2026-09-04T00:00:00.000Z'
+  const hashesOf = () => Object.fromEntries([...entries].map(([k, v]) => [k, ciphertextHash(v)]))
+  return async ({ href, method, body }: { href: string; method: string; body: string }) => {
+    const u = new URL(href)
+    if (method === 'PUT') {
+      let payload: { entries?: Record<string, string>; deletions?: string[] }
+      try {
+        payload = JSON.parse(body)
+      } catch {
+        return new Response(null, { status: 400 })
+      }
+      for (const [k, v] of Object.entries(payload.entries ?? {})) entries.set(k, v)
+      const deleted = (payload.deletions ?? []).filter(k => entries.delete(k))
+      version++
+      return Response.json({ version, deleted })
+    }
+    if (method === 'DELETE') {
+      entries.delete(u.searchParams.get('key') ?? '')
+      version++
+      return new Response(null, { status: 204 })
+    }
+    if (entries.size === 0)
+      return Response.json(
+        { error: { code: 'empty', message: 'no memory for this namespace yet' } },
+        { status: 404 },
+      )
+    if (method === 'POST' && u.searchParams.get('view') === 'entries') {
+      const { keys } = JSON.parse(body) as { keys: string[] }
+      const frames = keys.map(key => {
+        const ct = entries.get(key)
+        if (ct === undefined) {
+          return {
+            meta: { key, hash: null, size: 0, updatedAt: null, status: 'not_found' as const },
+            bytes: new Uint8Array(0),
+          }
+        }
+        const bytes = new Uint8Array(Buffer.from(ct, 'base64'))
+        return {
+          meta: {
+            key,
+            hash: ciphertextHash(ct),
+            size: bytes.length,
+            updatedAt: stamp,
+            status: 'ok' as const,
+          },
+          bytes,
+        }
+      })
+      const encoded = encodeFrames(
+        {
+          namespace: 'user:stub',
+          version,
+          lastModified: stamp,
+          erasure: 'erases',
+          count: frames.length,
+        },
+        frames,
+      )
+      return new Response(encoded as unknown as BodyInit, {
+        headers: { 'content-type': 'application/octet-stream', 'x-openrecall-frames': '1' },
+      })
+    }
+    if (u.searchParams.get('view') === 'hashes')
+      return Response.json({
+        version,
+        entryChecksums: hashesOf(),
+        entryUpdatedAt: Object.fromEntries([...entries.keys()].map(k => [k, stamp])),
+        supports: ['base-precondition', 'entry-view', 'entries-view'],
+      })
+    if (u.searchParams.get('view') === 'entry') {
+      const key = u.searchParams.get('key') ?? ''
+      const ct = entries.get(key)
+      if (ct === undefined)
+        return Response.json({ error: { code: 'entry_not_found' } }, { status: 404 })
+      return Response.json({ version, key, entry: ct, entryChecksum: ciphertextHash(ct) })
+    }
+    return Response.json({ version, content: { entries: Object.fromEntries(entries) } })
+  }
+}
+
+/**
  * What one captured conversation got wrong: an off-origin request, the sentinel
  * in a URL, a header or a body, or a body the normalizer could not read.
  *
@@ -1906,6 +1998,51 @@ describe('single-origin tool traffic', () => {
     expect(listed).toContain('notes/other.md')
     // Reads against a populated namespace, so the GET bodies carry real entries.
     expect(cap.bodies.filter(b => b.includes('"entries"')).length).toBeGreaterThan(1)
+    expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
+    assertNoPlaintext(cap)
+  })
+
+  // The same rule down the incremental path: the stub advertises the entry
+  // views, so recall and search go hashes-view-then-frames and get goes
+  // through the single-entry view. The POST carries a key list in its body,
+  // which is a new place for plaintext to land, and the one this checks.
+  test('no plaintext reaches the wire down the incremental path either', async () => {
+    const { cap, fn } = intercept(framesServer())
+    globalThis.fetch = fn
+    let recalled = ''
+    let got = ''
+    let searched = ''
+    let listed = ''
+    try {
+      const client = new OpenRecallClient({ url, passphrase: 'test-passphrase', cache: true })
+      const tools = makeTools(client, NS)
+      await tools.save(
+        'notes/ledger.md',
+        `---\ndescription: the quokka ledger note\n---\nThe quokka ledger records ${sentinel} in full.`,
+      )
+      await tools.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      recalled = (await tools.recall('quokka ledger records')).text
+      // A second recall is the warm one: cached, so no body read at all.
+      recalled = (await tools.recall('quokka ledger records')).text
+      searched = (await tools.search('quokka')).text
+      got = (await tools.get('notes/ledger.md')).text
+      listed = (await tools.list()).text
+    } finally {
+      globalThis.fetch = realFetch
+    }
+
+    expect(got).toContain(sentinel)
+    expect(recalled).toContain('notes/ledger.md')
+    expect(searched).toContain('notes/ledger.md')
+    expect(listed).toContain('notes/other.md')
+    // Non-vacuous: the bulk view was really used, exactly once (the first
+    // recall), and the full view never.
+    const posts = cap.hrefs.filter(
+      (h, i) => h.includes('view=entries') && cap.bodies[i]?.includes('"keys"'),
+    )
+    expect(posts.length).toBe(1)
+    // A bodyless request with no view is the full read; the PUTs have bodies.
+    expect(cap.hrefs.filter((h, i) => !new URL(h).search && !cap.bodies[i])).toEqual([])
     expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
     assertNoPlaintext(cap)
   })

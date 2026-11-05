@@ -95,7 +95,7 @@ describe('methods on the memory route', () => {
     test(`${method} is a 405 that names the allowed verbs`, async () => {
       const res = await call(memory('user:edge-methods'), { method })
       expect(res.status).toBe(405)
-      expect(res.headers.get('allow')).toBe('GET, HEAD, PUT, DELETE')
+      expect(res.headers.get('allow')).toBe('GET, HEAD, POST, PUT, DELETE')
     })
   }
 })

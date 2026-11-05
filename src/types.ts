@@ -9,6 +9,7 @@
  * client shim is a thin adapter rather than a rewrite.
  */
 
+import type { Frame, FramesHeader } from './frames.ts'
 import type { Erasure } from './store/blobstore.ts'
 
 /** Per-namespace manifest, persisted as its own blob. */
@@ -56,6 +57,13 @@ export type MemoryHashes = {
   lastModified: string
   checksum: string
   entryChecksums: Record<string, string>
+  /**
+   * entryKey -> ISO 8601 from the manifest, the same rows `entryChecksums`
+   * comes from. Here so an incremental pull, which fetches bodies only for the
+   * keys whose hash moved, can still report a timestamp for the ones it did
+   * not fetch. A client predating the field ignores it.
+   */
+  entryUpdatedAt: Record<string, string>
   /** Whether this deployment's store actually erases on delete. */
   erasure: Erasure
   /**
@@ -106,6 +114,35 @@ export type EntryRead =
   | { status: 'no_namespace' }
   | { status: 'no_entry' }
   | { status: 'unreadable' }
+
+/**
+ * What a bulk entries read found: either no namespace at all (the same `empty`
+ * the other reads answer) or one frame per requested key, each carrying its
+ * own status, ready for `encodeFrames`. Per-key outcomes live in the frames
+ * rather than in a second result shape because one lost body must not fail a
+ * read of everything else, and a client must still hear about it.
+ */
+export type EntriesRead =
+  | { status: 'no_namespace' }
+  | { status: 'ok'; header: FramesHeader; frames: Frame[] }
+
+/**
+ * Validate and narrow the body of `POST ?view=entries`: `{ keys: string[] }`.
+ * Shape only. Each key's own validity is judged per key by `getEntries`, so a
+ * caller that mistyped one of two thousand keys gets one `invalid_key` frame
+ * rather than a refused request, and the count cap is the handler's, since it
+ * comes from config.
+ */
+export function parseEntriesRequest(raw: unknown): string[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('body must be a JSON object')
+  }
+  const keys = (raw as Record<string, unknown>).keys
+  if (!Array.isArray(keys) || keys.some(k => typeof k !== 'string')) {
+    throw new Error('`keys` must be an array of entry keys')
+  }
+  return keys as string[]
+}
 
 /** PUT request body. */
 export type UpsertRequest = {
