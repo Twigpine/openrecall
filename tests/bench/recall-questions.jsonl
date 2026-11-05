@@ -1,0 +1,205 @@
+{"id":"q001","query":"what branch model does ember use","gold":"project/branch-model-ember.md","kind":"lexical"}
+{"id":"q002","query":"what operating system does tobias use","gold":"user/operating-system-tobias.md","kind":"update","superseded":"user/operating-system-tobias-2025-01.md"}
+{"id":"q003","query":"kestrel review rule","gold":"feedback/review-rule-kestrel.md","kind":"lexical"}
+{"id":"q004","query":"which newsletter announces foxglove releases","gold":null,"kind":"unanswerable"}
+{"id":"q005","query":"does priya have a mascot","gold":null,"kind":"unanswerable"}
+{"id":"q006","query":"what transport ferries quarry work async","gold":"project/broker-quarry.md","kind":"paraphrase"}
+{"id":"q007","query":"what runtime does marrow run on","gold":"project/runtime-marrow.md","kind":"update","superseded":"project/runtime-marrow-2025-10.md"}
+{"id":"q008","query":"what branch model does larkspur use","gold":"project/branch-model-larkspur.md","kind":"lexical"}
+{"id":"q009","query":"how long are tidewater logs kept","gold":"reference/log-retention-tidewater.md","kind":"update","superseded":"reference/log-retention-tidewater-2025-08.md"}
+{"id":"q010","query":"when should I break marrow work into smaller pieces","gold":"feedback/pull-request-size-marrow.md","kind":"paraphrase"}
+{"id":"q011","query":"quarry datastore decision","gold":"project/datastore-quarry.md","kind":"lexical"}
+{"id":"q012","query":"larkspur source code repository","gold":"reference/repository-larkspur.md","kind":"lexical"}
+{"id":"q013","query":"is there a firewall in front of kestrel in the staging region","gold":null,"kind":"unanswerable"}
+{"id":"q014","query":"what wording belongs in the bramble history entry","gold":"feedback/commit-style-bramble.md","kind":"paraphrase"}
+{"id":"q015","query":"where is the tidewater source repository","gold":"reference/repository-tidewater.md","kind":"lexical"}
+{"id":"q016","query":"how do we merge in foxglove","gold":"project/branch-model-foxglove.md","kind":"lexical"}
+{"id":"q017","query":"at what pace does bramble start rejecting a chatty consumer","gold":"reference/rate-limit-bramble.md","kind":"paraphrase"}
+{"id":"q018","query":"what tests do I run before marrow work is done","gold":"feedback/test-rule-marrow-2026-02.md","kind":"update","superseded":"feedback/test-rule-marrow.md"}
+{"id":"q019","query":"bramble metrics dashboard","gold":"reference/dashboard-bramble-2026-08.md","kind":"update","superseded":"reference/dashboard-bramble.md"}
+{"id":"q020","query":"what timezone is sven in","gold":"user/timezone-sven.md","kind":"lexical"}
+{"id":"q021","query":"what is the timeout for marrow","gold":"reference/timeout-marrow.md","kind":"lexical"}
+{"id":"q022","query":"where is the bramble config file","gold":"reference/config-path-bramble-2026-09.md","kind":"update","superseded":"reference/config-path-bramble.md"}
+{"id":"q023","query":"which interpreter parses the dotfiles of sven","gold":"user/shell-sven.md","kind":"paraphrase"}
+{"id":"q024","query":"saltmarsh login and identity","gold":"project/auth-saltmarsh.md","kind":"update","superseded":"project/auth-saltmarsh-2025-12.md"}
+{"id":"q025","query":"does the marrow vacation calendar live in the ops repo","gold":null,"kind":"unanswerable"}
+{"id":"q026","query":"how does yusuf add a library to a codebase","gold":"user/package-manager-yusuf.md","kind":"paraphrase"}
+{"id":"q027","query":"max payload size ember","gold":"reference/payload-cap-ember.md","kind":"lexical"}
+{"id":"q028","query":"saltmarsh commit message style","gold":"feedback/commit-style-saltmarsh.md","kind":"update","superseded":"feedback/commit-style-saltmarsh-2025-09.md"}
+{"id":"q029","query":"how do we do schema migrations in wren","gold":"feedback/migration-rule-wren.md","kind":"lexical"}
+{"id":"q030","query":"when during the day can I expect priya to be around","gold":"user/timezone-priya.md","kind":"paraphrase"}
+{"id":"q031","query":"which bramble modifications must be announced to the audience","gold":"feedback/changelog-rule-bramble.md","kind":"paraphrase"}
+{"id":"q032","query":"who is on the pager rotation for dmitri this week","gold":null,"kind":"unanswerable"}
+{"id":"q033","query":"how is the ember history organised","gold":"project/branch-model-ember.md","kind":"paraphrase"}
+{"id":"q034","query":"saltmarsh force push rule","gold":"feedback/force-push-saltmarsh.md","kind":"lexical"}
+{"id":"q035","query":"how does lior add a library to a codebase","gold":"user/package-manager-lior.md","kind":"paraphrase"}
+{"id":"q036","query":"at what point does quarry abandon a stalled reply","gold":"reference/timeout-quarry.md","kind":"paraphrase"}
+{"id":"q037","query":"larkspur queue and events","gold":"project/broker-larkspur.md","kind":"lexical"}
+{"id":"q038","query":"noor shell and terminal","gold":"user/shell-noor.md","kind":"lexical"}
+{"id":"q039","query":"wren pull request size limit","gold":"feedback/pull-request-size-wren.md","kind":"lexical"}
+{"id":"q040","query":"dmitri editor","gold":"user/editor-dmitri.md","kind":"lexical"}
+{"id":"q041","query":"where does priya compose text","gold":"user/editor-priya.md","kind":"paraphrase"}
+{"id":"q042","query":"how far back can I inspect marrow history","gold":"reference/log-retention-marrow.md","kind":"paraphrase"}
+{"id":"q043","query":"quarry pull request size limit","gold":"feedback/pull-request-size-quarry-2026-01.md","kind":"update","superseded":"feedback/pull-request-size-quarry.md"}
+{"id":"q044","query":"what shape of reply suits ines","gold":"user/answer-format-ines.md","kind":"paraphrase"}
+{"id":"q045","query":"dmitri indentation","gold":"user/indentation-dmitri.md","kind":"lexical"}
+{"id":"q046","query":"how should I write commit messages for larkspur","gold":"feedback/commit-style-larkspur-2026-03.md","kind":"update","superseded":"feedback/commit-style-larkspur.md"}
+{"id":"q047","query":"what is the workflow for landing code in larkspur","gold":"project/branch-model-larkspur.md","kind":"paraphrase"}
+{"id":"q048","query":"priya editor","gold":"user/editor-priya.md","kind":"lexical"}
+{"id":"q049","query":"what timezone is hana in","gold":"user/timezone-hana-2026-03.md","kind":"update","superseded":"user/timezone-hana.md"}
+{"id":"q050","query":"where does marrow persist its rows","gold":"project/datastore-marrow.md","kind":"paraphrase"}
+{"id":"q051","query":"how big can a marrow pull request be","gold":"feedback/pull-request-size-marrow.md","kind":"lexical"}
+{"id":"q052","query":"what tone does sven want","gold":"user/tone-sven.md","kind":"update","superseded":"user/tone-sven-2025-07.md"}
+{"id":"q053","query":"quarry language and version","gold":"project/runtime-quarry.md","kind":"lexical"}
+{"id":"q054","query":"which sponsor covers the yusuf conference booth","gold":null,"kind":"unanswerable"}
+{"id":"q055","query":"how far back can I inspect quarry history","gold":"reference/log-retention-quarry.md","kind":"paraphrase"}
+{"id":"q056","query":"which remote do I clone to hack on quarry","gold":"reference/repository-quarry.md","kind":"paraphrase"}
+{"id":"q057","query":"which part of the map serves tidewater traffic","gold":"project/deploy-region-tidewater.md","kind":"paraphrase"}
+{"id":"q058","query":"how do larkspur jobs get handed between workers","gold":"project/broker-larkspur.md","kind":"paraphrase"}
+{"id":"q059","query":"bramble review rule","gold":"feedback/review-rule-bramble-2026-01.md","kind":"update","superseded":"feedback/review-rule-bramble.md"}
+{"id":"q060","query":"how does sven like answers formatted","gold":"user/answer-format-sven.md","kind":"lexical"}
+{"id":"q061","query":"which visa cases does the larkspur team handle","gold":null,"kind":"unanswerable"}
+{"id":"q062","query":"what proves who someone is on bramble","gold":"project/auth-bramble.md","kind":"paraphrase"}
+{"id":"q063","query":"when during the day can I expect yusuf to be around","gold":"user/timezone-yusuf.md","kind":"paraphrase"}
+{"id":"q064","query":"where is the foxglove codebase hosted","gold":"reference/repository-foxglove.md","kind":"paraphrase"}
+{"id":"q065","query":"max payload size kestrel","gold":"reference/payload-cap-kestrel.md","kind":"lexical"}
+{"id":"q066","query":"marrow release cadence","gold":"project/release-cadence-marrow.md","kind":"lexical"}
+{"id":"q067","query":"what is the upper bound on what you can send kestrel","gold":"reference/payload-cap-kestrel.md","kind":"paraphrase"}
+{"id":"q068","query":"where is the wren offsite this year","gold":null,"kind":"unanswerable"}
+{"id":"q069","query":"how do we do schema migrations in bramble","gold":"feedback/migration-rule-bramble.md","kind":"lexical"}
+{"id":"q070","query":"ines answer format","gold":"user/answer-format-ines.md","kind":"lexical"}
+{"id":"q071","query":"which hosting provider does wren use","gold":"project/hosting-wren.md","kind":"lexical"}
+{"id":"q072","query":"how big can a larkspur pull request be","gold":"feedback/pull-request-size-larkspur.md","kind":"update","superseded":"feedback/pull-request-size-larkspur-2025-12.md"}
+{"id":"q073","query":"how do kestrel jobs get handed between workers","gold":"project/broker-kestrel.md","kind":"paraphrase"}
+{"id":"q074","query":"what is the headcount plan for the ines team","gold":null,"kind":"unanswerable"}
+{"id":"q075","query":"wren commit message style","gold":"feedback/commit-style-wren.md","kind":"lexical"}
+{"id":"q076","query":"what is tidewater coded in","gold":"project/runtime-tidewater.md","kind":"paraphrase"}
+{"id":"q077","query":"what is the podcast schedule for the sven team","gold":null,"kind":"unanswerable"}
+{"id":"q078","query":"larkspur review rule","gold":"feedback/review-rule-larkspur.md","kind":"lexical"}
+{"id":"q079","query":"sven package manager","gold":"user/package-manager-sven.md","kind":"lexical"}
+{"id":"q080","query":"bramble login and identity","gold":"project/auth-bramble.md","kind":"lexical"}
+{"id":"q081","query":"which shell does sven use","gold":"user/shell-sven.md","kind":"lexical"}
+{"id":"q082","query":"which checks gate a larkspur task being complete","gold":"feedback/test-rule-larkspur.md","kind":"paraphrase"}
+{"id":"q083","query":"what branch model does marrow use","gold":"project/branch-model-marrow.md","kind":"lexical"}
+{"id":"q084","query":"which part of the map serves saltmarsh traffic","gold":"project/deploy-region-saltmarsh.md","kind":"paraphrase"}
+{"id":"q085","query":"foxglove source code repository","gold":"reference/repository-foxglove.md","kind":"lexical"}
+{"id":"q086","query":"larkspur settings path","gold":"reference/config-path-larkspur.md","kind":"lexical"}
+{"id":"q087","query":"quarry log retention","gold":"reference/log-retention-quarry.md","kind":"lexical"}
+{"id":"q088","query":"how does quarry auth work","gold":"project/auth-quarry.md","kind":"update","superseded":"project/auth-quarry-2025-11.md"}
+{"id":"q089","query":"what is the payload cap for foxglove","gold":"reference/payload-cap-foxglove.md","kind":"lexical"}
+{"id":"q090","query":"wren metrics dashboard","gold":"reference/dashboard-wren.md","kind":"update","superseded":"reference/dashboard-wren-2025-02.md"}
+{"id":"q091","query":"what holds the knobs for foxglove at startup","gold":"reference/config-path-foxglove.md","kind":"paraphrase"}
+{"id":"q092","query":"larkspur log retention","gold":"reference/log-retention-larkspur.md","kind":"lexical"}
+{"id":"q093","query":"how should I write commit messages for quarry","gold":"feedback/commit-style-quarry-2026-01.md","kind":"update","superseded":"feedback/commit-style-quarry.md"}
+{"id":"q094","query":"what has to pass before I report finishing on ember","gold":"feedback/test-rule-ember.md","kind":"paraphrase"}
+{"id":"q095","query":"when is the next tidewater webinar and who hosts it","gold":null,"kind":"unanswerable"}
+{"id":"q096","query":"which interpreter parses the dotfiles of noor","gold":"user/shell-noor.md","kind":"paraphrase"}
+{"id":"q097","query":"what is the timeout for foxglove","gold":"reference/timeout-foxglove.md","kind":"update","superseded":"reference/timeout-foxglove-2025-01.md"}
+{"id":"q098","query":"which package manager does lior use","gold":"user/package-manager-lior.md","kind":"lexical"}
+{"id":"q099","query":"where does noor compose text","gold":"user/editor-noor.md","kind":"paraphrase"}
+{"id":"q100","query":"max payload size bramble","gold":"reference/payload-cap-bramble-2026-01.md","kind":"update","superseded":"reference/payload-cap-bramble.md"}
+{"id":"q101","query":"tidewater language and version","gold":"project/runtime-tidewater.md","kind":"lexical"}
+{"id":"q102","query":"who signs the priya payroll run","gold":null,"kind":"unanswerable"}
+{"id":"q103","query":"foxglove settings path","gold":"reference/config-path-foxglove.md","kind":"lexical"}
+{"id":"q104","query":"what is the payload cap for quarry","gold":"reference/payload-cap-quarry.md","kind":"update","superseded":"reference/payload-cap-quarry-2025-09.md"}
+{"id":"q105","query":"dmitri shell and terminal","gold":"user/shell-dmitri.md","kind":"update","superseded":"user/shell-dmitri-2025-09.md"}
+{"id":"q106","query":"what program does dmitri prefer for typing","gold":"user/editor-dmitri.md","kind":"paraphrase"}
+{"id":"q107","query":"bramble language and version","gold":"project/runtime-bramble.md","kind":"lexical"}
+{"id":"q108","query":"tidewater deploy region","gold":"project/deploy-region-tidewater.md","kind":"lexical"}
+{"id":"q109","query":"which interpreter executes quarry","gold":"project/runtime-quarry.md","kind":"paraphrase"}
+{"id":"q110","query":"which printer is near the saltmarsh desk","gold":null,"kind":"unanswerable"}
+{"id":"q111","query":"what is the workflow for landing code in foxglove","gold":"project/branch-model-foxglove.md","kind":"paraphrase"}
+{"id":"q112","query":"which page shows the quarry charts","gold":"reference/dashboard-quarry.md","kind":"paraphrase"}
+{"id":"q113","query":"where are the saltmarsh backups kept","gold":null,"kind":"unanswerable"}
+{"id":"q114","query":"how should I lay out a response for sven","gold":"user/answer-format-sven.md","kind":"paraphrase"}
+{"id":"q115","query":"noor tone and register","gold":"user/tone-noor-2026-11.md","kind":"update","superseded":"user/tone-noor.md"}
+{"id":"q116","query":"how are nested blocks offset in files from dmitri","gold":"user/indentation-dmitri.md","kind":"paraphrase"}
+{"id":"q117","query":"which port does kestrel listen on","gold":"reference/port-kestrel.md","kind":"lexical"}
+{"id":"q118","query":"what is bramble coded in","gold":"project/runtime-bramble.md","kind":"paraphrase"}
+{"id":"q119","query":"which remote do I clone to hack on larkspur","gold":"reference/repository-larkspur.md","kind":"paraphrase"}
+{"id":"q120","query":"which message broker does quarry use","gold":"project/broker-quarry.md","kind":"lexical"}
+{"id":"q121","query":"link to the quarry dashboard","gold":"reference/dashboard-quarry.md","kind":"lexical"}
+{"id":"q122","query":"what company bills us for wren compute","gold":"project/hosting-wren.md","kind":"paraphrase"}
+{"id":"q123","query":"which checks gate a saltmarsh task being complete","gold":"feedback/test-rule-saltmarsh.md","kind":"paraphrase"}
+{"id":"q124","query":"who has to sign off on larkspur work","gold":"feedback/review-rule-larkspur.md","kind":"paraphrase"}
+{"id":"q125","query":"how big can a tidewater pull request be","gold":"feedback/pull-request-size-tidewater.md","kind":"update","superseded":"feedback/pull-request-size-tidewater-2025-05.md"}
+{"id":"q126","query":"where is the bramble source repository","gold":"reference/repository-bramble-2026-08.md","kind":"update","superseded":"reference/repository-bramble.md"}
+{"id":"q127","query":"how patient is marrow with a slow upstream","gold":"reference/timeout-marrow.md","kind":"paraphrase"}
+{"id":"q128","query":"how are nested blocks offset in files from priya","gold":"user/indentation-priya.md","kind":"paraphrase"}
+{"id":"q129","query":"what wording belongs in the kestrel history entry","gold":"feedback/commit-style-kestrel.md","kind":"paraphrase"}
+{"id":"q130","query":"how do I get a ines invoice reissued","gold":null,"kind":"unanswerable"}
+{"id":"q131","query":"yusuf package manager","gold":"user/package-manager-yusuf.md","kind":"lexical"}
+{"id":"q132","query":"which shell does mara use","gold":"user/shell-mara-2026-10.md","kind":"update","superseded":"user/shell-mara.md"}
+{"id":"q133","query":"which page shows the marrow charts","gold":"reference/dashboard-marrow.md","kind":"paraphrase"}
+{"id":"q134","query":"kestrel queue and events","gold":"project/broker-kestrel.md","kind":"lexical"}
+{"id":"q135","query":"which dns provider serves the lior zone","gold":null,"kind":"unanswerable"}
+{"id":"q136","query":"who pays the catering for the saltmarsh on-site days","gold":null,"kind":"unanswerable"}
+{"id":"q137","query":"ines indentation","gold":"user/indentation-ines.md","kind":"update","superseded":"user/indentation-ines-2025-03.md"}
+{"id":"q138","query":"priya working hours","gold":"user/timezone-priya.md","kind":"lexical"}
+{"id":"q139","query":"what is the timeout for saltmarsh","gold":"reference/timeout-saltmarsh.md","kind":"lexical"}
+{"id":"q140","query":"how long are marrow logs kept","gold":"reference/log-retention-marrow.md","kind":"lexical"}
+{"id":"q141","query":"link to the marrow dashboard","gold":"reference/dashboard-marrow.md","kind":"lexical"}
+{"id":"q142","query":"what rhythm do marrow deploys follow","gold":"project/release-cadence-marrow.md","kind":"paraphrase"}
+{"id":"q143","query":"how careful must we be changing the bramble column structure","gold":"feedback/migration-rule-bramble.md","kind":"paraphrase"}
+{"id":"q144","query":"who approves a trademark use for hana","gold":null,"kind":"unanswerable"}
+{"id":"q145","query":"what shape of reply suits lior","gold":"user/answer-format-lior.md","kind":"paraphrase"}
+{"id":"q146","query":"what is for lunch at the foxglove release party","gold":null,"kind":"unanswerable"}
+{"id":"q147","query":"is larkspur covered by the warranty on the hetzner boxes","gold":null,"kind":"unanswerable"}
+{"id":"q148","query":"which port does ember listen on","gold":"reference/port-ember-2026-05.md","kind":"update","superseded":"reference/port-ember.md"}
+{"id":"q149","query":"how big a request will foxglove swallow","gold":"reference/payload-cap-foxglove.md","kind":"paraphrase"}
+{"id":"q150","query":"when should I break wren work into smaller pieces","gold":"feedback/pull-request-size-wren.md","kind":"paraphrase"}
+{"id":"q151","query":"what is the payload cap for wren","gold":"reference/payload-cap-wren.md","kind":"update","superseded":"reference/payload-cap-wren-2025-05.md"}
+{"id":"q152","query":"when during the day can I expect sven to be around","gold":"user/timezone-sven.md","kind":"paraphrase"}
+{"id":"q153","query":"what do I need to confirm before acting on tidewater","gold":"feedback/ask-first-tidewater.md","kind":"update","superseded":"feedback/ask-first-tidewater-2025-12.md"}
+{"id":"q154","query":"foxglove commit message style","gold":"feedback/commit-style-foxglove-2026-06.md","kind":"update","superseded":"feedback/commit-style-foxglove.md"}
+{"id":"q155","query":"what is the rate limit for bramble","gold":"reference/rate-limit-bramble.md","kind":"lexical"}
+{"id":"q156","query":"what licence does the marrow source ship under","gold":null,"kind":"unanswerable"}
+{"id":"q157","query":"am I allowed to force push on larkspur","gold":"feedback/force-push-larkspur-2026-01.md","kind":"update","superseded":"feedback/force-push-larkspur.md"}
+{"id":"q158","query":"which editor does noor use","gold":"user/editor-noor.md","kind":"lexical"}
+{"id":"q159","query":"which database does marrow use","gold":"project/datastore-marrow.md","kind":"lexical"}
+{"id":"q160","query":"what timezone is yusuf in","gold":"user/timezone-yusuf.md","kind":"lexical"}
+{"id":"q161","query":"which location does quarry load its options from on boot","gold":"reference/config-path-quarry.md","kind":"paraphrase"}
+{"id":"q162","query":"what needs a changelog entry in bramble","gold":"feedback/changelog-rule-bramble.md","kind":"lexical"}
+{"id":"q163","query":"lior answer format","gold":"user/answer-format-lior.md","kind":"lexical"}
+{"id":"q164","query":"ines tone and register","gold":"user/tone-ines.md","kind":"update","superseded":"user/tone-ines-2025-04.md"}
+{"id":"q165","query":"what do I need to confirm before acting on saltmarsh","gold":"feedback/ask-first-saltmarsh-2026-05.md","kind":"update","superseded":"feedback/ask-first-saltmarsh.md"}
+{"id":"q166","query":"what tone does mara want","gold":"user/tone-mara-2026-01.md","kind":"update","superseded":"user/tone-mara.md"}
+{"id":"q167","query":"at what point does saltmarsh abandon a stalled reply","gold":"reference/timeout-saltmarsh.md","kind":"paraphrase"}
+{"id":"q168","query":"what is the timeout for quarry","gold":"reference/timeout-quarry.md","kind":"lexical"}
+{"id":"q169","query":"where do I file a recruiting request for the ember team","gold":null,"kind":"unanswerable"}
+{"id":"q170","query":"how should I write commit messages for bramble","gold":"feedback/commit-style-bramble.md","kind":"lexical"}
+{"id":"q171","query":"what tests do I run before ember work is done","gold":"feedback/test-rule-ember.md","kind":"lexical"}
+{"id":"q172","query":"saltmarsh test rule","gold":"feedback/test-rule-saltmarsh.md","kind":"lexical"}
+{"id":"q173","query":"ember ask before rule","gold":"feedback/ask-first-ember-2026-02.md","kind":"update","superseded":"feedback/ask-first-ember.md"}
+{"id":"q174","query":"is there insurance on the kestrel hardware","gold":null,"kind":"unanswerable"}
+{"id":"q175","query":"marrow review rule","gold":"feedback/review-rule-marrow.md","kind":"lexical"}
+{"id":"q176","query":"who has to sign off on marrow work","gold":"feedback/review-rule-marrow.md","kind":"paraphrase"}
+{"id":"q177","query":"saltmarsh deploy region","gold":"project/deploy-region-saltmarsh.md","kind":"lexical"}
+{"id":"q178","query":"what address does the kestrel daemon answer on","gold":"reference/port-kestrel.md","kind":"paraphrase"}
+{"id":"q179","query":"who has to sign off on kestrel work","gold":"feedback/review-rule-kestrel.md","kind":"paraphrase"}
+{"id":"q180","query":"can I overwrite what is already upstream for saltmarsh","gold":"feedback/force-push-saltmarsh.md","kind":"paraphrase"}
+{"id":"q181","query":"larkspur test rule","gold":"feedback/test-rule-larkspur.md","kind":"lexical"}
+{"id":"q182","query":"what does sven run to pull in dependencies","gold":"user/package-manager-sven.md","kind":"paraphrase"}
+{"id":"q183","query":"tidewater throttle","gold":"reference/rate-limit-tidewater-2026-07.md","kind":"update","superseded":"reference/rate-limit-tidewater.md"}
+{"id":"q184","query":"bramble pull request size limit","gold":"feedback/pull-request-size-bramble.md","kind":"update","superseded":"feedback/pull-request-size-bramble-2025-06.md"}
+{"id":"q185","query":"how does priya indent code","gold":"user/indentation-priya.md","kind":"lexical"}
+{"id":"q186","query":"what budget was approved for the foxglove cluster this quarter","gold":null,"kind":"unanswerable"}
+{"id":"q187","query":"how should I write commit messages for kestrel","gold":"feedback/commit-style-kestrel.md","kind":"lexical"}
+{"id":"q188","query":"what tone does lior want","gold":"user/tone-lior.md","kind":"update","superseded":"user/tone-lior-2025-07.md"}
+{"id":"q189","query":"how many reviewers does a tidewater change need","gold":"feedback/review-rule-tidewater-2026-08.md","kind":"update","superseded":"feedback/review-rule-tidewater.md"}
+{"id":"q190","query":"how careful must we be changing the wren column structure","gold":"feedback/migration-rule-wren.md","kind":"paraphrase"}
+{"id":"q191","query":"how big can a ember pull request be","gold":"feedback/pull-request-size-ember.md","kind":"lexical"}
+{"id":"q192","query":"where is the quarry source repository","gold":"reference/repository-quarry.md","kind":"lexical"}
+{"id":"q193","query":"when does old larkspur output get deleted","gold":"reference/log-retention-larkspur.md","kind":"paraphrase"}
+{"id":"q194","query":"mara working hours","gold":"user/timezone-mara.md","kind":"lexical"}
+{"id":"q195","query":"what part of the globe is mara awake in","gold":"user/timezone-mara.md","kind":"paraphrase"}
+{"id":"q196","query":"what is the ceiling on a single ember diff","gold":"feedback/pull-request-size-ember.md","kind":"paraphrase"}
+{"id":"q197","query":"what is the upper bound on what you can send ember","gold":"reference/payload-cap-ember.md","kind":"paraphrase"}
+{"id":"q198","query":"where is the quarry config file","gold":"reference/config-path-quarry.md","kind":"lexical"}
+{"id":"q199","query":"ines shell and terminal","gold":"user/shell-ines-2026-06.md","kind":"update","superseded":"user/shell-ines.md"}
+{"id":"q200","query":"what is the workflow for landing code in marrow","gold":"project/branch-model-marrow.md","kind":"paraphrase"}
+{"id":"q201","query":"how do we phrase a changeset note in wren","gold":"feedback/commit-style-wren.md","kind":"paraphrase"}
+{"id":"q202","query":"what system holds the records for quarry","gold":"project/datastore-quarry.md","kind":"paraphrase"}
+{"id":"q203","query":"what badge do I need to enter the kestrel server room","gold":null,"kind":"unanswerable"}
+{"id":"q204","query":"which remote do I clone to hack on tidewater","gold":"reference/repository-tidewater.md","kind":"paraphrase"}
+{"id":"q205","query":"which location does larkspur load its options from on boot","gold":"reference/config-path-larkspur.md","kind":"paraphrase"}
