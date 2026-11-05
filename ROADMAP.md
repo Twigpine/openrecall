@@ -77,8 +77,10 @@ the hosted beta runs exactly one machine (`min_machines_running = 1`).
   Postgres metadata index lands. Doing so can corrupt manifests.
 - The next step is moving manifests and versions into Postgres with row-level
   version checks. That enables horizontal scale and high availability.
-- Local mode is unaffected. It serializes across processes with a lock on
-  disk.
+- Local mode is unaffected. It serializes writes across processes with a
+  lock file on disk (`<data>/.lock`, created with `O_EXCL`) and locks writes
+  only: reads take no lock and re-read the manifest when a blob has moved
+  under them.
 - Latency targets for the memory tools, and how to measure them, are in
   [docs/performance.md](docs/performance.md); `openrecall status --timings`
   prints the per-stage breakdown.
