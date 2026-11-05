@@ -17,6 +17,7 @@ import { OpenRecallClient } from '../client/index.ts'
 import { config } from '../src/config.ts'
 import { handleRequest } from '../src/handler.ts'
 import { stripFrontmatter } from '../src/mcp/frontmatter.ts'
+import { trashKey } from '../src/mcp/keys.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 
 const ROOT = resolve(import.meta.dir, '..')
@@ -165,9 +166,15 @@ describe('MCP tools never claim a write the store refused', () => {
     const t = tools(ns)
     await t.save('gone.md', 'bye', ns)
 
+    // Soft by default: the store confirms the key is gone and its trash copy
+    // is the only thing left; hard confirms nothing is left at all.
     const r = await t.delete('gone.md', ns)
     expect(r.isError).toBeFalsy()
-    expect(r.text).toContain('deleted "gone.md"')
+    expect(r.text).toContain('moved "gone.md" to the trash')
+    expect(Object.keys((await client().pull(ns)).entries)).toEqual([trashKey('gone.md') as string])
+    const h = await t.delete('gone.md', ns, { hard: true })
+    expect(h.isError).toBeFalsy()
+    expect(h.text).toContain('erased the trash copy of "gone.md"')
     expect((await client().pull(ns)).entries).toEqual({})
   })
 })

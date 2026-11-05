@@ -329,3 +329,80 @@ for (const l of launchers) {
     }, 30_000)
   })
 }
+
+/**
+ * The gate's protocol over the real transport: a paraphrase under a new key
+ * is refused with `needs_decision`, and the resave with `mode: supersede`
+ * lands both notes in one write. The in-process suite covers every mode;
+ * this proves the zod schema carries `mode` and `supersedes` through.
+ */
+for (const l of launchers) {
+  describe(`save gate over stdio — ${l.name}`, () => {
+    test('needs_decision, then mode: supersede', async () => {
+      const home = freshHome()
+      const c = await connect(l, { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p' })
+      try {
+        // The pair tests/save-gate.test.ts measures at 0.75 exact Jaccard.
+        const original =
+          '---\ndescription: how tests are expected to be written\n---\n' +
+          'Every routing rule gets a table case with a sample order attached to it.\n' +
+          'Why: a rule with no sample order is untestable once its author forgets it.\n'
+        const paraphrase =
+          '---\ndescription: how tests should be written\n---\n' +
+          'Each routing rule needs a table case with a sample order attached.\n' +
+          'Why: a rule without a sample order is untestable once the author forgets it.\n'
+        const first = await c.callTool({
+          name: 'memory_save',
+          arguments: { key: 'feedback/testing.md', content: original },
+        })
+        expect(first.isError ?? false).toBe(false)
+        const refused = await c.callTool({
+          name: 'memory_save',
+          arguments: { key: 'feedback/test-rules.md', content: paraphrase },
+        })
+        expect(refused.isError).toBe(true)
+        const lines = text(refused).split('\n')
+        expect(lines[0]).toStartWith('needs_decision: "feedback/test-rules.md" was NOT saved')
+        expect(lines[1]).toContain('feedback/testing.md')
+        expect(lines[1]).toContain('near-duplicate')
+        expect(lines[1]).toContain('test-agent/0.0.0')
+        expect(lines[2]).toContain('"supersede"')
+        const list = text(await c.callTool({ name: 'memory_list', arguments: {} }))
+        expect(list).not.toContain('test-rules')
+
+        const saved = await c.callTool({
+          name: 'memory_save',
+          arguments: {
+            key: 'feedback/test-rules.md',
+            content: paraphrase,
+            mode: 'supersede',
+            supersedes: 'feedback/testing.md',
+          },
+        })
+        expect(saved.isError ?? false).toBe(false)
+        expect(text(saved)).toMatch(
+          /^saved "feedback\/test-rules.md" in user:me \(v\d+\)\n\(marked "feedback\/testing.md" superseded by "feedback\/test-rules.md"/,
+        )
+        const old = text(
+          await c.callTool({ name: 'memory_get', arguments: { key: 'feedback/testing.md' } }),
+        )
+        expect(old).toContain('\nstatus: superseded\n')
+        expect(old).toContain('\nsuperseded_by: feedback/test-rules.md\n')
+        const fresh = text(
+          await c.callTool({ name: 'memory_get', arguments: { key: 'feedback/test-rules.md' } }),
+        )
+        expect(fresh).toContain('\nsupersedes: feedback/testing.md\n')
+        const recalled = text(
+          await c.callTool({
+            name: 'memory_recall',
+            arguments: { query: 'routing rule sample order' },
+          }),
+        )
+        expect(recalled).toContain('### feedback/test-rules.md')
+        expect(recalled).not.toContain('feedback/testing.md')
+      } finally {
+        await c.close()
+      }
+    }, 30_000)
+  })
+}

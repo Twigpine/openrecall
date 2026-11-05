@@ -2013,7 +2013,11 @@ describe('single-origin tool traffic', () => {
         'notes/ledger.md',
         `---\ndescription: the quokka ledger note\n---\nThe quokka ledger records ${sentinel} in full.`,
       )
-      await tools.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      // The two notes share the sentinel's five tokens, which makes the second
+      // a near-duplicate to the save gate; `add` is the fixture saying so.
+      await tools.save('notes/other.md', `A second note also carrying ${sentinel}.`, undefined, {
+        mode: 'add',
+      })
       recalled = (await tools.recall('quokka ledger records')).text
       searched = (await tools.search('quokka')).text
       got = (await tools.get('notes/ledger.md')).text
@@ -2055,7 +2059,10 @@ describe('single-origin tool traffic', () => {
         'notes/ledger.md',
         `---\ndescription: the quokka ledger note\n---\nThe quokka ledger records ${sentinel} in full.`,
       )
-      await writer.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      // Near-duplicate of the ledger note by the sentinel's tokens: `add` says so.
+      await writer.save('notes/other.md', `A second note also carrying ${sentinel}.`, undefined, {
+        mode: 'add',
+      })
       // The reads go through a second, cold client: the writer's cache already
       // holds everything it pushed, so its own recall would read no body at all
       // and the bulk view this test is about would never be exercised.

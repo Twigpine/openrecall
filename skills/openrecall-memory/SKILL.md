@@ -139,11 +139,13 @@ Depending on the agent, the tools may carry a prefix — e.g.
 same tools. If your agent shows MCP tools by name only until you look them up
 (a tool-search step), search for "openrecall" first.
 
-- `memory_save(key, content, supersedes?, force?)` — `key` is a path that
-  mirrors a memory directory layout; `content` is markdown. Saving the same
-  `key` overwrites it, unless the entry changed since this session last read
-  it. A stale save is refused and names the keys that moved: read each with
-  `memory_get`, merge, and save again. The client stamps the note's
+- `memory_save(key, content, supersedes?, force?, mode?)` — `key` is a path
+  that mirrors a memory directory layout; `content` is markdown. Saving the
+  same `key` overwrites it, unless the entry changed since this session last
+  read it. A stale save is refused and names the keys that moved: read each
+  with `memory_get`, merge, and save again. A save that looks like an
+  existing entry is refused with `needs_decision` until you resave with
+  `mode` (see "Maintain the memory"). The client stamps the note's
   frontmatter on every save (see "Frontmatter" below) and routes by type:
   `user` facts go to the shared namespace, `project` and `reference` facts to
   the open project's namespace, `feedback` to either. A save in the wrong
@@ -163,7 +165,8 @@ same tools. If your agent shows MCP tools by name only until you look them up
 - `memory_get(key)` — the full, untruncated body of one entry. Use it when
   recall or search surfaces an entry you need to read in full.
 - `memory_list()` — list entry keys without downloading content.
-- `memory_delete(key)` — remove an entry that's wrong or stale.
+- `memory_delete(key, hard?, force?)` — remove an entry that's wrong or stale:
+  moved to the trash by default, erased with `hard: true`.
 
 ### Entry-key conventions
 
@@ -220,16 +223,28 @@ them unless `include_system` is true.
 
 ## Maintain the memory, don't just append
 
-- **Check before adding.** `memory_search` for an existing file on the topic and
-  update it rather than creating a near-duplicate.
+- **Answer `needs_decision`, don't bypass it.** When a similar entry already
+  exists, `memory_save` writes nothing and answers `needs_decision` with up to
+  five candidates (key, description, similarity, reason, when and by whom it
+  was last updated). Read them, then resave with `mode`: `update` when it is
+  the same fact (use the candidate's key; its `id` and `created` survive),
+  `supersede` when the fact changed (keep your key, pass
+  `supersedes: "<old key>"`; the old note is marked `status: superseded` in
+  the same write and recall hides it), `add` only for a genuinely distinct
+  fact, `noop` to keep what is there. Never pass `mode` on a first save just
+  to skip the check; saving over the same key is a plain update and is never
+  gated.
 - **`MEMORY.md` is generated** from each entry's `description` on every save;
   do not edit the generated lines. Put orientation notes in its `## Pinned`
   section (20 lines max): save `MEMORY.md` with the edited section and the
   rest is regenerated around it. A hand-written index is migrated on the
   first save: its prose lines become the Pinned section and the old text is
   kept under `sys.openrecall/MEMORY.before-generated.md`.
-- **Correct and prune.** If a fact turns out to be wrong or outdated, fix or
-  `memory_delete` it. Stale memory is worse than none.
+- **Correct and prune.** If a fact turns out to be wrong or outdated, fix it,
+  supersede it, or `memory_delete` it. A delete moves the note to
+  `sys.openrecall/trash/<key>` (stamped `status: deleted`), where recall,
+  search and the index never see it; `hard: true` erases it, and is required
+  to delete a key already in the trash. Stale memory is worse than none.
 - **Trust but verify.** A recalled fact reflects what was true when it was
   written. If it names a file, flag, or decision, confirm it still holds before
   acting on it.
