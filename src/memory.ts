@@ -20,7 +20,14 @@ import { withLock } from './lock.ts'
 import { logEvent } from './log.ts'
 import { validateEntryKey } from './namespace.ts'
 import { QuotaError, reserveAndCommit } from './quota.ts'
-import { blobPrefix, contentPath, entryPath, getStore, manifestPath } from './store/index.ts'
+import {
+  type BlobStore,
+  blobPrefix,
+  contentPath,
+  entryPath,
+  getStore,
+  manifestPath,
+} from './store/index.ts'
 import {
   type EntryRead,
   emptyManifest,
@@ -200,6 +207,8 @@ export async function getEntry(namespace: string, nsSlug: string, key: string): 
  *   - skip writes whose ciphertext hash already matches (true delta)
  *   - project the resulting manifest in memory and enforce per-namespace caps
  *   - enforce the per-owner quota and commit blobs+manifest atomically
+ *   - once the commit is durable, delete the blobs this write superseded and,
+ *     when a sweep is due, list the namespace's blob prefix for orphans
  *
  * Nothing is written to the store until every cap passes, so an over-quota
  * request leaves the namespace untouched. `owner` is the authenticated account
@@ -308,10 +317,20 @@ export async function upsert(
         // consistent. Reclaim is deliberately NOT here: it runs after the write
         // is durable, because a failure to collect garbage must not fail, or
         // roll back, a write that already landed.
-        for (const w of blobWrites) await store.put(w.path, w.bytes)
-        m.version += 1
-        m.lastModified = nowIso
-        await writeManifest(nsSlug, m)
+        try {
+          for (const w of blobWrites) await store.put(w.path, w.bytes)
+          m.version += 1
+          m.lastModified = nowIso
+          await writeManifest(nsSlug, m)
+        } catch (err) {
+          // A commit that died between its first blob and the manifest left
+          // ciphertext no manifest names, and no later request can name it by
+          // key either. Make the next write to this namespace list the prefix
+          // instead of trusting what it touched. The failure itself still
+          // propagates: the write did not land.
+          forceSweep(store, nsSlug)
+          throw err
+        }
       }
 
       const projected = { entries: Object.keys(m.entries).length, bytes: nsBytes }
@@ -322,7 +341,7 @@ export async function upsert(
         await reserveAndCommit(owner, namespace, projected, nowIso, commit)
       }
 
-      await reclaim(nsSlug, m, prev, touched)
+      await reclaim(store, nsSlug, m, prev, touched)
     }
 
     return {
@@ -341,41 +360,97 @@ export async function upsert(
 }
 
 /**
+ * Mutating writes between two listings of a namespace's blob prefix. The
+ * listing is what finds orphans no key can name, and it is the expensive call
+ * in a save: a Class-A request per write on S3, a readdir of every blob on the
+ * fs. Every write in between collects its own superseded blobs by hash, which
+ * is a delete per touched key and nothing more.
+ */
+const SWEEP_EVERY = 32
+
+/**
+ * Writes since the last sweep, per namespace. Keyed by store instance so a
+ * swapped store (tests install one per scenario) starts the way a fresh
+ * process does. A namespace with no entry sweeps on its next write: that is
+ * the first write per process, and it is also how a failed commit or a failed
+ * collection makes the next write look rather than trust what it touched.
+ */
+const writesSinceSweep = new WeakMap<BlobStore, Map<string, number>>()
+
+function sweepCounter(store: BlobStore): Map<string, number> {
+  let counter = writesSinceSweep.get(store)
+  if (!counter) {
+    counter = new Map()
+    writesSinceSweep.set(store, counter)
+  }
+  return counter
+}
+
+/** Make the next mutating write to `nsSlug` on `store` list its blob prefix. */
+function forceSweep(store: BlobStore, nsSlug: string): void {
+  sweepCounter(store).delete(nsSlug)
+}
+
+/**
  * Delete ciphertext no visible manifest names.
  *
- * Driven by a listing rather than by the keys this request touched, because the
- * orphans that matter are the ones no key can reach: a write that died before
- * publishing left blobs the next manifest never mentions, and a delete whose
- * collection failed removed the key from the manifest, so nothing can name its
- * hash again. Sweeping the namespace's blob directory against the live hash set
- * finds both, which is what makes `erasure: 'erases'` true rather than a claim.
+ * Two mechanisms, because orphans come from two places. A write that landed
+ * superseded the blobs its touched keys used to name, and this request knows
+ * exactly which those are: each is deleted here, on the same write, after a
+ * check that no key in the manifest just written still names the same hash
+ * (identical ciphertext under two keys shares one blob, so the live set, not
+ * the touched set, decides). A write that died before publishing, or a delete
+ * whose collection failed, left blobs no key can ever name again, and only a
+ * listing finds those. The listing is the costly call, so it runs when it is
+ * due rather than on every write: the first write per process to a namespace
+ * (a previous process may have crashed), every SWEEP_EVERY writes after that,
+ * and the write after this process saw a commit or a collection fail for the
+ * namespace. A sweep subsumes the targeted deletes, since it removes
+ * everything the manifest does not name. Between sweeps an orphan waits at
+ * most SWEEP_EVERY writes, and `erasure: 'erases'` stays true on the path
+ * that matters: a delete that lands removes the entry's ciphertext on that
+ * write.
  *
  * Never throws. This runs after the write is durable and collects garbage that
  * is already invisible to every reader, so a store hiccup here must not turn a
- * landed write into a failure, nor skip the caller's quota accounting.
+ * landed write into a failure, nor skip the caller's quota accounting. It does
+ * make the next write sweep, so whatever this one left behind is found by
+ * listing instead of being trusted to a touched set that no longer knows it.
  *
  * Single-instance only, like the lock it runs under. The sweep deletes anything
  * under the namespace's blob prefix that the manifest it just wrote does not
  * name, which is correct while one process serializes every write to that
  * namespace and silent data loss the moment two do. It moves behind the same
  * row-version check as the lock when that lands (see lock.ts and PLAN §7).
- *
- * Costs one LIST per mutating write, deliberately: it replaces a delete per
- * touched key, most of which were no-ops, and it is the only way to see an
- * orphan no key can name.
  */
 async function reclaim(
+  store: BlobStore,
   nsSlug: string,
   m: Manifest,
   prev: Record<string, string>,
   touched: Set<string>,
 ): Promise<void> {
+  const counter = sweepCounter(store)
+  const since = counter.get(nsSlug)
+  const sweep = since === undefined || since >= SWEEP_EVERY
   try {
-    const store = getStore()
     const live = new Set<string>()
     for (const meta of Object.values(m.entries)) live.add(contentPath(nsSlug, meta.hash))
-    for (const path of await store.list(blobPrefix(nsSlug))) {
-      if (!live.has(path)) await store.delete(path)
+    if (sweep) {
+      for (const path of await store.list(blobPrefix(nsSlug))) {
+        if (!live.has(path)) await store.delete(path)
+      }
+    } else {
+      // The blobs this write superseded. Two touched keys can have named one
+      // blob, so collect the paths first and delete each once.
+      const superseded = new Set<string>()
+      for (const key of touched) {
+        const hash = prev[key]
+        if (hash === undefined) continue
+        const path = contentPath(nsSlug, hash)
+        if (!live.has(path)) superseded.add(path)
+      }
+      for (const path of superseded) await store.delete(path)
     }
     // Entries written before content addressing sit at a key-derived path the
     // sweep above does not cover, and only a key the pre-write manifest knew
@@ -383,7 +458,9 @@ async function reclaim(
     for (const key of touched) {
       if (prev[key] !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
     }
+    counter.set(nsSlug, sweep ? 1 : (since ?? 0) + 1)
   } catch (err) {
+    forceSweep(store, nsSlug)
     // The slug is what makes this actionable: without it an operator only knows
     // collection failed somewhere. It is already every storage path's own
     // directory name, so it discloses nothing a reader of the store lacks.

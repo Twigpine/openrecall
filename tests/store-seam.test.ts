@@ -35,8 +35,8 @@ afterEach(() => resetStore())
 describe('filesystem listing', () => {
   test('an absent prefix lists nothing rather than throwing', async () => {
     resetStore()
-    // reclaim lists a namespace's blob directory on every mutating write,
-    // including the first, when that directory does not exist yet.
+    // reclaim lists a namespace's blob directory on the first mutating write
+    // per process, when that directory may not exist yet.
     expect(await getStore().list('ns/definitely-not-here/blobs/')).toEqual([])
   })
 

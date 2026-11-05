@@ -66,6 +66,13 @@ We're especially interested in reports that break these properties:
 - **Byte-identical entries are detectable.** The deterministic nonce that enables
   delta sync reveals whether two ciphertext entries are identical. Documented
   trade-off in `client/crypto.ts`.
+- **Deleted ciphertext leaves the store on the write that deletes it; orphans
+  are swept periodically.** A deleted or replaced entry's ciphertext blob is
+  removed on the write that deletes or replaces it (both shipped drivers,
+  `fs` and `s3`, report `erasure: 'erases'`). If that removal fails, or a
+  crashed write left a blob no entry names, a sweep of the namespace's blob
+  prefix collects it at the latest within 32 further writes to that namespace
+  or at the first write after the next process start.
 - **Metadata is visible to the host** (namespace ids, entry keys, sizes,
   timestamps) — see scope above. A future tier may hash entry keys.
 - **Single-instance hosted beta.** The hosted deployment runs one instance on
