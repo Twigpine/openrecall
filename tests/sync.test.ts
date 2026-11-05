@@ -773,6 +773,25 @@ describe('runSync --prune, guarded by pair state', () => {
     expect((await (await realClient()).pull(ns)).entries['a.md']).toBe('v1')
   })
 
+  test('a key the store refused is not recorded as synced', async () => {
+    const ns = 'user:sync-refused-state'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    // A space is a valid filename but not a valid entry key, so the store
+    // refuses it after the walker has already found it.
+    put(dir, 'bad key.md', 'refused by the store')
+
+    const client = await realClient()
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.skipped).toEqual([{ key: 'bad key.md', reason: 'invalid_key' }])
+
+    const raw = JSON.parse(readFileSync(state, 'utf8')) as {
+      pairs: Record<string, Record<string, string | null>>
+    }
+    const pair = Object.values(raw.pairs)[0] ?? {}
+    expect(Object.hasOwn(pair, 'bad key.md')).toBe(false)
+  })
+
   test('a first sync with --prune deletes nothing — it only establishes the guard', async () => {
     const ns = 'user:sync-prune-first'
     const dir = tempDir()
