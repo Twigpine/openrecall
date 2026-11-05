@@ -169,10 +169,15 @@ describe('e2e: the path a new user actually walks', () => {
     await b.recall('shared')
     await b.save('shared.md', 'from b')
 
+    // The server refuses a's write as stale; a recalled the note before b's
+    // write, so the tool has a base to merge on, and both sides replaced the
+    // one line: a conflict, rendered as tool text with the hunk to resolve.
     const stale = await a.save('shared.md', 'from a')
     expect(stale.isError).toBe(true)
-    expect(stale.text).toContain('409 stale base')
-    expect(stale.text).toContain('shared.md')
+    expect(stale.text).toStartWith('needs_decision (conflict): "shared.md" changed under you')
+    expect(stale.text).toContain(
+      '<<<<<<< yours\nfrom a\n||||||| base\nfirst\n=======\nfrom b\n>>>>>>> current',
+    )
 
     // b's write is intact, and a can recover by doing what the text says.
     expect(stripFrontmatter((await client().pull(ns)).entries['shared.md'] as string)).toBe(

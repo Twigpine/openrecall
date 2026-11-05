@@ -141,11 +141,12 @@ same tools. If your agent shows MCP tools by name only until you look them up
 
 - `memory_save(key, content, supersedes?, force?, mode?)` — `key` is a path
   that mirrors a memory directory layout; `content` is markdown. Saving the
-  same `key` overwrites it, unless the entry changed since this session last
-  read it. A stale save is refused and names the keys that moved: read each
-  with `memory_get`, merge, and save again. A save that looks like an
-  existing entry is refused with `needs_decision` until you resave with
-  `mode` (see "Maintain the memory"). The client stamps the note's
+  same `key` overwrites it. If the entry changed since this session last read
+  it, both edits are kept when they touch different lines (the answer starts
+  with `merged`); overlapping edits are refused with `needs_decision
+  (conflict)` and the hunks to resolve, after which you resave with
+  `mode: "update"`. A save that looks like an existing entry is refused with
+  `needs_decision` until you resave with `mode` (see "Maintain the memory"). The client stamps the note's
   frontmatter on every save (see "Frontmatter" below) and routes by type:
   `user` facts go to the shared namespace, `project` and `reference` facts to
   the open project's namespace, `feedback` to either. A save in the wrong
@@ -162,8 +163,10 @@ same tools. If your agent shows MCP tools by name only until you look them up
   namespaces without reading their memory contents. The default page is 20
   projects; follow the returned offset to see more.
 - `memory_search(query)` — literal substring/keyword search.
-- `memory_get(key)` — the full, untruncated body of one entry. Use it when
-  recall or search surfaces an entry you need to read in full.
+- `memory_get(key, version?)` — the full, untruncated body of one entry. Use
+  it when recall or search surfaces an entry you need to read in full;
+  `version` (1–5) reads one of the last five prior versions instead, 1 being
+  the most recent.
 - `memory_list()` — list entry keys without downloading content.
 - `memory_delete(key, hard?, force?)` — remove an entry that's wrong or stale:
   moved to the trash by default, erased with `hard: true`.

@@ -30,10 +30,18 @@ describe('the precondition is not rebased by a listing', () => {
     await a.recall('v1')
     expect((await b.save('n.md', 'v1 plus B change')).isError).toBeUndefined()
     await a.list()
+    // The listing rebased nothing, so the server refuses the write as stale;
+    // A recalled n.md before B's write, so the tool has a base to merge on,
+    // and both sides changed the one line: a conflict, nothing written.
     const stale = await a.save('n.md', 'v1 plus A change')
     expect(stale.isError).toBe(true)
-    expect(stale.text).toContain('409')
-    expect((await b.get('n.md')).text).toContain('B change')
+    expect(stale.text).toStartWith('needs_decision (conflict): "n.md" changed under you')
+    expect(stale.text).toContain(
+      '<<<<<<< yours\nv1 plus A change\n||||||| base\nv1\n=======\nv1 plus B change\n>>>>>>> current',
+    )
+    const stored = (await b.get('n.md')).text
+    expect(stored).toContain('B change')
+    expect(stored).not.toContain('A change')
   })
 
   test('hashes() still rebases by default for library callers, and observe:false does not', async () => {

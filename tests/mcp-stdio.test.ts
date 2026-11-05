@@ -158,6 +158,41 @@ for (const l of launchers) {
       }
     }, 30_000)
 
+    test('a stale save from one agent is merged with the other agent’s edit; version 1 reads what it replaced', async () => {
+      const home = freshHome()
+      const env = { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'merge-pass' }
+      const [agentA, agentB] = await Promise.all([connect(l, env), connect(l, env)])
+      try {
+        const save = (c: Client, content: string) =>
+          c.callTool({ name: 'memory_save', arguments: { key: 'plan.md', content } })
+        const get = async (c: Client, version?: number) =>
+          text(await c.callTool({ name: 'memory_get', arguments: { key: 'plan.md', version } }))
+        expect(text(await save(agentA, 'line one\nline two\nline three\n'))).toMatch(
+          /^saved "plan\.md"/,
+        )
+        // A reads the note (the base of its next write); B changes line three
+        // underneath it; A changes line one of what it read.
+        expect(await get(agentA)).toContain('line three')
+        expect(text(await save(agentB, 'line one\nline two\nB wrote line three\n'))).toMatch(
+          /^saved "plan\.md"/,
+        )
+        const merged = await save(agentA, 'A wrote line one\nline two\nline three\n')
+        expect(merged.isError ?? false).toBe(false)
+        expect(text(merged)).toMatch(
+          /^merged "plan\.md" in user:me \(v\d+\): kept both sides' changes \(1 line from the other session\)/,
+        )
+        expect(await get(agentB)).toContain('A wrote line one\nline two\nB wrote line three\n')
+        // History: B's save recorded A's first version, the merge recorded B's.
+        const prior = await get(agentB, 1)
+        expect(prior).toMatch(
+          /^### plan\.md \(user:me\) version 1 of 2, stored \S+ by test-agent\/0\.0\.0\n/,
+        )
+        expect(prior).toContain('line one\nline two\nB wrote line three\n')
+      } finally {
+        await Promise.all([agentA.close(), agentB.close()])
+      }
+    }, 30_000)
+
     test('stage timings ride in _meta; OPENRECALL_TIMINGS=1 adds a trailer and a stderr line', async () => {
       const home = freshHome()
       const quiet = await connect(l, { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p' })

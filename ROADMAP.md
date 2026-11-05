@@ -101,5 +101,7 @@ the hosted beta runs exactly one machine (`min_machines_running = 1`).
 
 - How to recover keys for non-technical users without weakening
   zero-knowledge.
-- How to resolve conflicts between concurrent writes from several devices.
-  Today the last write per key wins; memory may want a merge strategy.
+- Concurrent writes to one key from several devices are merged three-way on
+  the client when they touch different lines; overlapping hunks are surfaced
+  to the agent as `needs_decision (conflict)`, and the last five prior
+  versions of every key are kept so a merge that went wrong can be read back.

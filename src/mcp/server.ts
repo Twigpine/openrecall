@@ -240,7 +240,7 @@ export function makeServer(binding: ServerBinding): McpServer {
     {
       title: 'Save a memory',
       description:
-        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`, unless it changed since this session last read it: then the save is refused as stale, and you should read the key with memory_get, merge, and save again. A save that looks like an existing entry (a near-duplicate, the same topic, or a possible contradiction) is refused with `needs_decision` and up to five candidates, and nothing is written until you resave with `mode`. The client stamps YAML frontmatter on every save (id, type, created, updated, agent, session); you may set `type` (user, feedback, project, reference), `description`, `tags`, `expires` and `locked`. User notes belong in the shared namespace and project/reference notes in the open project namespace; a save in the wrong place is refused with the right one.',
+        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`. If it changed since this session last read it, the two edits are merged three-way when they touch different lines (the answer starts with `merged`), and refused with `needs_decision (conflict)` showing the overlapping hunks when they do not; resolve those and resave with mode: "update". A save that looks like an existing entry (a near-duplicate, the same topic, or a possible contradiction) is refused with `needs_decision` and up to five candidates, and nothing is written until you resave with `mode`. The client stamps YAML frontmatter on every save (id, type, created, updated, agent, session); you may set `type` (user, feedback, project, reference), `description`, `tags`, `expires` and `locked`. User notes belong in the shared namespace and project/reference notes in the open project namespace; a save in the wrong place is refused with the right one.',
       inputSchema: {
         key: z
           .string()
@@ -348,13 +348,21 @@ export function makeServer(binding: ServerBinding): McpServer {
     {
       title: 'Read one memory entry',
       description:
-        'Return the full, untruncated body of a single memory entry by key. Use it when recall or search shows an entry you need in full. One key per call; use `memory_list` to find the keys that exist.',
+        'Return the full, untruncated body of a single memory entry by key. Use it when recall or search shows an entry you need in full. One key per call; use `memory_list` to find the keys that exist. Pass `version` to read one of the last five prior versions of the entry instead.',
       inputSchema: {
         key: z.string().describe('Entry key to read, e.g. "preferences.md" or "project/api.md".'),
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+        version: z
+          .number()
+          .int()
+          .min(1)
+          .max(5)
+          .optional()
+          .describe('Read a prior version from history (1 = most recent prior).'),
       },
     },
-    async ({ key, namespace }) => run('memory_get', t => t.get(key, namespace)),
+    async ({ key, namespace, version }) =>
+      run('memory_get', t => t.get(key, namespace, { version })),
   )
 
   server.registerTool(

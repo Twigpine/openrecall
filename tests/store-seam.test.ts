@@ -115,7 +115,7 @@ describe('store factory seam', () => {
     // is an exact count, not a floor, because a floor is what let an earlier
     // version of this test lose reach without failing: any module added to or
     // dropped from the production graph should force a look at this number.
-    expect(seen.size).toBe(49) // the encrypted MCP project directory, MCP server status, the mirror, both frame codecs, the organized-memory modules (keys, frontmatter, sanitize, session, accessed, memindex, gate), and the doctor (src/mcp/doctor.ts, the history it reads, and the CLI command)
+    expect(seen.size).toBe(50) // the encrypted MCP project directory, MCP server status, the mirror, both frame codecs, the organized-memory modules (keys, frontmatter, sanitize, session, accessed, memindex, gate, history, diff3), and the doctor (src/mcp/doctor.ts and the CLI command)
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })

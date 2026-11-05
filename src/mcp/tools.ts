@@ -31,6 +31,7 @@ import {
   settleAccess,
   today,
 } from './accessed.ts'
+import { merge3 } from './diff3.ts'
 import {
   DEFAULT_CAPS,
   DEFAULT_MAX_CHARS,
@@ -47,8 +48,11 @@ import {
 } from './doctor.ts'
 import {
   type FmValue,
+  type Frontmatter,
   FrontmatterError,
+  formatValue,
   inferType,
+  MAX_TAGS,
   type NoteType,
   parseFrontmatter,
   serializeFrontmatter,
@@ -64,7 +68,17 @@ import {
   renderNeedsDecision,
 } from './gate.ts'
 import {
+  appendVersion,
+  type HistoryVersion,
+  historyAllowed,
+  parseHistory,
+  readVersion,
+  serializeHistory,
+} from './history.ts'
+import {
   ACCESSED_KEY,
+  HISTORY_PREFIX,
+  historyKey,
   INDEX_KEY,
   isHiddenKey,
   isSystemKey,
@@ -94,7 +108,7 @@ import {
   tokenizeAll,
 } from './relevance.ts'
 import { neutralize } from './sanitize.ts'
-import { makeSession, type Session } from './session.ts'
+import { forgetRead, type LastRead, makeSession, recordRead, type Session } from './session.ts'
 
 export type ToolResult = { text: string; isError?: boolean; timings?: Timings }
 
@@ -730,6 +744,10 @@ export type RecallOptions = {
   /** Also rank superseded, deleted and expired notes, which are hidden by default. */
   includeInactive?: boolean
 }
+export type GetOptions = {
+  /** Read a prior version from the note's history instead: 1 is the most recent prior one. */
+  version?: number
+}
 
 /** A namespace of the shape `memory_project` creates: `<shared>/projects/<sha256 hex>`. */
 export function isProjectNamespace(ns: string): boolean {
@@ -740,8 +758,8 @@ export function isProjectNamespace(ns: string): boolean {
 function reservedKey(key: string, verb: string): string {
   return (
     `Refused to ${verb} "${key}": keys under ${SYSTEM_PREFIX} are bookkeeping the client ` +
-    'maintains by itself (the access-date sidecar, and later the trash and the version ' +
-    'history) and are never written by hand. Use a key outside that prefix.'
+    'maintains by itself (the access-date sidecar, the trash and the version history) ' +
+    'and are never written by hand. Use a key outside that prefix.'
   )
 }
 
@@ -763,6 +781,11 @@ function correctedLine(fields: string[]): string {
  */
 const BOOKKEEPING_KEYS: readonly string[] = [INDEX_KEY, ACCESSED_KEY, LEGACY_INDEX_KEY]
 
+/** A key a write carries for bookkeeping only: one of the fixed ones, or a note's history. */
+function isBookkeepingKey(key: string): boolean {
+  return BOOKKEEPING_KEYS.includes(key) || key.startsWith(HISTORY_PREFIX)
+}
+
 /** The keys a 409 names, or null when `e` is not a 409 or names none. */
 function conflictKeys(e: unknown): string[] | null {
   if (!(e instanceof OpenRecallHttpError) || e.status !== 409) return null
@@ -773,7 +796,7 @@ function conflictKeys(e: unknown): string[] | null {
 }
 
 function isBookkeepingOnlyConflict(e: unknown): boolean {
-  return conflictKeys(e)?.every(k => BOOKKEEPING_KEYS.includes(k)) ?? false
+  return conflictKeys(e)?.every(isBookkeepingKey) ?? false
 }
 
 const INDEX_NOT_REFRESHED = '(index not refreshed; the next save will)'
@@ -888,6 +911,265 @@ function noopText(key: string, ns: string, best: Candidate | undefined): string 
     `noop: "${key}" was not saved; keeping ${renderCandidate(best, 0).slice(3)}. ` +
     `Read it with memory_get key "${best.key}". Nothing was written.`
   )
+}
+
+// ---------------------------------------------------------------------------
+// Version history: what a write records about the version it replaces
+// ---------------------------------------------------------------------------
+
+/** What a push records in a note's history: the version it replaces, and where. */
+type HistoryPlan = { key: string; historyKey: string; version: HistoryVersion }
+
+/** The fields every save rewrites, which say nothing about what a note says. */
+const VOLATILE_STAMPS = ['updated', 'agent', 'session'] as const
+
+/**
+ * `content` without the stamps every save rewrites: what a note says, for
+ * deciding whether a write changed it. History records the replaced version
+ * only when this differs between the stored note and the one being saved,
+ * so a resave that changed nothing but its stamps spends no history slot.
+ */
+function stableText(content: string): string {
+  const fm = parseFrontmatter(content)
+  if (!fm) return content
+  const fields = new Map(fm.fields)
+  for (const k of VOLATILE_STAMPS) fields.delete(k)
+  return serializeFrontmatter(fields, fm.opaque) + fm.body
+}
+
+/** A stored note as a history version: its own stamps say when it was stored and by whom. */
+function historyVersionOf(
+  content: string,
+  hash: string | undefined,
+  fallbackUpdated: string | undefined,
+  now: string,
+): HistoryVersion {
+  const fields = parseFrontmatter(content)?.fields
+  const str = (name: string): string | undefined => {
+    const v = fields?.get(name)
+    return typeof v === 'string' && v !== '' ? v : undefined
+  }
+  const v: HistoryVersion = { updated: str('updated') ?? fallbackUpdated ?? now, content }
+  const agent = str('agent')
+  if (agent !== undefined) v.agent = agent
+  const sessionId = str('session')
+  if (sessionId !== undefined) v.session = sessionId
+  if (hash !== undefined) v.hash = hash
+  return v
+}
+
+/** The response line for a history skip the agent should hear about. */
+const historyNote = (reason: string) => `(history not recorded: ${reason})`
+
+/**
+ * The history a write to `key` should carry, or none: the stored version it
+ * replaces, when there is one, the write changes what the note says (stamps
+ * aside), the key is a note and not an index or bookkeeping, and
+ * `historyAllowed` agrees (history on, the key short enough for its history
+ * key, the body within the size cap, the namespace below the entry count at
+ * which history stops). `note` is the one response line two of those skips
+ * earn; the rest are silent. `namespaceEntries` null means the namespace
+ * could not be counted (its view failed), which is also a silent skip.
+ */
+function planHistory(
+  key: string,
+  previous: string | null,
+  next: string,
+  previousHash: string | undefined,
+  previousUpdatedAt: string | undefined,
+  namespaceEntries: number | null,
+  now: string,
+): { plan: HistoryPlan | null; note: string | null } {
+  const none = { plan: null, note: null }
+  if (previous === null || isHiddenKey(key) || namespaceEntries === null) return none
+  if (stableText(previous) === stableText(next)) return none
+  const allowed = historyAllowed({ key, contentLength: previous.length, namespaceEntries })
+  if (!allowed.ok) {
+    const loud = allowed.reason === 'too-large' || allowed.reason === 'key-too-long'
+    return { plan: null, note: loud ? historyNote(allowed.reason as string) : null }
+  }
+  const hk = historyKey(key) as string
+  return {
+    plan: {
+      key,
+      historyKey: hk,
+      version: historyVersionOf(previous, previousHash, previousUpdatedAt, now),
+    },
+    note: null,
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Three-way merge of a note (`./diff3.ts` for the body, field rules here)
+// ---------------------------------------------------------------------------
+
+type MergedNote = { ok: true; content: string; theirsLines: number } | { ok: false; text: string }
+
+/** Fields the client stamps on every save; the merge sets them itself. */
+const CLIENT_STAMPS = new Set(['id', 'created', 'updated', 'agent', 'session'])
+
+/** Fields that only ever get set: whichever side set one wins, the stored side when both did. */
+const MONOTONE_FIELDS = ['status', 'superseded_by', 'locked'] as const
+
+const emptyFrontmatter = (body: string): Frontmatter => ({
+  fields: new Map<string, FmValue>(),
+  opaque: new Map<string, string[]>(),
+  body,
+})
+
+function sameFm(a: FmValue | undefined, b: FmValue | undefined): boolean {
+  if (a === undefined || b === undefined) return a === b
+  if (Array.isArray(a) || Array.isArray(b)) {
+    return (
+      Array.isArray(a) && Array.isArray(b) && a.length === b.length && a.every((x, i) => x === b[i])
+    )
+  }
+  return a === b
+}
+
+function sameOpaque(a: Map<string, string[]>, b: Map<string, string[]>): boolean {
+  if (a.size !== b.size) return false
+  for (const [k, lines] of a) {
+    const other = b.get(k)
+    if (!other || other.length !== lines.length || other.some((l, i) => l !== lines[i]))
+      return false
+  }
+  return true
+}
+
+/** A value as a tag list: a list as is, a scalar split on commas, nothing for a boolean. */
+function tagList(v: FmValue | undefined): string[] {
+  if (v === undefined || typeof v === 'boolean') return []
+  if (Array.isArray(v)) return v
+  return v
+    .split(',')
+    .map(t => t.trim())
+    .filter(Boolean)
+}
+
+/** A monotone field counts as set when it holds something: `false` and '' are "not set". */
+function setValue(v: FmValue | undefined): FmValue | undefined {
+  return v === undefined || v === false || v === '' ? undefined : v
+}
+
+type FieldConflict = { name: string; base?: FmValue; ours?: FmValue; theirs?: FmValue }
+
+/** One frontmatter field both sides changed differently, in the body's conflict markers. */
+function renderFieldConflict(c: FieldConflict, eol = '\n'): string {
+  const line = (v: FmValue | undefined) => (v === undefined ? [] : [`${c.name}: ${formatValue(v)}`])
+  return (
+    [
+      '<<<<<<< yours',
+      ...line(c.ours),
+      '||||||| base',
+      ...line(c.base),
+      '=======',
+      ...line(c.theirs),
+      '>>>>>>> current',
+    ].join(eol) + eol
+  )
+}
+
+/**
+ * Reconcile the note this session is saving (`ours`, derived from `base`,
+ * the note as the session last read it) with what another session stored
+ * meanwhile (`theirs`). Frontmatter is merged field by field: `id` and
+ * `created` are the stored note's (ours when it has none), `updated` is now,
+ * `agent` and `session` are this process, `tags` is the union of both sides
+ * (the first `MAX_TAGS` kept), `status`, `superseded_by` and `locked` take
+ * whichever side set them (the stored side when both did), and every other
+ * field is ours when only we changed it, theirs when only they did, and a
+ * conflict when both changed it differently; opaque lines follow whichever
+ * side changed them. The body goes through `merge3`. Any conflict refuses
+ * the whole merge with the conflicting fields rendered in the same markers
+ * as the body's hunks, so the agent sees everything to resolve at once.
+ */
+function mergeNotes(
+  baseText: string,
+  oursText: string,
+  theirsText: string,
+  now: string,
+): MergedNote {
+  const base = parseFrontmatter(baseText) ?? emptyFrontmatter(baseText)
+  const ours = parseFrontmatter(oursText) ?? emptyFrontmatter(oursText)
+  const theirs = parseFrontmatter(theirsText) ?? emptyFrontmatter(theirsText)
+  const fields = new Map<string, FmValue>()
+  const conflicts: FieldConflict[] = []
+  for (const name of ['id', 'created']) {
+    const v = theirs.fields.get(name) ?? ours.fields.get(name)
+    if (v !== undefined) fields.set(name, v)
+  }
+  fields.set('updated', now)
+  for (const name of ['agent', 'session']) {
+    const v = ours.fields.get(name)
+    if (v !== undefined) fields.set(name, v)
+  }
+  const tags = [
+    ...new Set([...tagList(ours.fields.get('tags')), ...tagList(theirs.fields.get('tags'))]),
+  ]
+  if (tags.length > 0) fields.set('tags', tags.slice(0, MAX_TAGS))
+  for (const name of MONOTONE_FIELDS) {
+    const v = setValue(theirs.fields.get(name)) ?? setValue(ours.fields.get(name))
+    if (v !== undefined) fields.set(name, v)
+  }
+  const names = new Set([...base.fields.keys(), ...ours.fields.keys(), ...theirs.fields.keys()])
+  for (const name of names) {
+    if (CLIENT_STAMPS.has(name) || name === 'tags') continue
+    if ((MONOTONE_FIELDS as readonly string[]).includes(name)) continue
+    const b = base.fields.get(name)
+    const o = ours.fields.get(name)
+    const t = theirs.fields.get(name)
+    const oursChanged = !sameFm(b, o)
+    const theirsChanged = !sameFm(b, t)
+    let v: FmValue | undefined
+    if (!oursChanged) v = t
+    else if (!theirsChanged || sameFm(o, t)) v = o
+    else {
+      conflicts.push({ name, base: b, ours: o, theirs: t })
+      continue
+    }
+    if (v !== undefined) fields.set(name, v)
+  }
+  const opaque = sameOpaque(base.opaque, ours.opaque) ? theirs.opaque : ours.opaque
+  const body = merge3(base.body, ours.body, theirs.body)
+  if (conflicts.length > 0 || !body.ok) {
+    const parts = conflicts.map(c => renderFieldConflict(c))
+    if (!body.ok) parts.push(body.text)
+    return { ok: false, text: parts.join('\n') }
+  }
+  return {
+    ok: true,
+    content: serializeFrontmatter(fields, opaque) + body.text,
+    theirsLines: body.theirsLines,
+  }
+}
+
+/** The most a conflict answer may carry, hunks included. */
+const CONFLICT_CHARS = 4000
+
+/** The `needs_decision (conflict)` answer: the lead line, then only the conflicting hunks. */
+function conflictText(key: string, hunks: string): string {
+  const head =
+    `needs_decision (conflict): "${key}" changed under you and the edits overlap; ` +
+    'resolve the hunks below, then resave with mode: "update".\n'
+  return neutralize(clip(head + hunks, CONFLICT_CHARS))
+}
+
+/**
+ * Both texts as one whole hunk, for a note that moved again while the merge
+ * was being written: the bodies when they differ, else the whole notes (the
+ * difference is then in the frontmatter), else nothing.
+ */
+function wholeHunk(ours: string, theirs: string): string {
+  const bodyOf = (text: string) => parseFrontmatter(text)?.body ?? text
+  for (const [o, t] of [
+    [bodyOf(ours), bodyOf(theirs)],
+    [ours, theirs],
+  ]) {
+    const r = merge3('', o as string, t as string)
+    if (!r.ok) return r.text
+  }
+  return ''
 }
 
 export type ToolsOptions = {
@@ -1038,7 +1320,9 @@ export function makeTools(
   }
 
   async function getViaPull(timer: Timer, key: string, ns: string): Promise<ToolResult> {
-    const { entries, version } = await pullTimed(timer, ns)
+    const r = await pullTimed(timer, ns)
+    rememberView(ns, r)
+    const { entries, version } = r
     if (Object.keys(entries).length === 0) {
       const lost = await lostEntries(client, ns, version)
       if (lost) return fail(lost)
@@ -1086,6 +1370,84 @@ export function makeTools(
       }
       throw e
     }
+  }
+
+  /**
+   * What a whole-namespace read leaves as this session's merge bases: the
+   * plaintext of every note it decrypted, under the ciphertext hash it came
+   * from, and nothing for the notes it no longer holds. Called for the reads
+   * that set the client's write base for the whole namespace (recall's and
+   * search's pulls), never for a view pulled to build bookkeeping on, which
+   * leaves the base of the note being saved where the session's earlier
+   * read put it (see `Session.lastRead`).
+   */
+  function rememberView(ns: string, r: PullResult): void {
+    const keys = session.lastRead.get(ns)
+    if (keys) for (const k of keys.keys()) if (!Object.hasOwn(r.entries, k)) keys.delete(k)
+    for (const [key, content] of Object.entries(r.entries)) {
+      if (isHiddenKey(key)) continue
+      const hash = r.hashes?.[key]
+      recordRead(session.lastRead, ns, key, hash === undefined ? { content } : { hash, content })
+    }
+  }
+
+  /**
+   * The note stored under `key` right now, read so that it becomes this
+   * session's write base for the key (the retry after a merge is conditional
+   * on it) and remembered as the base of the next merge. Null when the note
+   * is gone. A server without the entry view is read whole, as `get` does.
+   */
+  async function readCurrent(ns: string, key: string): Promise<string | null> {
+    let content: string | null
+    try {
+      content = await client.entry(ns, key)
+    } catch (e) {
+      if (e instanceof OpenRecallHttpError && (e.status === 404 || e.status === 400)) return null
+      if (e instanceof OpenRecallProtocolError) {
+        const r = await client.pull(ns)
+        rememberView(ns, r)
+        return Object.hasOwn(r.entries, key) ? (r.entries[key] as string) : null
+      }
+      throw e
+    }
+    recordRead(session.lastRead, ns, key, { content })
+    return content
+  }
+
+  /**
+   * The base a merge of `key` can stand on after `e`, or null when there is
+   * none and the stale write is refused as before: `e` must be a 409 whose
+   * conflicts, bookkeeping aside, are exactly this key and say the note still
+   * exists; the write must have claimed a base for it (a null base claimed
+   * its absence, so the other side created it and there is nothing of ours
+   * to keep); and the session must remember the plaintext it last read for
+   * the key under that base, the hash agreeing when both are known.
+   */
+  function mergeBase(e: unknown, ns: string, key: string): LastRead | null {
+    const keys = conflictKeys(e)
+    if (!keys) return null
+    const notes = keys.filter(k => !isBookkeepingKey(k))
+    if (notes.length !== 1 || notes[0] !== key) return null
+    const details = (e as OpenRecallHttpError).details
+    const conflicts = details?.conflicts as Record<string, unknown>
+    if (typeof conflicts[key] !== 'string') return null
+    const sent = details?.sentBase
+    const sentHash =
+      typeof sent === 'object' && sent !== null ? (sent as Record<string, unknown>)[key] : undefined
+    if (sentHash === null) return null
+    const base = session.lastRead.get(ns)?.get(key)
+    if (!base) return null
+    if (base.hash !== undefined && typeof sentHash === 'string' && base.hash !== sentHash)
+      return null
+    return base
+  }
+
+  /** The current ciphertext hash a 409 reports for `key`, when it reports one. */
+  function conflictHash(e: unknown, key: string): string | undefined {
+    const raw = (e as OpenRecallHttpError).details?.conflicts
+    const v =
+      typeof raw === 'object' && raw !== null ? (raw as Record<string, unknown>)[key] : undefined
+    return typeof v === 'string' ? v : undefined
   }
 
   /**
@@ -1304,6 +1666,13 @@ export function makeTools(
    * save gate) hands the view in as `given`, and the first attempt builds on
    * it instead of pulling again; `null` says that pull already failed, so
    * the entries go alone at once rather than failing the same way twice.
+   *
+   * `history` names the versions this write replaces: each is appended to
+   * its note's history entry as read from the same view (newest first, five
+   * kept) and the entry travels in the same request. A version the history
+   * module will not take for size earns a response line; one it already
+   * holds is silent. When the entries end up going alone, so does the note,
+   * and no history is written.
    */
   async function pushWithBookkeeping(
     timer: Timer,
@@ -1311,12 +1680,14 @@ export function makeTools(
     entries: Record<string, string>,
     deletions: string[] = [],
     given?: PullResult | null,
+    history: HistoryPlan[] = [],
   ): Promise<Bookkept> {
     const push = (e: Record<string, string>, d: string[]) =>
       timer.time('fetch', () => client.push(ns, e, d.length ? { deletions: d } : undefined))
     const pending = session.pendingAccess.get(ns)
     const writesIndex = Object.hasOwn(entries, INDEX_KEY)
     const skipIndex = deletions.includes(INDEX_KEY)
+    const observe = [...BOOKKEEPING_KEYS, ...history.map(h => h.historyKey)]
     let alone: string | null = null
     let lastConflict: unknown
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -1329,7 +1700,7 @@ export function makeTools(
         view = given
       } else {
         try {
-          view = await pullTimed(timer, ns, { observe: [...BOOKKEEPING_KEYS] })
+          view = await pullTimed(timer, ns, { observe })
         } catch (e) {
           if (writesIndex) throw e
           alone = INDEX_NOT_REFRESHED
@@ -1337,6 +1708,7 @@ export function makeTools(
         }
       }
       const extra: Record<string, string> = {}
+      const historyNotes: string[] = []
       let plan: IndexPlan | null = null
       let dels = deletions
       if (!skipIndex) {
@@ -1344,6 +1716,14 @@ export function makeTools(
         if (plan.text !== null) extra[INDEX_KEY] = plan.text
         if (plan.remove) dels = [...deletions, INDEX_KEY]
         if (plan.backup !== null) extra[LEGACY_INDEX_KEY] = plan.backup
+      }
+      for (const h of history) {
+        const stored = Object.hasOwn(view.entries, h.historyKey)
+          ? (view.entries[h.historyKey] as string)
+          : null
+        const appended = appendVersion(parseHistory(stored, h.key), h.version)
+        if (appended.recorded) extra[h.historyKey] = serializeHistory(appended.file)
+        else if (appended.reason === 'too-large') historyNotes.push(historyNote('too-large'))
       }
       const stamps = pending?.size ? pending : null
       let snapshot: Map<string, string> | null = null
@@ -1373,7 +1753,7 @@ export function makeTools(
         }
         const notes =
           plan === null ? [] : skipped.includes(INDEX_KEY) ? [INDEX_NOT_REFRESHED] : plan.notes
-        return { result: r, notes }
+        return { result: r, notes: [...notes, ...historyNotes] }
       } catch (e) {
         if (isBookkeepingOnlyConflict(e)) {
           lastConflict = e
@@ -1410,11 +1790,73 @@ export function makeTools(
    * say). The gate is then skipped and said so, and the push goes alone, the
    * same way the index is skipped when its pull fails.
    */
-  async function pullView(timer: Timer, ns: string): Promise<PullResult | null> {
+  async function pullView(timer: Timer, ns: string, observe: string[]): Promise<PullResult | null> {
     try {
-      return await pullTimed(timer, ns, { observe: [...BOOKKEEPING_KEYS] })
+      return await pullTimed(timer, ns, { observe })
     } catch {
       return null
+    }
+  }
+
+  /** How many entries a view holds, every key counted; null when there is no view. */
+  const entryCount = (view: PullResult | null | undefined): number | null =>
+    view ? Object.keys(view.hashes ?? view.entries).length : null
+
+  /**
+   * The save's answer to a 409 on its own key when a merge base is at hand:
+   * read the note as it stands now (which makes it the retry's base), merge
+   * the three texts, and push the merged note once more with its bookkeeping
+   * and the history of the version it replaces; the gate is not run again.
+   * Overlapping edits refuse with the conflicting hunks and write nothing,
+   * and so does a note that moved again under the retry, rendered against
+   * what it holds now. Either way the current text is remembered as the base
+   * of the agent's next attempt, which the answer asks for as `mode: update`.
+   */
+  async function mergeAndRetry(
+    timer: Timer,
+    ns: string,
+    key: string,
+    base: LastRead,
+    entries: Record<string, string>,
+    history: HistoryPlan[],
+    namespaceEntries: number | null,
+    now: string,
+    original: unknown,
+  ): Promise<
+    { conflict: true; text: string } | { conflict: false; pushed: Bookkept; line: string }
+  > {
+    const current = await timer.time('fetch', () => readCurrent(ns, key))
+    if (current === null) throw original
+    const ours = entries[key] as string
+    const merged = await timer.time('format', () => mergeNotes(base.content, ours, current, now))
+    if (!merged.ok) return { conflict: true, text: conflictText(key, merged.text) }
+    entries[key] = merged.content
+    const h = planHistory(
+      key,
+      current,
+      merged.content,
+      conflictHash(original, key),
+      undefined,
+      namespaceEntries,
+      now,
+    )
+    const plans = [...history.filter(p => p.key !== key), ...(h.plan ? [h.plan] : [])]
+    try {
+      const pushed = await pushWithBookkeeping(timer, ns, entries, [], undefined, plans)
+      if (h.note) pushed.notes.push(h.note)
+      const n = merged.theirsLines
+      return {
+        conflict: false,
+        pushed,
+        line: `merged "${key}" in ${ns} (v${pushed.result.version}): kept both sides' changes (${n} ${plural(n, 'line')} from the other session)`,
+      }
+    } catch (e) {
+      if (!conflictKeys(e)?.includes(key)) throw e
+      const fresh = await timer.time('fetch', () => readCurrent(ns, key))
+      if (fresh === null) throw e
+      const again = mergeNotes(current, merged.content, fresh, now)
+      const hunks = again.ok ? wholeHunk(merged.content, fresh) : again.text
+      return { conflict: true, text: conflictText(key, hunks) }
     }
   }
 
@@ -1430,6 +1872,46 @@ export function makeTools(
   }
 
   const GATE_SKIPPED = '(duplicate check skipped: the namespace could not be read whole)'
+
+  /** `memory_get` with `version: n`: the n-th prior version of `key` out of its history entry. */
+  async function getVersion(timer: Timer, key: string, ns: string, n: number): Promise<ToolResult> {
+    const hk = historyKey(key)
+    const none = (kept: number) =>
+      ok(
+        `(no stored version ${n} of "${key}" in ${ns}: ${kept} prior ${plural(kept, 'version')} ` +
+          `${kept === 1 ? 'is' : 'are'} kept${kept ? `, numbered 1 (most recent) to ${kept}` : ''})`,
+      )
+    if (hk === null || !Number.isInteger(n) || n < 1) return none(0)
+    try {
+      let text: string | null
+      try {
+        text = await timer.time('fetch', () => client.entry(ns, hk, { observe: false }))
+        timer.entries = 1
+      } catch (e) {
+        if (e instanceof OpenRecallHttpError && (e.status === 404 || e.status === 400)) text = null
+        else if (
+          e instanceof OpenRecallHttpError &&
+          e.status === 503 &&
+          e.code === 'entry_unreadable'
+        )
+          return fail(unreadableEntry(hk, ns))
+        else if (e instanceof OpenRecallProtocolError) {
+          const { entries } = await client.pull(ns, { observe: false })
+          text = Object.hasOwn(entries, hk) ? (entries[hk] as string) : null
+        } else throw e
+      }
+      const file = parseHistory(text, key)
+      const v = readVersion(file, n)
+      if (!v) return none(file.versions.length)
+      const by = v.agent === undefined ? 'an unknown agent' : neutralize(bounded(v.agent, 80))
+      return ok(
+        `### ${key} (${ns}) version ${n} of ${file.versions.length}, stored ${neutralize(bounded(v.updated, 40))} by ${by}\n${v.content}`,
+      )
+    } catch (e) {
+      const d = denial(`Reading "${key}"`, ns, defaultNamespace, 'Nothing was read.', e)
+      return fail(d ?? `get failed: ${bounded((e as Error).message)}`)
+    }
+  }
 
   const tools = {
     /**
@@ -1454,10 +1936,20 @@ export function makeTools(
      * `force` covers locks and routing only, never the gate.
      *
      * The push carries the regenerated `MEMORY.md` in the same request
-     * (`pushWithBookkeeping`); saving `MEMORY.md` itself edits its Pinned
-     * section and nothing else. The first response line keeps its shape; a
-     * second line reports replaced stamps, then a routing reminder, a
-     * supersession note, and any lines about the index.
+     * (`pushWithBookkeeping`), and the history of the version it replaces
+     * when the note's text changed (`planHistory`); saving `MEMORY.md` itself
+     * edits its Pinned section and nothing else. The first response line
+     * keeps its shape; a second line reports replaced stamps, then a routing
+     * reminder, a supersession note, and any lines about the index or the
+     * history.
+     *
+     * A 409 on the key itself is a concurrent edit. When this session
+     * remembers the note as it last read it (`Session.lastRead`), the save
+     * merges three-way (`mergeAndRetry`): edits on different lines are kept
+     * from both sides and pushed again, with the first line `merged "<key>"
+     * …`; overlapping edits answer `needs_decision (conflict)` with the hunks
+     * and write nothing. With no base to merge on, the stale write is
+     * refused as it always was.
      */
     save: timed(
       async (timer, key: string, content: string, namespace?: string, opts: SaveOptions = {}) => {
@@ -1468,7 +1960,9 @@ export function makeTools(
           const entries: Record<string, string> = { [key]: content }
           let corrected: string[] = []
           const extra: string[] = []
+          const history: HistoryPlan[] = []
           let view: PullResult | null | undefined
+          const now = new Date().toISOString()
           // The root index is not a note: it is regenerated from the notes on
           // every write, so it carries no stamp and no type to route, and the
           // one part of what the agent sends that survives is its Pinned
@@ -1485,7 +1979,6 @@ export function makeTools(
                   'of the entry to rewrite, or with mode: "add" if this is a new fact. Nothing was stored.',
               )
             }
-            const now = new Date().toISOString()
             let stamped: ReturnType<typeof stampForSave>
             try {
               stamped = stampForSave(existing, content, {
@@ -1515,8 +2008,15 @@ export function makeTools(
 
             // A subtree index (`project/MEMORY.md`) is stamped and routed like
             // a note but is a table of contents, not a fact: nothing to gate.
+            let oldContent: string | null = null
+            let old: string | undefined
             if (!isHiddenKey(key)) {
-              view = await pullView(timer, ns)
+              const hk = historyKey(key)
+              view = await pullView(
+                timer,
+                ns,
+                hk ? [...BOOKKEEPING_KEYS, hk] : [...BOOKKEEPING_KEYS],
+              )
               const day = today()
               if (mode === undefined || mode === 'noop') {
                 if (view === null) {
@@ -1541,7 +2041,7 @@ export function makeTools(
                 }
               }
               if (mode === 'supersede') {
-                const old = opts.supersedes ?? stamped.meta.supersedes
+                old = opts.supersedes ?? stamped.meta.supersedes
                 if (old === undefined) {
                   return fail(
                     `Refused to save "${key}" with mode "supersede": pass supersedes: "<old key>" ` +
@@ -1554,7 +2054,7 @@ export function makeTools(
                       'note. Nothing was stored.',
                   )
                 }
-                const oldContent = await storedNote(timer, ns, old, view)
+                oldContent = await storedNote(timer, ns, old, view)
                 if (oldContent === null) {
                   return fail(
                     `Refused to supersede "${old}": there is no such entry in ${ns}. Call ` +
@@ -1581,16 +2081,75 @@ export function makeTools(
                 )
               }
             }
+            // The version this write replaces goes to the note's history, in
+            // the same request. The view's copy is fresher than the pre-read
+            // and carries the hash; a namespace that could not be read whole
+            // records nothing, like the index.
+            const previous =
+              view && Object.hasOwn(view.entries, key) ? (view.entries[key] as string) : existing
+            const count = entryCount(view)
+            const h = planHistory(
+              key,
+              previous,
+              stamped.content,
+              view?.hashes?.[key],
+              view?.updatedAt[key],
+              count,
+              now,
+            )
+            if (h.plan) history.push(h.plan)
+            if (h.note) extra.push(h.note)
+            if (old !== undefined && oldContent !== null) {
+              const ho = planHistory(
+                old,
+                oldContent,
+                entries[old] as string,
+                view?.hashes?.[old],
+                view?.updatedAt[old],
+                count,
+                now,
+              )
+              if (ho.plan) history.push(ho.plan)
+              if (ho.note) extra.push(ho.note)
+            }
           }
-          const { result: r, notes } = await pushWithBookkeeping(timer, ns, entries, [], view)
+          let pushed: Bookkept
+          let mergedLine: string | null = null
+          try {
+            pushed = await pushWithBookkeeping(timer, ns, entries, [], view, history)
+          } catch (e) {
+            const base = key === INDEX_KEY || isHiddenKey(key) ? null : mergeBase(e, ns, key)
+            if (base === null) throw e
+            const outcome = await mergeAndRetry(
+              timer,
+              ns,
+              key,
+              base,
+              entries,
+              history,
+              entryCount(view),
+              now,
+              e,
+            )
+            if (outcome.conflict) return fail(outcome.text)
+            pushed = outcome.pushed
+            mergedLine = outcome.line
+          }
+          const { result: r, notes } = pushed
           timer.entries += Object.keys(entries).length
           // A 2xx does not mean this key landed: the server refuses oversized and
           // malformed entries per key and reports them here. Match on the key
           // that was sent, since another key's refusal says nothing about this one.
           const refused = r.skipped?.find(s => s.key === key)
           if (refused) return fail(skippedText(key, ns, refused.reason))
+          // What landed is what this session now holds as the base of its next
+          // write to each note, the way the client holds the hash it stored.
+          for (const [k, stored] of Object.entries(entries)) {
+            if (isHiddenKey(k) || r.skipped?.some(s => s.key === k)) continue
+            recordRead(session.lastRead, ns, k, { content: stored })
+          }
           const status = r.uploaded.includes(key) ? 'saved' : 'unchanged'
-          const lines = [`${status} "${key}" in ${ns} (v${r.version})`]
+          const lines = [mergedLine ?? `${status} "${key}" in ${ns} (v${r.version})`]
           if (corrected.length) lines.push(neutralize(correctedLine(corrected)))
           for (const other of Object.keys(entries)) {
             if (other === key) continue
@@ -1652,6 +2211,7 @@ export function makeTools(
                   const lost = await lostEntries(client, source, r.version)
                   if (lost) throw new Rendered(lost)
                 }
+                rememberView(source, r)
                 return { source, entries: r.entries, docs: docsOf(r, source, !!namespaces) }
               } catch (err) {
                 if (err instanceof Rendered) throw err
@@ -1878,9 +2438,16 @@ export function makeTools(
      * that key's ciphertext hash and nothing about any other key; recall still
      * observes everything it decrypts. A save of some other key after only a
      * `get` therefore carries no base for it, as a first write never did.
+     *
+     * `version: n` reads the note's history instead: the n-th prior stored
+     * version (1 the most recent), under a header that says which of how
+     * many it is and when and by whom it was stored. The body is verbatim
+     * like the live one. A version that is not there is an ordinary answer,
+     * not an error, and the read records no base and no access.
      */
-    get: timed(async (timer, key: string, namespace?: string) => {
+    get: timed(async (timer, key: string, namespace?: string, opts: GetOptions = {}) => {
       const ns = nsOf(namespace)
+      if (opts.version !== undefined) return getVersion(timer, key, ns, opts.version)
       try {
         let body: string
         try {
@@ -1901,6 +2468,7 @@ export function makeTools(
           throw e
         }
         if (!isHiddenKey(key)) {
+          recordRead(session.lastRead, ns, key, { content: body })
           noteAccess(session.pendingAccess, ns, key, today())
           await flushIfDue(timer, ns)
         }
@@ -1916,7 +2484,9 @@ export function makeTools(
       const ns = nsOf(namespace)
       const needle = query.toLowerCase()
       try {
-        const { entries, version } = await pullTimed(timer, ns)
+        const r = await pullTimed(timer, ns)
+        rememberView(ns, r)
+        const { entries, version } = r
         if (Object.keys(entries).length === 0) {
           const lost = await lostEntries(client, ns, version)
           if (lost) return fail(lost)
@@ -1982,22 +2552,28 @@ export function makeTools(
      * is erased with a note saying so. Every deletion goes through the push
      * route, never the bare delete, so the regenerated index (without the
      * deleted key) and any pending access stamps land in the same request.
+     *
+     * A note's history entry is erasable the same way (`hard: true` only),
+     * which is what the doctor proposes near the entry cap; nothing erases
+     * it otherwise, a deleted note's history included. A soft delete records
+     * no history: the trash copy is the note's last version.
      */
     delete: timed(async (timer, key: string, namespace?: string, opts: DeleteOptions = {}) => {
       const ns = nsOf(namespace)
       const inTrash = key.startsWith(TRASH_PREFIX)
-      if (isSystemKey(key) && !inTrash) return fail(reservedKey(key, 'delete'))
-      if (inTrash && !opts.hard) {
+      const inHistory = key.startsWith(HISTORY_PREFIX)
+      if (isSystemKey(key) && !inTrash && !inHistory) return fail(reservedKey(key, 'delete'))
+      if ((inTrash || inHistory) && !opts.hard) {
         return fail(
-          `Refused to delete "${key}": it is already in the trash. Pass hard: true to erase it. ` +
-            `"${key}" is still stored.`,
+          `Refused to delete "${key}": it is ${inTrash ? 'already in the trash' : 'a version history entry'}. ` +
+            `Pass hard: true to erase it. "${key}" is still stored.`,
         )
       }
       try {
         const existing = await timer.time('fetch', () => readExisting(ns, key, true))
         const lock = lockedRefusal(existing, key, ns, 'delete')
         if (lock && !opts.force) return fail(lock)
-        const parked = inTrash ? null : trashKey(key)
+        const parked = inTrash || inHistory ? null : trashKey(key)
         const hard = opts.hard === true || existing === null || parked === null
         const entries: Record<string, string> = {}
         const deletions = [key]
@@ -2016,6 +2592,7 @@ export function makeTools(
         }
         const deleted = r.deleted.includes(key)
         timer.entries += deleted ? 1 : 0
+        if (deleted) forgetRead(session.lastRead, ns, key)
         if (!deleted) {
           if (parked !== null && r.deleted.includes(parked))
             return ok(

@@ -725,7 +725,7 @@ describe('recall no-match recovery', () => {
  * holds; a stub would be asserting on a fixture of my own making.
  */
 describe('AE7 stale write', () => {
-  test("a save computed from a superseded read is refused, names the key, and B's write survives", async () => {
+  test("a save computed from a superseded read is refused by the server as stale, merged on the client, and B's write survives", async () => {
     // Its own namespace: the shared one is at the test server's five-entry
     // cap by now, the generated index being one of the five.
     const mk = () =>
@@ -736,33 +736,32 @@ describe('AE7 stale write', () => {
     const a = mk()
     const b = mk()
 
-    expect((await a.save('ae7.md', 'shared note v1')).isError).toBeUndefined()
-    // A reads, so its next write carries a base measured against this read.
+    const v1 = 'shared note v1\nsecond line\nthird line\n'
+    expect((await a.save('ae7.md', v1)).isError).toBeUndefined()
+    // A reads, so its next write carries a base measured against this read,
+    // and the session remembers the text it read as the base of a merge.
     await a.search('shared note')
-    // B commits a change to the same key underneath A.
-    expect((await b.save('ae7.md', 'shared note v1\nB added a line')).isError).toBeUndefined()
+    // B commits a change to the same key underneath A: the third line.
+    const byB = 'shared note v1\nsecond line\nB changed the third line\n'
+    expect((await b.save('ae7.md', byB)).isError).toBeUndefined()
 
-    const stale = await a.save('ae7.md', 'shared note v1\nA added a line')
-    expect(stale.isError).toBe(true)
-    expect(stale.text).toContain('ae7.md')
-    expect(stale.text).toContain('409 stale base')
-    expect(stale.text).toMatch(/re-read/i)
-    expect(stale.text).toContain('recall')
-    // The refusal is written for a model, not a JSON dump of the response.
-    expect(stale.text).not.toContain('{"error"')
+    // A changes the first line of what it read. The server refuses the write
+    // as stale (409); the tool reads what is stored, merges the two edits,
+    // which touch different lines, and pushes the union once more.
+    const merged = await a.save('ae7.md', 'A changed the first line\nsecond line\nthird line\n')
+    expect(merged.isError).toBeUndefined()
+    expect(merged.text).toMatch(
+      /^merged "ae7\.md" in user:me\/ae7 \(v\d+\): kept both sides' changes \(1 line from the other session\)/,
+    )
+    // The refusal/merge is written for a model, not a JSON dump of the response.
+    expect(merged.text).not.toContain('{"error"')
 
-    // B's line is still there: the refusal did not half-apply anything.
-    expect((await b.recall('shared note')).text).toContain('B added a line')
-
-    // A re-reads and reapplies on top of what is actually stored.
-    const reread = await a.recall('shared note')
-    expect(reread.text).toContain('B added a line')
-    const retry = await a.save('ae7.md', 'shared note v1\nB added a line\nA added a line')
-    expect(retry.isError).toBeUndefined()
-
-    const final = (await b.recall('shared note')).text
-    expect(final).toContain('B added a line')
-    expect(final).toContain('A added a line')
+    // Both lines are stored: nothing was half-applied and nothing was lost.
+    const stored = (await b.get('ae7.md')).text
+    expect(stored).toContain('A changed the first line\nsecond line\nB changed the third line\n')
+    const final = (await b.recall('changed the line')).text
+    expect(final).toContain('B changed the third line')
+    expect(final).toContain('A changed the first line')
   })
 })
 
@@ -1576,7 +1575,10 @@ describe('the access sidecar', () => {
     expect(r.text).not.toContain('409')
     expect(JSON.parse(stub.entries[ACCESSED_KEY] as string).keys).toEqual({ 'a.md': today() })
     expect(session.pendingAccess.get('user:me')?.size ?? 0).toBe(0)
-    // A 409 on the note itself is still the agent's to resolve.
+    // A 409 on the note itself is still the agent's to resolve: this session
+    // wrote b.md, so the tool merges and retries, and a note that keeps
+    // moving under the retry is answered with a conflict against what is
+    // stored now, which the sidecar's own retry never swallows.
     stub.push = async () => {
       throw httpError(409, 'stale_base_version', { conflicts: { 'b.md': 'sha256:bb' } })
     }
@@ -1584,7 +1586,8 @@ describe('the access sidecar', () => {
     await t.get('c.md')
     const stale = await t.save('b.md', 'The beta note, again.')
     expect(stale.isError).toBe(true)
-    expect(stale.text).toContain('409 stale base')
+    expect(stale.text).toStartWith('needs_decision (conflict): "b.md" changed under you')
+    expect(stale.text).not.toContain(ACCESSED_KEY)
     expect(session.pendingAccess.get('user:me')?.size).toBe(1)
   })
 
@@ -1812,14 +1815,21 @@ describe('the generated MEMORY.md', () => {
     expect(stub.entries['c.md']).toBeDefined()
     expect(stub.entries['MEMORY.md']).not.toContain('c.md')
 
-    // A 409 naming the note itself is still the agent's, rendered as before.
+    // A 409 naming the note itself is still the agent's. This session wrote
+    // b.md, so it merges and retries, and a note that keeps moving under the
+    // retry is a conflict against what is stored now; a session with no base
+    // for the key is refused the way it always was.
     stub.push = async () => {
       throw httpError(409, 'stale_base_version', { conflicts: { 'b.md': 'sha256:bb' } })
     }
     const stale = await t.save('b.md', 'The beta note, again.')
     expect(stale.isError).toBe(true)
-    expect(stale.text).toContain('409 stale base')
-    expect(stale.text).toContain('b.md')
+    expect(stale.text).toStartWith('needs_decision (conflict): "b.md" changed under you')
+    expect(stale.text).toContain('>>>>>>> current')
+    const noBase = await makeTools(stub, 'user:me').save('b.md', 'The beta note, again.')
+    expect(noBase.isError).toBe(true)
+    expect(noBase.text).toContain('409 stale base')
+    expect(noBase.text).toContain('b.md')
   })
 
   test('the save response warns as the index nears its cap', async () => {

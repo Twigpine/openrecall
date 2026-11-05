@@ -72,11 +72,21 @@ function flag(args: Args, name: string): string | undefined {
   return v
 }
 
+/**
+ * The files `push` sends and `pull` wrote: `.md` notes, plus the `.json`
+ * bookkeeping under `sys.openrecall/` (the access sidecar and each note's
+ * version history), at most five path segments deep so a trash copy or the
+ * history of a three-level key (`sys.openrecall/history/a/b/c.md.json`)
+ * round-trips through `pull` and `push` unchanged.
+ */
 async function walkMd(dir: string): Promise<string[]> {
   const out: string[] = []
   const entries = await readdir(dir, { recursive: true }).catch(() => [] as string[])
   for (const rel of entries) {
-    if (rel.endsWith('.md') && rel.split(sep).length <= 3) out.push(rel)
+    const parts = rel.split(sep)
+    if (parts.length > 5) continue
+    if (rel.endsWith('.md')) out.push(rel)
+    else if (rel.endsWith('.json') && parts[0] === 'sys.openrecall') out.push(rel)
   }
   return out
 }

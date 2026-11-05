@@ -8,7 +8,22 @@
  * session together (`session:`), the project namespaces `memory_project` has
  * opened (the routing check in `memory_save` reads it), and the access stamps
  * recall and get have collected and not yet flushed to the sidecar (see
- * `./accessed.ts`).
+ * `./accessed.ts`), and the plaintext this session last read for each key
+ * (`lastRead`), which is the base a three-way merge needs when a save is
+ * refused as stale.
+ *
+ * `lastRead` mirrors the client's write base. The client sends, for every
+ * key a push touches, the ciphertext hash it last observed for that key: a
+ * recall or search pull, a `memory_get` entry read, or its own successful
+ * push. `lastRead` records the plaintext of exactly those events (and the
+ * hash too when the read carried one), so that on a 409 the plaintext under
+ * the base the client sent is at hand. Reads that do not move the base (the
+ * save's own pre-read of the stored note, the gate's view of the namespace,
+ * the doctor's audit) are deliberately NOT recorded: they see the other
+ * session's current text, and recording that as the base would make the
+ * merge treat the other side's lines as deletions of ours. Eight namespaces
+ * are kept, least recently read dropped; a key whose base is gone is saved
+ * the way it was before merging existed, refused as stale.
  *
  * The agent label is `name/version` from the MCP client's `initialize`
  * request, read through a getter because the server object that holds it is
@@ -47,7 +62,24 @@ export type Session = {
   readonly pendingAccess: Map<string, Map<string, string>>
   /** namespace -> the last doctor run in this process (`memory_doctor`, or the scheduled one). */
   readonly doctor: Map<string, DoctorRun>
+  /**
+   * namespace -> (key -> the plaintext this session last read under the
+   * client's write base for that key, with the ciphertext hash when the read
+   * reported one). See the module comment; `recordRead` and `forgetRead`
+   * maintain it.
+   */
+  readonly lastRead: Map<string, Map<string, LastRead>>
 }
+
+/** One remembered read: the plaintext, and the ciphertext hash it was decrypted from when known. */
+export type LastRead = {
+  /** The ciphertext hash the content was read under; absent for an entry read or a push. */
+  hash?: string
+  content: string
+}
+
+/** Namespaces whose last reads are kept; the least recently read is dropped past it. */
+export const MAX_LAST_READ_NAMESPACES = 8
 
 /**
  * What one doctor run left behind. `announced` is false after a scheduled run
@@ -120,5 +152,37 @@ export function makeSession(options: SessionOptions = {}): Session {
     openedProjects: new Set<string>(),
     pendingAccess: new Map<string, Map<string, string>>(),
     doctor: new Map<string, DoctorRun>(),
+    lastRead: new Map<string, Map<string, LastRead>>(),
   }
+}
+
+/**
+ * Remember what this session just read (or wrote) for `key` in `ns`, as the
+ * base of its next write to that key. The namespace moves to most recently
+ * used; past `MAX_LAST_READ_NAMESPACES` the least recently used is dropped.
+ */
+export function recordRead(
+  lastRead: Map<string, Map<string, LastRead>>,
+  ns: string,
+  key: string,
+  read: LastRead,
+): void {
+  const keys = lastRead.get(ns) ?? new Map<string, LastRead>()
+  lastRead.delete(ns)
+  lastRead.set(ns, keys)
+  keys.set(key, read)
+  while (lastRead.size > MAX_LAST_READ_NAMESPACES) {
+    const oldest = lastRead.keys().next()
+    if (oldest.done) break
+    lastRead.delete(oldest.value)
+  }
+}
+
+/** Drop the remembered read for `key` in `ns`: the note is gone, so there is no base to merge on. */
+export function forgetRead(
+  lastRead: Map<string, Map<string, LastRead>>,
+  ns: string,
+  key: string,
+): void {
+  lastRead.get(ns)?.delete(key)
 }

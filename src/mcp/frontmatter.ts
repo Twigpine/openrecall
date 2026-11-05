@@ -150,7 +150,8 @@ const INDENTED_RE = /^[ \t]+\S/
 const DELIM_RE = /^---[ \t]*$/
 const TAG_RE = /^[a-z0-9][a-z0-9-]*$/
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
-const MAX_TAGS = 8
+/** Most tags a note may carry; a merge that unions two sides' tags keeps the first eight. */
+export const MAX_TAGS = 8
 
 // ---------------------------------------------------------------------------
 // Parsing
@@ -390,7 +391,8 @@ export function serializeFrontmatter(
   return `${out.join('\n')}\n`
 }
 
-function formatValue(v: FmValue): string {
+/** One field's value as the serializer writes it after `key: `. */
+export function formatValue(v: FmValue): string {
   if (typeof v === 'boolean') return v ? 'true' : 'false'
   if (Array.isArray(v)) return `[${v.map(formatListItem).join(', ')}]`
   return formatScalar(v)
