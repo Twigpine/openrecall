@@ -222,6 +222,18 @@ await memory.push('user:me', { 'MEMORY.md': '# what I know about the user' })
 const { entries } = await memory.pull('user:me')
 ```
 
+`push` reports what the store actually stored. The store validates each key and
+size itself and answers `200` even when it skips an entry, so check `skipped`
+before treating a push as saved:
+
+```ts
+const { uploaded, skipped } = await memory.push('user:me', { 'notes.md': '…' })
+// skipped: [{ key, reason }] — refused by the store, never counted as uploaded
+```
+
+`delete` returns `{ deleted }`, so a real removal can be told from a no-op on a
+key that was not stored.
+
 The entry points (`@twigpine/openrecall`, `/crypto`, `/secretscan`) ship as
 plain ESM with type declarations, for Node 24+, Bun, or any bundler. An agent
 that only needs memory tools is better served by the MCP server; the library is
