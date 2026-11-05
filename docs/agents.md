@@ -159,7 +159,9 @@ deletes a remote entry when a previous sync of the same directory recorded its
 file AND the remote hash still matches that recording, so another agent's
 concurrent saves are downloaded, never destroyed. A remote deletion is
 reported and the local file is kept; `--prefer remote` applies the deletion
-while `--prefer local` restores the file. See
+while `--prefer local` restores the file. `--watch` reacts only to local
+filesystem events; use `--interval <sec>` when you also need periodic polling
+for remote-only changes. See
 [README](../README.md#mirror-a-memory-directory) for the full contract.
 
 ## Troubleshooting

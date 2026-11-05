@@ -204,4 +204,29 @@ describe('openrecall push reports rejected entries', () => {
       rmSync(home, { recursive: true, force: true })
     }
   })
+
+  test('refuses a missing directory instead of reporting an empty push', () => {
+    const home = mkdtempSync(join(tmpdir(), 'openrecall-push-missing-'))
+    const dir = join(home, 'does-not-exist')
+    const env = { ...process.env } as Record<string, string | undefined>
+    env.OPENRECALL_HOME = home
+    env.OPENRECALL_PASSPHRASE = 'test-passphrase'
+    env.OPENRECALL_SCAN = 'off'
+    env.OPENRECALL_URL = 'local'
+    delete env.OPENRECALL_API_KEY
+    delete env.OPENRECALL_DATA_DIR
+    delete env.OPENRECALL_NAMESPACE
+    delete env.OPENRECALL_PASSPHRASE_FILE
+    try {
+      const r = Bun.spawnSync(['bun', 'run', join(ROOT, 'bin/openrecall.ts'), 'push', dir], {
+        env,
+      })
+      const output = r.stdout.toString() + r.stderr.toString()
+      expect(r.exitCode).toBe(1)
+      expect(output).toContain('refusing to push an incomplete snapshot')
+      expect(output).not.toContain('pushed user:')
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 })

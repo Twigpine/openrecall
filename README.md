@@ -207,7 +207,10 @@ them to the namespace.
 
 `--watch` re-runs the sync when the directory settles (debounced); on platforms
 without recursive watching it falls back to polling, and `--interval <sec>`
-polls at a fixed cadence instead. `sync` also fixes an old asymmetry: `push`
+polls at a fixed cadence instead. A watcher only sees **local** filesystem
+events, so a change made on another machine is not noticed until the next local
+edit; use `--interval` when the directory must also poll for remote changes.
+`sync` also fixes an old asymmetry: `push`
 used to skip `.md` files more than three levels deep while `pull` wrote them at
 any depth, so a directory synced down and pushed back silently lost its deeper
 files — both now walk the whole tree.

@@ -518,11 +518,15 @@ export async function runSync(
   const local: Record<string, LocalEntry> = {}
   const contents: Record<string, string> = {}
   for (const f of listing.files) {
+    // Stat first: an edit after this point changes the mtime the download
+    // guard compares, so pairing an old read with a new mtime would let a
+    // download overwrite that edit.
+    const mtimeMs = (await stat(f.path)).mtimeMs
     const content = await readFile(f.path, 'utf8')
     contents[f.key] = content
     local[f.key] = {
       hash: client.ciphertextHashOf(ns, f.key, content),
-      mtimeMs: (await stat(f.path)).mtimeMs,
+      mtimeMs,
     }
   }
 
@@ -827,9 +831,10 @@ export type WatchHandle = { close(): void }
  * {@link POLL_FALLBACK_SEC} takes over rather than the watch silently dying —
  * a sync that looks alive and never runs is worse than one that polls.
  *
- * An `FSWatcher` can also emit `error` AFTER setup, which would otherwise throw
- * out of the event loop. That path closes the watcher and falls back to the
- * same poll cadence.
+ * Watching reports LOCAL filesystem events only; a remote-only change is not
+ * seen until something local happens or a poll runs. An `FSWatcher` can also
+ * emit `error` AFTER setup, which would otherwise throw out of the event loop.
+ * That path closes the watcher and falls back to the same poll cadence.
  */
 export function watchDirectory(
   dir: string,

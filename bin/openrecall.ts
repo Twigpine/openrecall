@@ -39,10 +39,10 @@ import {
 } from '../src/cli/settings.ts'
 import {
   formatSyncReport,
+  listMemoryFiles,
   runSync,
   type SyncReport,
   type WatchHandle,
-  walkMemoryFiles,
   watchDirectory,
 } from '../src/cli/sync.ts'
 import { validateNamespace } from '../src/namespace.ts'
@@ -148,9 +148,14 @@ async function cmdPush(dir: string, namespace?: string) {
   const s = resolveSettings()
   const ns = namespace ?? s.namespace
   const client = await makeClient(s)
-  const files = await walkMemoryFiles(dir)
+  const listing = await listMemoryFiles(dir)
+  // A missing or unreadable directory lists as empty. Pushing that would
+  // report success while reading nothing, so refuse the incomplete snapshot.
+  if (!listing.complete) {
+    throw new Error(`cannot read ${dir} completely; refusing to push an incomplete snapshot`)
+  }
   const entries: Record<string, string> = {}
-  for (const f of files) entries[f.key] = await readFile(f.path, 'utf8')
+  for (const f of listing.files) entries[f.key] = await readFile(f.path, 'utf8')
   const r = await client.push(ns, entries)
   const skipped = r.skipped ?? []
   const summary = [`${r.uploaded.length} uploaded`, `${r.unchanged.length} unchanged`]
@@ -249,6 +254,10 @@ async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
   // Watch mode: always hold a watcher across the sync. If the directory
   // settles during `once()`, the callback closes this watcher and resolves the
   // promise, so the loop runs again with content it has not seen yet.
+  //
+  // `--watch` only sees LOCAL filesystem events: a change made on another
+  // machine is invisible until the next local edit. Use `--interval` when the
+  // directory must also poll for remote-only changes.
   for (;;) {
     let handle: WatchHandle | undefined
     const changed = new Promise<void>(resolve => {
@@ -419,9 +428,11 @@ function usage(code = 1): never {
       '  openrecall sync <dir> [namespace]    mirror a memory directory and a namespace\n' +
       '                                       [--dry-run] [--prefer local|remote] [--prune] [--watch]\n' +
       '                                       [--interval <sec>]   bidirectional: newest write per\n' +
-      '                                       entry wins; --prefer resolves conflicts and remote\n' +
-      '                                       deletions; --prune deletes remote entries whose local\n' +
-      '                                       file a previous sync of this pair saw unchanged\n' +
+      '                                       entry wins; --watch sees local changes only, while\n' +
+      '                                       --interval also polls for remote ones; --prefer\n' +
+      '                                       resolves conflicts and remote deletions; --prune\n' +
+      '                                       deletes remote entries whose local file a previous\n' +
+      '                                       sync of this pair saw unchanged\n' +
       '  openrecall mcp                       run the stdio MCP server (memory tools)\n' +
       '  openrecall serve                     run the openrecall server (needs Bun)',
   )
