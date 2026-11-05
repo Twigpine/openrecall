@@ -666,7 +666,12 @@ describe('makeClient wiring', () => {
       fetch: fetchLike,
       cache: true,
     })
-    await c.push(ns, { 'a.md': 'alpha', 'b.md': 'beta' })
+    // Pushed through another client: a client's cache holds what it pushed, so
+    // a pull of its own write would read no body and never reach the bulk view.
+    await new OpenRecallClient({ url: LOCAL_ORIGIN, passphrase: PASSPHRASE, fetch: inner }).push(
+      ns,
+      { 'a.md': 'alpha', 'b.md': 'beta' },
+    )
     const n = wire.length
     const first = await c.pull(ns)
     expect(first.entries).toEqual({ 'a.md': 'alpha', 'b.md': 'beta' })

@@ -166,16 +166,18 @@ same tools. If your agent shows MCP tools by name only until you look them up
 
 Keep a flat, predictable layout:
 
-- `MEMORY.md` — a short index: one line per memory with a link and a hook.
+- `MEMORY.md` — the index: generated from each entry's `description` on
+  every save, one line per note grouped by type, plus a `## Pinned` section
+  you may edit.
 - `user/*.md`, `feedback/*.md`, `project/*.md`, `reference/*.md` — one fact per
   file, named in kebab-case (`feedback/run-tests-before-done.md`).
 
 `memory_recall` never returns `MEMORY.md`. An index is a list of pointers, so it
 matches a bit of every query and answers none of them, and returning it would
-spend a recall slot that a real entry should have had. Keep it anyway: it is the
-table of contents you read deliberately with `memory_get('MEMORY.md')`, or
-alongside `memory_list`, when you are orienting in an unfamiliar namespace or
-following up a recall that found nothing.
+spend a recall slot that a real entry should have had. It is the table of
+contents you read deliberately with `memory_get('MEMORY.md')`, or alongside
+`memory_list`, when you are orienting in an unfamiliar namespace or following
+up a recall that found nothing.
 
 In each saved file, prefer a tiny shape:
 
@@ -217,8 +219,12 @@ them unless `include_system` is true.
 
 - **Check before adding.** `memory_search` for an existing file on the topic and
   update it rather than creating a near-duplicate.
-- **Keep `MEMORY.md` current.** When you add a fact, add its one-line pointer to
-  the index; when you delete one, remove the line.
+- **`MEMORY.md` is generated** from each entry's `description` on every save;
+  do not edit the generated lines. Put orientation notes in its `## Pinned`
+  section (20 lines max): save `MEMORY.md` with the edited section and the
+  rest is regenerated around it. A hand-written index is migrated on the
+  first save: its prose lines become the Pinned section and the old text is
+  kept under `sys.openrecall/MEMORY.before-generated.md`.
 - **Correct and prune.** If a fact turns out to be wrong or outdated, fix or
   `memory_delete` it. Stale memory is worse than none.
 - **Trust but verify.** A recalled fact reflects what was true when it was

@@ -1945,16 +1945,17 @@ describe('single-origin tool traffic', () => {
     // And what did go out in place of the plaintext: the single PUT that
     // carries an entry must hold base64 envelopes. Absence of the sentinel on
     // its own would also hold for a body that never contained the entry at all.
-    // The delete is a second PUT with no entries: after the empty-namespace
-    // read the client asserts the key's absence through the PUT body, since
-    // DELETE has no spelling for "must not exist".
+    // The PUT carries two: the note and the MEMORY.md regenerated for it, both
+    // encrypted. The delete is a second PUT with no entries: after the
+    // empty-namespace read the client asserts the key's absence through the
+    // PUT body, since DELETE has no spelling for "must not exist".
     const puts = cap.bodies
       .filter(b => b.startsWith('{'))
       .map(b => JSON.parse(b) as { entries?: Record<string, string> })
       .filter(b => Object.keys(b.entries ?? {}).length > 0)
     expect(puts.length).toBe(1)
     const values = Object.values(puts[0].entries ?? {})
-    expect(values.length).toBe(1)
+    expect(values.length).toBe(2)
     for (const v of values) {
       expect(`base64:${/^[A-Za-z0-9+/]+={0,2}$/.test(v)}`).toBe('base64:true')
     }
@@ -2014,13 +2015,22 @@ describe('single-origin tool traffic', () => {
     let searched = ''
     let listed = ''
     try {
-      const client = new OpenRecallClient({ url, passphrase: 'test-passphrase', cache: true })
-      const tools = makeTools(client, NS)
-      await tools.save(
+      const writer = makeTools(
+        new OpenRecallClient({ url, passphrase: 'test-passphrase', cache: true }),
+        NS,
+      )
+      await writer.save(
         'notes/ledger.md',
         `---\ndescription: the quokka ledger note\n---\nThe quokka ledger records ${sentinel} in full.`,
       )
-      await tools.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      await writer.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      // The reads go through a second, cold client: the writer's cache already
+      // holds everything it pushed, so its own recall would read no body at all
+      // and the bulk view this test is about would never be exercised.
+      const tools = makeTools(
+        new OpenRecallClient({ url, passphrase: 'test-passphrase', cache: true }),
+        NS,
+      )
       recalled = (await tools.recall('quokka ledger records')).text
       // A second recall is the warm one: cached, so no body read at all.
       recalled = (await tools.recall('quokka ledger records')).text

@@ -47,6 +47,8 @@ export const SHORT_INSTRUCTIONS =
   'Every note has a type (user, feedback, project or reference) that the client stamps ' +
   'into its frontmatter along with id, created, updated, agent and session: user notes ' +
   'go in the shared namespace, project and reference notes in the open project namespace, ' +
-  'feedback in either. ' +
+  "feedback in either. MEMORY.md is generated from each entry's description on every " +
+  'save; do not edit its generated lines, and put orientation notes in its "## Pinned" ' +
+  'section (20 lines max). ' +
   'Search before adding to avoid duplicates. Call the "memory_guide" ' +
   'prompt for the full protocol.'

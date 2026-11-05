@@ -10,12 +10,13 @@
  *
  * Rules:
  *
- * - Bookkeeping entries (version history, the trash, the access-date sidecar)
- *   live under `sys.openrecall/`. A dot-prefix such as `.history/` would read
- *   more naturally but is not a valid key: `validateEntryKey` in
- *   `src/namespace.ts` requires the first character to be alphanumeric. The
- *   prefix is a path segment, not a bare prefix, so `sys.openrecall-notes.md`
- *   is an ordinary note and `isSystemKey` says so.
+ * - Bookkeeping entries (version history, the trash, the access-date sidecar,
+ *   the copy of a hand-written index) live under `sys.openrecall/`. A
+ *   dot-prefix such as `.history/` would read more naturally but is not a
+ *   valid key: `validateEntryKey` in `src/namespace.ts` requires the first
+ *   character to be alphanumeric. The prefix is a path segment, not a bare
+ *   prefix, so `sys.openrecall-notes.md` is an ordinary note and `isSystemKey`
+ *   says so.
  * - The index is `MEMORY.md`, at the namespace root or at the root of any
  *   subtree (`project/MEMORY.md`). Both are generated-or-curated tables of
  *   contents, not facts, and neither is ranked, listed in the index, or
@@ -46,6 +47,16 @@ export const ACCESSED_KEY = `${SYSTEM_PREFIX}accessed.json`
 
 /** The index filename, at the namespace root or the root of a subtree. */
 export const INDEX_BASENAME = 'MEMORY.md'
+
+/** The root index: the one `MEMORY.md` the client regenerates on every write. */
+export const INDEX_KEY = INDEX_BASENAME
+
+/**
+ * Where a hand-maintained root index is copied, whole, the first time the
+ * client regenerates it, so nothing an agent wrote there is lost. Written
+ * once: a later markerless index is adopted but does not overwrite this.
+ */
+export const LEGACY_INDEX_KEY = `${SYSTEM_PREFIX}MEMORY.before-generated.md`
 
 /**
  * Longest key the server accepts. `ENTRY_KEY_RE` in `src/namespace.ts` is one
