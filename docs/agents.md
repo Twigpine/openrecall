@@ -26,10 +26,24 @@ Restart each agent, or start a new session, afterwards.
   `*.openrecall-bak`.
 - **Pick agents by name** instead of `all`:
   `openrecall setup claude-code zero --write`.
-- **Global install vs npx.** With a global install, `setup` registers absolute
-  paths. These start fast, work offline, and work in GUI apps with a minimal
-  `PATH`. If you run `setup` through `npx`, it registers the portable
-  `npx -y @twigpine/openrecall mcp` instead. `--npx` forces the portable form.
+- **Which command gets registered.** The dry run prints it as `MCP command:`
+  with the reason. `setup` prefers an absolute path: it starts in about 50 ms,
+  works offline, in GUI apps with a minimal `PATH`, and in sandboxes without
+  network. In order:
+  1. `--launcher npx` or `--launcher /abs/path/to/openrecall`, if given.
+  2. A standalone binary pins itself.
+  3. An installed copy or a checkout pins the runtime and script that ran
+     `setup`. If that Node is below the `engines` floor, `setup` says so;
+     upgrade Node and rerun.
+  4. When `setup` itself runs through `npx` or `bunx`, a global `openrecall`
+     on `PATH` is pinned if there is one.
+  5. Otherwise the portable `npx -y @twigpine/openrecall@<version> mcp`, with
+     a warning: every agent start then pays about a second of npx resolution
+     and needs network the first time. Install once
+     (`npm i -g @twigpine/openrecall`) and rerun `setup` to pin a path.
+
+  Rerun `setup` after upgrading: a pinned path names one install, and the
+  portable form one version. `--npx` is the older spelling of `--launcher npx`.
 
 `openrecall status` shows the active config and checks that the store
 responds.
@@ -110,9 +124,13 @@ the first two.
   `~/.config/zero/config.json`. That grant covers only OpenRecall's own
   directory.
 - **Network is denied in the sandbox.** Two things follow:
-  - Install OpenRecall globally, so Zero launches it from an absolute path
-    instead of downloading it with `npx`. A download would also risk Zero's
-    8-second MCP connect timeout.
+  - Zero has to launch OpenRecall from an absolute path, not download it with
+    `npx`; a download would also risk Zero's 8-second MCP connect timeout.
+    `setup` pins a path on its own from a global install, a checkout or the
+    standalone binary. If it printed the portable `npx` form instead, install
+    globally (`npm i -g @twigpine/openrecall`) and rerun
+    `openrecall setup zero --write`, or name a binary with
+    `--launcher /path/to/openrecall`.
   - A **remote** store additionally needs `"sandbox": {"network": "allow"}` in
     your Zero config. `setup` points this out but never changes it for you.
 - **Use Ask mode.** Zero hides tools that need approval in Auto mode, and

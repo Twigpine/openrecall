@@ -13,3 +13,12 @@ import pkg from '../package.json' with { type: 'json' }
 export function version(): string {
   return pkg.version
 }
+
+/**
+ * The lowest Node this package runs on, from `engines.node` (">=24.22.1" →
+ * "24.22.1"). `setup` pins whichever Node ran it; below this floor the pinned
+ * command would fail at the agent's first start, so it warns instead.
+ */
+export function nodeFloor(): string {
+  return pkg.engines.node.replace(/^[^\d]*/, '')
+}
