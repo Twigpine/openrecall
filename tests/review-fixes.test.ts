@@ -83,8 +83,26 @@ describe('key names that exist on Object.prototype', () => {
     await c.push(ns, { 'a.md': 'x' })
     await c.hashes(ns)
     // Resolving at all is the assertion: a prototype hit would send a bogus base
-    // and the server would refuse the delete as stale.
-    await c.delete(ns, 'constructor')
+    // and the server would refuse the delete as stale. The key was never stored,
+    // so this is a no-op and must not move the namespace version either.
+    const r = await c.delete(ns, 'constructor')
+    expect(r.deleted).toBe(false)
+    expect(r.version).toBe(1)
+  })
+
+  test('a real entry named constructor can be stored and deleted', async () => {
+    // The mirror image of the test above: Object.prototype lookup must not hide
+    // an own entry either. Both the deletion loop and the response filter have
+    // to use Object.hasOwn, or a legitimate key named `constructor` is either
+    // not deleted or deleted but reported as a no-op.
+    const ns = 'user:rf-proto-own'
+    const c = client()
+    await c.push(ns, { constructor: 'owned' })
+    await c.hashes(ns)
+
+    const r = await c.delete(ns, 'constructor')
+    expect(r.deleted).toBe(true)
+    expect((await c.pull(ns)).entries).toEqual({})
   })
 })
 

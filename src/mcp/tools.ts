@@ -284,7 +284,7 @@ function skippedText(key: string, namespace: string, reason: string): string {
     return `${head} Save less content under this key, or split it across several smaller entries and save those.`
   }
   if (reason === 'invalid_key') {
-    return `${head} Save it under a different entry key: a plain relative path such as notes/topic.md, with no "..", no leading or trailing "/", and no backslash.`
+    return `${head} Save it under a different entry key: a plain relative path such as notes/topic.md that starts with a letter or digit and uses only letters, digits, ".", "_", "/", and "-", with no "..", no "//", no leading or trailing "/", and no backslash.`
   }
   // invalid_base64 means this client sent something the server could not read,
   // which no choice of key or content on the model's side fixes.
@@ -896,9 +896,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
     delete: timed(async (timer, key: string, namespace?: string) => {
       const ns = nsOf(namespace)
       try {
-        await timer.time('fetch', () => client.delete(ns, key))
-        timer.entries = 1
-        return ok(`deleted "${key}" from ${ns}`)
+        const r = await timer.time('fetch', () => client.delete(ns, key))
+        timer.entries = r.deleted ? 1 : 0
+        return r.deleted
+          ? ok(`deleted "${key}" from ${ns} (v${r.version})`)
+          : ok(`nothing to delete — "${key}" is not in ${ns}`)
       } catch (e) {
         const d = denial(`Deleting "${key}"`, ns, defaultNamespace, `"${key}" is still stored.`, e)
         return fail(d ?? `delete failed: ${bounded((e as Error).message)}`)

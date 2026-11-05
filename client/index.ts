@@ -105,6 +105,13 @@ export type PushResult = {
   skipped?: { key: string; reason: string }[]
 }
 
+export type DeleteResult = {
+  namespace: string
+  version: number
+  /** False when the namespace had no such entry (the delete was a no-op). */
+  deleted: boolean
+}
+
 /**
  * A body that would not decrypt with this client's key.
  *
@@ -609,7 +616,12 @@ export class OpenRecallClient {
     const view = await this.hashesView(namespace)
     const serverHashes = view.entryChecksums
 
-    const toUpload: Record<string, string> = {}
+    // Prototype-less on purpose: a plain `{}` routes an entry key of
+    // `__proto__` through the prototype setter, which stores nothing. The key
+    // would then be missing from the PUT body while still appearing in
+    // `uploaded`, so the store could never reject it. With a null prototype it
+    // reaches the server like any other key and is reported in `skipped`.
+    const toUpload = Object.create(null) as Record<string, string>
     const uploaded: string[] = []
     const unchanged: string[] = []
     for (const [entryKey, plaintext] of Object.entries(entries)) {
@@ -666,8 +678,8 @@ export class OpenRecallClient {
     }
   }
 
-  /** Delete one entry. */
-  async delete(namespace: string, entryKey: string): Promise<void> {
+  /** Delete one entry. Reports whether the store actually removed anything. */
+  async delete(namespace: string, entryKey: string): Promise<DeleteResult> {
     const observed = this.observed.get(namespace)
     const seen =
       observed && Object.hasOwn(observed.hashes, entryKey) ? observed.hashes[entryKey] : undefined
@@ -685,11 +697,14 @@ export class OpenRecallClient {
         body: JSON.stringify({ entries: {}, deletions: [entryKey], base: sent }),
       })
       if (!res.ok) throw httpError(res, sent)
+      const result = JSON.parse(res.raw) as {
+        version: number
+        deleted?: string[]
+        skipped?: { key: string; reason: string }[]
+      }
       // The PUT route answers 200 and lists a key it refused in `skipped`, where
       // the DELETE route answers with an error. Report it the same way.
-      const refused = (
-        JSON.parse(res.raw) as { skipped?: { key: string; reason: string }[] }
-      ).skipped?.find(s => s.key === entryKey)
+      const refused = result.skipped?.find(s => s.key === entryKey)
       if (refused) {
         throw new OpenRecallHttpError(
           `openrecall 400: ${flattenServerText(refused.reason, 80)}`,
@@ -699,7 +714,11 @@ export class OpenRecallClient {
         )
       }
       this.record(namespace, {}, [entryKey])
-      return
+      return {
+        namespace,
+        version: result.version,
+        deleted: (result.deleted ?? []).includes(entryKey),
+      }
     }
     const q = seen ? `&base=${encodeURIComponent(seen)}` : ''
     const res = await this.request(
@@ -709,7 +728,13 @@ export class OpenRecallClient {
       { method: 'DELETE', headers: this.headers() },
     )
     if (!res.ok) throw httpError(res, seen ? { [entryKey]: seen } : undefined)
+    const result = JSON.parse(res.raw) as { version: number; deleted?: string[] }
     this.record(namespace, {}, [entryKey])
+    return {
+      namespace,
+      version: result.version,
+      deleted: (result.deleted ?? []).includes(entryKey),
+    }
   }
 
   /**
