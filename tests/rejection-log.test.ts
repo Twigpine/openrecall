@@ -96,18 +96,33 @@ describe('rejection log', () => {
     expect(JSON.stringify([{ ...lines[0], planted: sentinel }])).toContain(sentinel)
   })
 
-  test('a throw from path parsing still returns an envelope and logs one line', async () => {
-    // A malformed percent escape throws in decodeURIComponent, which happens
-    // before respond()'s own try block. Without a guard in handleRequest that
-    // reaches the runtime unhandled: no envelope, no security headers, no line.
+  test('a malformed path is a 400 envelope with one log line', async () => {
+    // A malformed percent escape used to throw in decodeURIComponent, before
+    // respond()'s own try block. parseMemoryPath now maps it to invalid_path,
+    // so it must not reach the last-resort 500 guard. That guard still covers
+    // unexpected throws, but client input no longer exercises it.
     capture()
     const res = await handleRequest(new Request('http://x/api/memory/%'))
-    expect(res.status).toBe(500)
+    expect(res.status).toBe(400)
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
-    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('internal')
+    expect(((await res.json()) as { error: { code: string } }).error.code).toBe('invalid_path')
     expect(lines.length).toBe(1)
     expect(Object.keys(lines[0] as object).sort()).toEqual([...ALLOWED_FIELDS].sort())
-    expect(lines[0]?.code).toBe('internal')
+    expect(lines[0]?.code).toBe('invalid_path')
+    expect(lines[0]?.route).toBe('memory')
+  })
+
+  test('a HEAD refusal is logged with its code before the body is stripped', async () => {
+    // HEAD strips the body at the top of handleRequest, after the log line is
+    // built. Stripping it inside respond() would leave every HEAD refusal
+    // logged as "unknown" even though its status and Allow/code were known.
+    capture()
+    const res = await handleRequest(new Request('http://x/api/memory/%', { method: 'HEAD' }))
+    expect(res.status).toBe(400)
+    expect(await res.text()).toBe('')
+    expect(lines.length).toBe(1)
+    expect(lines[0]?.code).toBe('invalid_path')
+    expect(lines[0]?.route).toBe('memory')
   })
 
   test('an unknown route is logged on the other route class', async () => {
