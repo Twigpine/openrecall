@@ -13,6 +13,7 @@ import {
   flattenServerText,
   type OpenRecallClient,
   OpenRecallHttpError,
+  OpenRecallProtocolError,
   OpenRecallTimeoutError,
 } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
@@ -23,13 +24,13 @@ export type ToolResult = { text: string; isError?: boolean }
 
 /**
  * The client surface these tools actually use. Declared structurally, and
- * narrowed to the four methods, so a test double is checked against the real
+ * narrowed to the five methods, so a test double is checked against the real
  * client's signatures by the compiler instead of being waved through with an
  * `as unknown as OpenRecallClient` cast. Two stubs had already drifted under those
  * casts (one returning `skipped` where `PushResult` says `unchanged`, and
  * omitting `namespace`), which is exactly the drift a cast hides.
  */
-export type MemoryClient = Pick<OpenRecallClient, 'pull' | 'push' | 'hashes' | 'delete'>
+export type MemoryClient = Pick<OpenRecallClient, 'pull' | 'push' | 'hashes' | 'delete' | 'entry'>
 
 /** Entry order by key. Not the default sort, which compares "key,value" pairs. */
 const byKey = ([a]: [string, unknown], [b]: [string, unknown]) => (a < b ? -1 : 1)
@@ -238,6 +239,20 @@ async function lostEntries(
   if (version === 0) return null
   const named = Object.keys(await client.hashes(ns, { observe: false }))
   return named.length > 0 ? unservable(ns, version) : null
+}
+
+/**
+ * The single-entry counterpart of `unservable`: the manifest names this key
+ * and the store cannot produce its body. The old pull-based read could not say
+ * this; it rendered the key as missing whenever any other blob was readable,
+ * which is the one answer that invites a model to save over lost data.
+ */
+function unreadableEntry(key: string, ns: string): string {
+  return (
+    `"${key}" in ${ns} is named by the namespace index, but the server could not serve its body. ` +
+    'This is server-side data loss, not a missing entry, so do not save over it. ' +
+    'Tell the user this entry is unreadable and needs restoring.'
+  )
 }
 
 /** A refusal already rendered for the model, carried through a nested catch. */
@@ -467,6 +482,25 @@ export type MemoryTools = ReturnType<typeof makeTools>
 export function makeTools(client: MemoryClient, defaultNamespace: string) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
 
+  /**
+   * The read `get` used before the single-entry view existed, kept for a
+   * server that answers the full namespace to `?view=entry`: everything is
+   * decrypted and one key picked out of it.
+   */
+  async function getViaPull(key: string, ns: string): Promise<ToolResult> {
+    const { entries, version } = await client.pull(ns)
+    if (Object.keys(entries).length === 0) {
+      const lost = await lostEntries(client, ns, version)
+      if (lost) return fail(lost)
+      return ok(`(no memory stored in ${ns} yet)`)
+    }
+    // Own-property check, not `entries[key]`: a key like "__proto__" or
+    // "toString" must miss, never resolve to something off the prototype.
+    if (!Object.hasOwn(entries, key))
+      return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
+    return ok(`### ${key} (${ns})\n${entries[key]}`)
+  }
+
   return {
     /** Persist one durable memory entry (encrypted before upload). */
     async save(key: string, content: string, namespace?: string): Promise<ToolResult> {
@@ -669,25 +703,40 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
      * content is ever used to choose a key, namespace, or path: the key and
      * namespace echoed back are the caller's arguments and nothing else.
      *
-     * Cost. This reuses `client.pull(ns)`, so it pays a whole-namespace
-     * download and decrypt per single-entry read. Accepted for phase 1: no
-     * client-side single-entry fetch exists and client/index.ts is out of
-     * scope here. A list-then-get loop multiplies that cost linearly.
+     * Cost. One manifest read plus one blob, through `client.entry()` and the
+     * server's `?view=entry`, so the size of the namespace does not enter into
+     * a single-entry read. (It used to reuse `client.pull`, which paid a
+     * whole-namespace download and decrypt per read: 250 ms at 5,000 entries.)
+     * A server that predates the entry view answers the full namespace to it;
+     * the client reports that as a protocol error and this falls back to the
+     * pull it still understands.
+     *
+     * What the single-entry read records for the write precondition is exactly
+     * that key's ciphertext hash and nothing about any other key; recall still
+     * observes everything it decrypts. A save of some other key after only a
+     * `get` therefore carries no base for it, as a first write never did.
      */
     async get(key: string, namespace?: string): Promise<ToolResult> {
       const ns = nsOf(namespace)
       try {
-        const { entries, version } = await client.pull(ns)
-        if (Object.keys(entries).length === 0) {
-          const lost = await lostEntries(client, ns, version)
-          if (lost) return fail(lost)
-          return ok(`(no memory stored in ${ns} yet)`)
+        let body: string
+        try {
+          body = await client.entry(ns, key)
+        } catch (e) {
+          if (e instanceof OpenRecallHttpError) {
+            // The server's own `empty`: no manifest, nothing written yet.
+            if (e.status === 404 && e.code === 'empty') return ok(`(no memory stored in ${ns} yet)`)
+            // `entry_not_found`, or a key the server will not even look up
+            // (`invalid_key`): either way there is no such entry to return.
+            if (e.status === 404 || e.status === 400)
+              return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
+            if (e.status === 503 && e.code === 'entry_unreadable')
+              return fail(unreadableEntry(key, ns))
+          }
+          if (e instanceof OpenRecallProtocolError) return getViaPull(key, ns)
+          throw e
         }
-        // Own-property check, not `entries[key]`: a key like "__proto__" or
-        // "toString" must miss, never resolve to something off the prototype.
-        if (!Object.hasOwn(entries, key))
-          return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
-        return ok(`### ${key} (${ns})\n${entries[key]}`)
+        return ok(`### ${key} (${ns})\n${body}`)
       } catch (e) {
         const d = denial(`Reading "${key}"`, ns, defaultNamespace, 'Nothing was read.', e)
         return fail(d ?? `get failed: ${bounded((e as Error).message)}`)

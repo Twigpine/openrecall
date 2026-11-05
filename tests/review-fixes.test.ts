@@ -126,6 +126,9 @@ describe('tool text for server-chosen strings and timeouts', () => {
           pull: async () => {
             throw new OpenRecallTimeoutError('pull', 'user:me', 1000)
           },
+          entry: async () => {
+            throw new OpenRecallTimeoutError('entry', 'user:me', 1000)
+          },
         },
         'user:me',
       )

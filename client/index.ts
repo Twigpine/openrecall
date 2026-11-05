@@ -166,6 +166,26 @@ export class OpenRecallTimeoutError extends Error {
 }
 
 /**
+ * The server answered 2xx with a body that is not the view that was asked for.
+ *
+ * A broken or misrouted server, or an older one that ignores a `view` it does
+ * not know and answers with the full namespace instead. Its own class so a
+ * caller can fall back to the older read it does understand, and so it is never
+ * confused with a decryption failure, which is the one error a caller is
+ * entitled to blame on the passphrase.
+ */
+export class OpenRecallProtocolError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly namespace: string,
+    detail: string,
+  ) {
+    super(`openrecall: ${operation} for ${namespace}: ${detail}`)
+    this.name = 'OpenRecallProtocolError'
+  }
+}
+
+/**
  * Default per-request budget, in milliseconds.
  *
  * Sized off the largest legitimate transfer rather than off a typical one: a
@@ -455,8 +475,10 @@ export class OpenRecallClient {
     // either way, but a protocol error names what went wrong.
     const entriesRaw = data.content?.entries
     if (!entriesRaw || typeof entriesRaw !== 'object') {
-      throw new Error(
-        `openrecall ${res.status} ${res.statusText}: malformed body (no content.entries)`,
+      throw new OpenRecallProtocolError(
+        'pull',
+        namespace,
+        `${res.status} ${res.statusText}: malformed body (no content.entries)`,
       )
     }
     const key = this.key(namespace)
@@ -524,7 +546,11 @@ export class OpenRecallClient {
     // OpenRecallDecryptError, which is the one failure a caller is entitled to
     // blame on the passphrase.
     if (typeof data.entry !== 'string')
-      throw new Error(`openrecall: no entry in the response for "${entryKey}" in ${namespace}`)
+      throw new OpenRecallProtocolError(
+        'entry',
+        namespace,
+        `no entry in the response for "${entryKey}"`,
+      )
     let plaintext: string
     try {
       plaintext = decryptEntry(this.key(namespace), entryKey, data.entry)
