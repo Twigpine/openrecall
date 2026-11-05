@@ -137,6 +137,7 @@ MCP server and the memory skill:
 | `memory_delete(key, hard?, force?)` | move an entry to `sys.openrecall/trash/` (`hard` erases it; `force` for one marked `locked: true`) |
 | `memory_project(project)` | register or reopen a stable project memory scope |
 | `memory_projects(limit?, offset?)` | discover projects in the encrypted directory |
+| `memory_doctor(namespace?, namespaces?)` | audit a namespace: duplicates, expired and stale notes, index drift, dangling links and size against the caps, as proposed operations; changes nothing (`openrecall doctor` prints the same report) |
 
 ### Memory across projects
 

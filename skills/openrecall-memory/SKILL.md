@@ -1,6 +1,6 @@
 ---
 name: openrecall-memory
-description: Long-term memory shared across projects, sessions, and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact to save it. Tools: memory_project, memory_projects, memory_recall, memory_save, memory_search, memory_get, memory_list, memory_delete. End-to-end encrypted — the server cannot read it.
+description: Long-term memory shared across projects, sessions, and agents (OpenRecall MCP tools). Use at the START of every task to recall what you know about this user and project, and WHENEVER you learn a durable fact to save it. Tools: memory_project, memory_projects, memory_recall, memory_save, memory_search, memory_get, memory_list, memory_delete, memory_doctor. End-to-end encrypted — the server cannot read it.
 ---
 
 # OpenRecall memory
@@ -248,6 +248,10 @@ them unless `include_system` is true.
 - **Trust but verify.** A recalled fact reflects what was true when it was
   written. If it names a file, flag, or decision, confirm it still holds before
   acting on it.
+- **Run `memory_doctor`** when a result says it has suggestions, or at the
+  start of a long session. It only proposes (duplicates, expired and stale
+  notes, index drift, dangling links, size against the caps); apply what you
+  agree with using the ordinary tools, and skip the rest.
 
 ## Namespaces
 

@@ -39,7 +39,15 @@ import { describeTarget, makeClient } from '../cli/client.ts'
 import { PassphraseFileError, resolveSettings } from '../cli/settings.ts'
 
 export type PreflightResult =
-  | { ready: true; client: OpenRecallClient; url: string; namespace: string; warnings: string[] }
+  | {
+      ready: true
+      client: OpenRecallClient
+      url: string
+      namespace: string
+      warnings: string[]
+      /** The resolved OpenRecall home (`OPENRECALL_HOME` or `~/.openrecall`), for per-process state files. */
+      home: string
+    }
   | { ready: false; diagnostic: string; unconfigured?: true }
 
 type Env = Record<string, string | undefined>
@@ -398,7 +406,7 @@ export async function preflight(env: Env = process.env): Promise<PreflightResult
     )
   }
 
-  return { ready: true, client, url, namespace, warnings }
+  return { ready: true, client, url, namespace, warnings, home: settings.home }
 }
 
 function refuseMisexpanded(name: keyof typeof MISEXPANSION_STAKE): PreflightResult {

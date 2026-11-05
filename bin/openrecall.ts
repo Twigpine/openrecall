@@ -6,6 +6,7 @@
  *   openrecall init [--url <local|https://…>] [--namespace <ns>] [--api-key <key>]
  *   openrecall setup [agent…|all] [--write] [--npx]
  *   openrecall status [--timings]       show config, check the store, measure recall per stage
+ *   openrecall doctor [namespace]       audit memory organization; proposes fixes, changes nothing
  *   openrecall card <owner> [url]         print the service paste-in card + a new passphrase
  *   openrecall push <dir> [namespace]   encrypt + upload changed .md entries
  *   openrecall pull <dir> [namespace]   download + decrypt into <dir>
@@ -188,7 +189,10 @@ async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: 
   // With eleven samples the 95th percentile is the second largest.
   const p95 = (xs: number[]) => xs[Math.floor(0.95 * (xs.length - 1))] as number
   const fmt = (ms: number) => `${ms.toFixed(1).padStart(8)} ms`
-  console.log(`\nrecall timings over ${cold.entries} entries, ${cold.bytes} bytes fetched per call`)
+  // The bytes are the cold call's: warm calls fetch only what changed.
+  console.log(
+    `\nrecall timings over ${cold.entries} entries, ${cold.bytes} bytes fetched by the cold call`,
+  )
   console.log(
     `${'stage'.padEnd(8)}${'cold'.padStart(11)}${'warm p50'.padStart(11)}${'warm p95'.padStart(11)}`,
   )
@@ -345,6 +349,11 @@ try {
     case 'status':
       await cmdStatus(args.flags.timings === true)
       break
+    case 'doctor': {
+      const { cmdDoctor } = await import('../src/cli/doctor.ts')
+      if ((await cmdDoctor(a)) !== 0) process.exit(1)
+      break
+    }
     case 'push':
       if (!a) usage()
       await cmdPush(a, b)
@@ -392,6 +401,7 @@ function usage(code = 1): never {
       '  openrecall setup [agent…|all] [--write] [--npx]\n' +
       '                                       connect Claude Code, Zero, OpenClaude, Codex, Cursor, …\n' +
       '  openrecall status [--timings]        show config and check the store; --timings measures recall per stage\n' +
+      '  openrecall doctor [namespace]        audit memory organization and print proposed fixes (changes nothing)\n' +
       '  openrecall card <owner> [url]        print the service paste-in card + a new passphrase\n' +
       '  openrecall push <dir> [namespace]    encrypt + upload changed .md entries\n' +
       '  openrecall pull <dir> [namespace]    download + decrypt into <dir>\n' +

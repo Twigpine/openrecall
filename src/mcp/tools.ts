@@ -32,6 +32,20 @@ import {
   today,
 } from './accessed.ts'
 import {
+  DEFAULT_CAPS,
+  DEFAULT_MAX_CHARS,
+  type DoctorInput,
+  type DoctorMarker,
+  type DoctorMarkers,
+  type DoctorReport,
+  isDue,
+  markerKey,
+  readMarker,
+  renderReport,
+  runDoctorAll,
+  writeMarker,
+} from './doctor.ts'
+import {
   type FmValue,
   FrontmatterError,
   inferType,
@@ -876,10 +890,31 @@ function noopText(key: string, ns: string, best: Candidate | undefined): string 
   )
 }
 
+export type ToolsOptions = {
+  /**
+   * Where the doctor's run markers live (`<home>/state/doctor.json`, written
+   * 0600 under a 0700 directory; it holds no memory content). Left out, the
+   * markers are kept in memory only, so every process starts with a run due.
+   */
+  doctorMarkerPath?: string
+  /**
+   * Where a one-line warning goes (today: the marker file could not be
+   * written). The MCP server sends it to stderr, the CLI to its own; a caller
+   * that gives none hears nothing. Never the protocol channel.
+   */
+  warn?: (line: string) => void
+}
+
+/** What the scheduled doctor run (`doctorIfDue`) reports back. */
+export type DoctorDue =
+  | { ran: false; reason: 'not-due' | 'failed'; error?: string }
+  | { ran: true; findings: number; kinds: string[] }
+
 export function makeTools(
   client: MemoryClient,
   defaultNamespace: string,
   session: Session = makeSession(),
+  options: ToolsOptions = {},
 ) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
 
@@ -1396,7 +1431,7 @@ export function makeTools(
 
   const GATE_SKIPPED = '(duplicate check skipped: the namespace could not be read whole)'
 
-  return {
+  const tools = {
     /**
      * Persist one durable memory entry (encrypted before upload).
      *
@@ -2011,5 +2046,244 @@ export function makeTools(
         return fail(d ?? `delete failed: ${bounded((e as Error).message)}`)
       }
     }),
+  }
+
+  // -------------------------------------------------------------------------
+  // The doctor: an audit that proposes and writes nothing (`./doctor.ts`)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Run markers kept in memory: what this process recorded, and the whole
+   * store when no marker path was given or the file cannot be written. The
+   * file wins on a read, so a marker another process wrote is honoured.
+   */
+  const memoryMarkers: DoctorMarkers = {}
+  let markerWarned = false
+  const warn = options.warn ?? (() => {})
+
+  async function markerFor(ns: string): Promise<DoctorMarker | undefined> {
+    const key = markerKey(ns)
+    const path = options.doctorMarkerPath
+    const stored = path ? (await readMarker(path))[key] : undefined
+    return stored ?? memoryMarkers[key]
+  }
+
+  /** Finding kinds by count, most frequent first; ties keep report order. */
+  function kindsByCount(report: DoctorReport): string[] {
+    const counts = new Map<string, number>()
+    for (const f of report.findings) counts.set(f.kind, (counts.get(f.kind) ?? 0) + 1)
+    return [...counts.entries()].sort((a, b) => b[1] - a[1]).map(([kind]) => kind)
+  }
+
+  /**
+   * What a run leaves behind, per namespace: the session's record (the banner
+   * reads it), the in-memory markers, and the marker file when there is one.
+   * An unwritable file is said once and never stops a run.
+   */
+  async function recordRuns(
+    runs: { ns: string; version: number; report: DoctorReport }[],
+    now: string,
+    announced: boolean,
+  ): Promise<void> {
+    const update: DoctorMarkers = {}
+    for (const { ns, version, report } of runs) {
+      const findings = report.findings.length
+      session.doctor.set(ns, {
+        ranAt: now,
+        version,
+        findings,
+        kinds: kindsByCount(report),
+        announced,
+      })
+      update[markerKey(ns)] = { ranAt: now, version, findings }
+    }
+    Object.assign(memoryMarkers, update)
+    const path = options.doctorMarkerPath
+    if (!path) return
+    const merged = { ...(await readMarker(path)), ...update }
+    if (!(await writeMarker(path, merged)) && !markerWarned) {
+      markerWarned = true
+      warn(`doctor: could not write ${path}; run markers are kept in memory for this process only`)
+    }
+  }
+
+  /** The doctor's view of one pulled namespace, with the sidecar's access dates parsed out. */
+  function doctorInput(ns: string, view: PullResult, now: string): DoctorInput {
+    const sidecar = Object.hasOwn(view.entries, ACCESSED_KEY)
+      ? view.entries[ACCESSED_KEY]
+      : undefined
+    return {
+      namespace: ns,
+      entries: view.entries,
+      updatedAt: view.updatedAt,
+      accessed: parseAccessed(sidecar).keys,
+      now,
+      // The server's defaults, not `src/config.ts`: that module freezes the
+      // caps the test server runs under, and the meters are about production.
+      caps: DEFAULT_CAPS,
+    }
+  }
+
+  /**
+   * The one write the doctor may trigger: the pending access stamps for `ns`,
+   * flushed through the sidecar's own path, so the stale-by-access horizons
+   * are judged on what this session has read.
+   */
+  async function flushPending(timer: Timer, ns: string): Promise<void> {
+    const pending = session.pendingAccess.get(ns)
+    if (!pending?.size) return
+    await timer.time('fetch', () => flushAccessed(client, ns, pending))
+  }
+
+  /**
+   * Audit one or several namespaces and render the report, at most
+   * `DEFAULT_MAX_CHARS` characters including the lead line. Read-only: each
+   * namespace is pulled with `observe: false`, so the audit never becomes the
+   * base of a later write, and nothing is pushed but the access flush above.
+   * The run is recorded as announced, since the caller is reading the report.
+   */
+  const doctor = timed(async (timer, namespace?: string, namespaces?: string[]) => {
+    try {
+      if (namespaces && namespace !== undefined)
+        throw new Error('use either namespace or namespaces, not both')
+      if (namespaces && (namespaces.length === 0 || namespaces.length > 8))
+        throw new Error('namespaces must contain between 1 and 8 namespaces')
+      const sources = namespaces
+        ? [...new Set(namespaces.map(ns => validateNamespace(ns.trim())))]
+        : [nsOf(namespace)]
+      const ns = sources.join(', ')
+      const now = new Date().toISOString()
+      for (const source of sources) await flushPending(timer, source)
+      const views = await Promise.all(
+        sources.map(async source => {
+          try {
+            const r = await pullTimed(timer, source, { observe: false })
+            if (Object.keys(r.entries).length === 0) {
+              const lost = await lostEntries(client, source, r.version)
+              if (lost) throw new Rendered(lost)
+            }
+            return r
+          } catch (err) {
+            if (err instanceof Rendered) throw err
+            const d = denial(
+              'Auditing memory',
+              source,
+              defaultNamespace,
+              'Nothing was audited.',
+              err,
+            )
+            if (d) throw new Rendered(d)
+            if (!namespaces) throw err
+            throw new Error(`could not read ${source}: ${bounded((err as Error).message)}`)
+          }
+        }),
+      )
+      const inputs = views.map((view, i) => doctorInput(sources[i] as string, view, now))
+      const { each, across } = await timer.time('rank', () => runDoctorAll(inputs))
+      await recordRuns(
+        sources.map((source, i) => ({
+          ns: source,
+          version: (views[i] as PullResult).version,
+          report: each[i] as DoctorReport,
+        })),
+        now,
+        true,
+      )
+      const lead = `doctor report for ${ns}:\n`
+      const text = await timer.time(
+        'format',
+        () => lead + renderReport(across, { maxChars: DEFAULT_MAX_CHARS - lead.length }),
+      )
+      return ok(text)
+    } catch (e) {
+      if (e instanceof Rendered) return fail(e.message)
+      return fail(`doctor failed: ${bounded((e as Error).message)}`)
+    }
+  })
+
+  /**
+   * The scheduled run: the doctor over `ns` when one is due by its marker
+   * (`isDue`: none, more than a day old, or ten or more writes behind the
+   * manifest), recorded as not yet announced so the next recall or save on
+   * the namespace appends the banner. The manifest version comes from the
+   * pull the audit needs anyway, which also warms the client's cache for the
+   * first recall. Never throws: a namespace that cannot be read right now is
+   * not audited, and the caller hears why.
+   */
+  async function doctorIfDue(ns: string, opts: { now?: string } = {}): Promise<DoctorDue> {
+    const now = opts.now ?? new Date().toISOString()
+    const timer = new Timer()
+    try {
+      const marker = await markerFor(ns)
+      await flushPending(timer, ns)
+      const view = await pullTimed(timer, ns, { observe: false })
+      if (!isDue(marker, now, view.version)) return { ran: false, reason: 'not-due' }
+      const report = runDoctorAll([doctorInput(ns, view, now)]).across
+      await recordRuns([{ ns, version: view.version, report }], now, false)
+      return {
+        ran: true,
+        findings: report.findings.length,
+        kinds: session.doctor.get(ns)?.kinds ?? [],
+      }
+    } catch (e) {
+      return { ran: false, reason: 'failed', error: bounded((e as Error).message) }
+    }
+  }
+
+  /**
+   * The one banner line a scheduled run earns, for the namespaces a recall
+   * or save touched: findings and the two most frequent kinds per namespace,
+   * then cleared, so it is shown once. Nothing for a run with no findings or
+   * one already shown, which keeps every pinned output string intact.
+   */
+  function bannerFor(sources: string[]): string | null {
+    const parts: string[] = []
+    for (const ns of sources) {
+      const run = session.doctor.get(ns)
+      if (!run || run.announced || run.findings === 0) continue
+      run.announced = true
+      parts.push(
+        `${run.findings} ${plural(run.findings, 'suggestion')} for ${ns} (${run.kinds.slice(0, 2).join(', ')})`,
+      )
+    }
+    if (parts.length === 0) return null
+    return `(memory_doctor: ${parts.join(' and ')}; call memory_doctor to see them)`
+  }
+
+  /**
+   * `fn` with the banner appended as a final line when one is pending for the
+   * namespaces `sourcesOf` names. A failed call is left alone, and so is one
+   * whose arguments `sourcesOf` cannot read (the call has already said why).
+   * The banner is outside the tool's own size budget, like the timings
+   * trailer: one short line, at most once per scheduled run.
+   */
+  function withBanner<A extends unknown[]>(
+    fn: (...args: A) => Promise<ToolResult>,
+    // The whole argument tuple, under `NoInfer`: the tool's own signature
+    // decides `A`, optional parameters included, and the reader picks from it.
+    sourcesOf: (args: NoInfer<A>) => string[],
+  ): (...args: A) => Promise<ToolResult> {
+    return async (...args: A) => {
+      const r = await fn(...args)
+      if (r.isError) return r
+      let sources: string[]
+      try {
+        sources = sourcesOf(args)
+      } catch {
+        return r
+      }
+      const banner = bannerFor(sources)
+      return banner ? { ...r, text: `${r.text}\n${banner}` } : r
+    }
+  }
+
+  return {
+    ...tools,
+    recall: withBanner(tools.recall, ([, namespace, , namespaces]) =>
+      namespaces ? namespaces.map(ns => validateNamespace(ns.trim())) : [nsOf(namespace)],
+    ),
+    save: withBanner(tools.save, ([, , namespace]) => [nsOf(namespace)]),
+    doctor,
+    doctorIfDue,
   }
 }
