@@ -37,6 +37,9 @@ For a project task, establish its scope before recalling:
    scopes together within one result limit and size cap. Each hit names its
    namespace; include that namespace in follow-up `memory_get` calls. Other
    projects are searched only when you explicitly include their namespaces.
+   Each hit ends with a provenance trailer `[type · agent · updated date]`;
+   superseded and deleted entries are hidden unless you pass
+   `include_inactive`.
 
 Opening a project **does not change tool defaults**. Pass the namespace
 explicitly when saving, listing, searching, reading, or deleting. Store project

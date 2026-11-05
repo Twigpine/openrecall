@@ -31,7 +31,13 @@ import {
   settleAccess,
   today,
 } from './accessed.ts'
-import { FrontmatterError, type NoteType, parseFrontmatter, stampForSave } from './frontmatter.ts'
+import {
+  FrontmatterError,
+  inferType,
+  type NoteType,
+  parseFrontmatter,
+  stampForSave,
+} from './frontmatter.ts'
 import {
   ACCESSED_KEY,
   INDEX_KEY,
@@ -52,6 +58,8 @@ import {
 } from './memindex.ts'
 import {
   type IndexDoc,
+  isInactive,
+  type NoteMeta,
   RecallIndex,
   stripFrontmatterText,
   tokenize,
@@ -595,6 +603,45 @@ function regionFor(
   return { text: out, partial: out !== content.trim() }
 }
 
+/**
+ * Longest provenance trailer a hit carries. Every part of it is frontmatter
+ * an author wrote, so like the region it is bounded rather than trusted.
+ */
+const MAX_TRAILER_CHARS = 160
+
+/** `updated` as the calendar day it names, or undefined when it names none. */
+function dayOf(updated: string): string | undefined {
+  const t = Date.parse(updated)
+  if (!Number.isNaN(t)) return new Date(t).toISOString().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}/.test(updated) ? updated.slice(0, 10) : undefined
+}
+
+/** Why an inactive note is in the output at all, for the trailer of a hit shown on request. */
+function whyInactive(meta: NoteMeta): string {
+  if (meta.supersededBy) return `superseded by ${meta.supersededBy}`
+  if (meta.status === 'superseded' || meta.status === 'deleted') return meta.status
+  return `expired ${meta.expires}`
+}
+
+/**
+ * The last line of every hit: `[type · agent · updated YYYY-MM-DD]`, each part
+ * left out when the note does not say, and nothing at all when none of it is
+ * known, so a bare legacy note renders exactly as before. A note without a
+ * `type:` stamp shows the type its key implies, which is what the next save
+ * would stamp. When the caller asked for inactive notes, a hit that is one
+ * says why it is inactive, so a replaced fact is never read as current.
+ */
+function trailerFor(key: string, meta: NoteMeta | undefined, inactive: boolean): string {
+  const parts: string[] = []
+  const type = meta?.type ?? inferType(key)
+  if (type) parts.push(type)
+  if (meta?.agent) parts.push(meta.agent)
+  const day = meta?.updated === undefined ? undefined : dayOf(meta.updated)
+  if (day) parts.push(`updated ${day}`)
+  if (inactive && meta) parts.push(whyInactive(meta))
+  return parts.length ? `\n[${clip(parts.join(' · '), MAX_TRAILER_CHARS)}]` : ''
+}
+
 export type MemoryTools = ReturnType<typeof makeTools>
 
 /**
@@ -633,6 +680,10 @@ export type DeleteOptions = {
 export type ListOptions = {
   /** Also list the bookkeeping entries under `sys.openrecall/`. */
   includeSystem?: boolean
+}
+export type RecallOptions = {
+  /** Also rank superseded, deleted and expired notes, which are hidden by default. */
+  includeInactive?: boolean
 }
 
 /** A namespace of the shape `memory_project` creates: `<shared>/projects/<sha256 hex>`. */
@@ -1244,7 +1295,9 @@ export function makeTools(
         namespace?: string,
         limit: number = 5,
         namespaces?: string[],
+        opts: RecallOptions = {},
       ) => {
+        const includeInactive = opts.includeInactive === true
         try {
           if (namespaces && namespace !== undefined)
             throw new Error('use either namespace or namespaces, not both')
@@ -1297,9 +1350,11 @@ export function makeTools(
             const entries = fresh.get(source)
             return entries && Object.hasOwn(entries, key) ? entries[key] : undefined
           }
+          const day = today()
           const {
             results: ranked,
             searched,
+            inactive,
             belowFloor,
             trimmedByLimit,
             reason,
@@ -1312,14 +1367,30 @@ export function makeTools(
               }),
               query,
               limit,
+              { includeInactive, today: day },
             ),
           )
+          // A superseded, deleted or expired note is not searched unless asked
+          // for, and a miss has to say so: "12 entries searched" with the
+          // thirteenth silently skipped is how an agent concludes a fact it
+          // replaced last week was never recorded at all.
+          const hiddenNote = inactive
+            ? ` (${inactive} superseded, deleted or expired entr${inactive === 1 ? 'y' : 'ies'} ` +
+              'not searched; pass include_inactive to include them)'
+            : ''
           if (ranked.length === 0 && searched === 0) {
-            // Entries exist but none of them is a ranking candidate, which today
-            // means the namespace holds nothing but its MEMORY.md index. "0
-            // entries searched" reads as an empty namespace and is how an agent
-            // concludes there is nothing here, when in fact the one thing here is
-            // the table of contents naming everything that was ever written.
+            // Entries exist but none of them is a ranking candidate: the
+            // namespace holds nothing but its MEMORY.md index, or nothing but
+            // notes that have been replaced. "0 entries searched" reads as an
+            // empty namespace and is how an agent concludes there is nothing
+            // here, when in fact what is here is the table of contents naming
+            // everything that was ever written, or the notes themselves.
+            if (inactive)
+              return ok(
+                `(nothing in ${ns} was searched for "${query}": every note is superseded, ` +
+                  `deleted or expired, which recall does not rank by default${hiddenNote}. ` +
+                  'Call memory_list to see the keys that exist.)',
+              )
             return ok(
               `(nothing in ${ns} was searched for "${query}": the namespace holds only its ` +
                 'MEMORY.md index, which recall does not rank. Call memory_get with key ' +
@@ -1351,7 +1422,7 @@ export function makeTools(
                 `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
                 `${belowFloor} below the relevance floor and withheld. ` +
                 'Call memory_list before concluding the fact is unrecorded; ' +
-                'it may be stored under wording this query did not match.)',
+                `it may be stored under wording this query did not match.)${hiddenNote}`,
             )
           }
           // Regions, not bodies, and the aggregate budget is spent in rank order:
@@ -1389,7 +1460,6 @@ export function makeTools(
               ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: ${why}. Call memory_list, then memory_get by key.)`
               : ''
           const parts: string[] = []
-          const day = today()
           // Reserved at the worst case on BOTH axes, the widest count and the
           // longest reason, because the cap covers the whole returned string and
           // neither value is known until the loop below has finished.
@@ -1404,10 +1474,17 @@ export function makeTools(
               const pointer =
                 `\n(region only; call memory_get with key "${r.key}"` +
                 `${namespaces ? ` and namespace "${r.namespace}"` : ''} for the full entry)`
+              // The trailer is part of the hit, so it is charged to the per-hit
+              // allowance as well as reserved from the aggregate like the pointer.
+              const trailer = trailerFor(
+                r.key,
+                r.meta,
+                includeInactive && isInactive(r.meta ?? {}, day),
+              )
               const joiner = parts.length ? '\n\n'.length : 0
               const allowed = Math.min(
-                PER_HIT_CHARS,
-                budget - joiner - header.length - pointer.length,
+                PER_HIT_CHARS - trailer.length,
+                budget - joiner - header.length - pointer.length - trailer.length,
               )
               if (allowed < MIN_REGION_CHARS) {
                 omitted++
@@ -1415,9 +1492,11 @@ export function makeTools(
               }
               const source = r.namespace ?? sources[0]
               const region = regionFor(contentOf(r.key, source) ?? r.content, query, allowed)
-              // The region is what the model reads, so it is neutralized here;
-              // `memory_get` returns the same entry verbatim, as data.
-              const part = header + neutralize(region.text) + (region.partial ? pointer : '')
+              // The region and the trailer are what the model reads, so they are
+              // neutralized here; `memory_get` returns the same entry verbatim,
+              // as data.
+              const part =
+                header + neutralize(region.text + trailer) + (region.partial ? pointer : '')
               budget -= joiner + part.length
               parts.push(part)
               noteAccess(session.pendingAccess, source, r.key, day)

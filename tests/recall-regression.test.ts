@@ -57,7 +57,14 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { ciphertextHash, OpenRecallClient } from '../client/index.ts'
 import { encodeFrames } from '../src/frames.ts'
-import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
+import {
+  isInactive,
+  noteMeta,
+  rankMemories,
+  rankMemoriesDetailed,
+  stemTerm,
+  utcToday,
+} from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import {
   BASELINE_RANK_MS,
@@ -152,6 +159,22 @@ describe('recall tuning set (current ranker)', () => {
     const p = keyPairFor('what do I need to do before I push my work to the remote')
     expect(rankMemories(p.query, CORPUS)[0]?.key).toBe(p.expect)
   })
+
+  // The two datastore notes are as good a lexical match as each other (0.937
+  // against 0.934), so no ranking change decides this pair: the old note is
+  // stamped `status: superseded` in the corpus and is not a candidate at all.
+  // It is still there for a caller who asks for inactive notes, and the
+  // counts say it was left out rather than pretending it does not exist.
+  test('closed by {PR13}: "are we moving to postgres" ranks the current note, the superseded one only on request', () => {
+    const p = keyPairFor('are we moving to postgres')
+    const d = rankMemoriesDetailed(p.query, CORPUS)
+    expect(d.results[0]?.key).toBe(p.expect)
+    expect(d.results.map(r => r.key)).not.toContain('project/postgres-old.md')
+    expect(d.inactive).toBe(1)
+    const all = rankMemoriesDetailed(p.query, CORPUS, 5, { includeInactive: true })
+    expect(all.results.map(r => r.key)).toContain('project/postgres-old.md')
+    expect(all.inactive).toBe(0)
+  })
 })
 
 /**
@@ -188,6 +211,7 @@ describe('tuning-pair match arity', () => {
     'deployment process': 1,
     'am I allowed to open a pull request': 2,
     'what do I need to do before I push my work to the remote': 3,
+    'are we moving to postgres': 1,
   }
 
   /**
@@ -233,6 +257,11 @@ describe('tuning-pair match arity', () => {
       'push=body',
       'work=body',
     ],
+    // One term, in the key and the body, and the superseded note carries the
+    // same one in the same places: the pair is decided by that note not being
+    // a candidate, which is why `arityOf` leaves inactive notes out of the
+    // competitor set below.
+    'are we moving to postgres': ['postgre=key+body'],
   }
 
   /**
@@ -282,12 +311,15 @@ describe('tuning-pair match arity', () => {
    * entry reaches. MEMORY.md is not in the competitor set because it is not in
    * the ranker's candidate set either (U4 drops the namespace-root index before
    * anything is scored), so counting it here measured a competitor that can
-   * never win.
+   * never win. A note stamped superseded, deleted or expired is left out for
+   * the same reason (PR13 drops it before anything is scored, unless asked).
    */
   function arityOf(query: string, expected: string) {
     const qTerms = contentTerms(query, stemTerm)
     const matched = (key: string) => placementOf(query, key).length
-    const others = Object.keys(CORPUS).filter(k => k !== expected && k !== 'MEMORY.md')
+    const others = Object.keys(CORPUS).filter(
+      k => k !== expected && k !== 'MEMORY.md' && !isInactive(noteMeta(CORPUS[k]), utcToday()),
+    )
     return {
       qTerms: qTerms.size,
       target: matched(expected),
@@ -372,12 +404,13 @@ describe('tuning-pair match arity', () => {
 })
 
 describe('recall residuals (not closed by phase 1)', () => {
-  // These three are reported, never marked. Phase 1 adds stemming, rarity
+  // These are reported, never marked. Phase 1 adds stemming, rarity
   // weighting, soft coverage and index exclusion; none of that bridges a
-  // synonym ("response" vs "answers"), collapses a tie every entry is equally
-  // entitled to, or knows that one note supersedes another. Asserting them
-  // would be asserting work nobody planned; marking them test.failing would
-  // promise a flip that phase 1 cannot deliver.
+  // synonym ("response" vs "answers") or collapses a tie every entry is
+  // equally entitled to. Asserting them would be asserting work nobody
+  // planned; marking them test.failing would promise a flip that phase 1
+  // cannot deliver. The postgres pair was the third residual until PR13
+  // stamped the old note superseded; it is asserted in the tuning set now.
   test('reports each accepted residual and its current top hits', () => {
     const residuals = TUNING.filter(p => p.residual)
     for (const p of residuals) {
@@ -390,8 +423,7 @@ describe('recall residuals (not closed by phase 1)', () => {
     }
     // The pin is that residuals are declared and enumerated, not their count or
     // their outcome: a later unit closing one early is good news, not a
-    // regression, and the postgres pair is a tie rather than a wrong top-1, so
-    // a top-1 assertion would misreport it either way.
+    // regression.
     expect(residuals.length).toBeGreaterThan(0)
   })
 
@@ -535,7 +567,7 @@ describe('search output (pinned baseline)', () => {
     expect(r.text).toBe(
       '3 match(es) for "postgres" in user:recall-fixture:\n' +
         '- MEMORY.md: # index - [deploy](project/deploy.md) - [datastore, current](project/postgres-new.md) - [datastore, superseded](project/postgres-old.md) - [stack](project/stack.md) - [ci](project/ci.md) - [release](p…\n' +
-        '- project/postgres-old.md: --- name: postgres-old description: superseded note about the datastore --- Dated 2026-01-04. We are planning to move the routing table into Postgres so two dispatchers can share it.\n' +
+        '- project/postgres-old.md: --- name: postgres-old description: superseded note about the datastore status: superseded superseded_by: project/postgres-new.md --- Dated 2026-01-04. We are planning to move the routing table into P…\n' +
         '- project/postgres-new.md: --- name: postgres-new description: current decision about the datastore --- The Postgres migration is parked. A single dispatcher with an in-process lock is correct for now, and we revisit it when a …',
     )
   })

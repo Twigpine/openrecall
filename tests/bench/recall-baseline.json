@@ -1,23 +1,23 @@
 {
   "seed": 1,
   "size": 2000,
-  "generatorVersion": "1",
-  "corpusDigest": "651093605bb96717b66ee4099f93b86d2842fc86cdd64a736e4a738c25c15af3",
+  "generatorVersion": "2",
+  "corpusDigest": "67d84c64766a7d8444d722530a6327b05384d069efa0f0ffe5c9fed0fb66f19c",
   "minEffect": 0.02,
   "questions": 205,
   "answerable": 180,
   "systems": {
     "tfidf": {
-      "recallAt1": 0.4389,
+      "recallAt1": 0.5556,
       "recallAt5": 0.6167,
       "recallAt10": 0.6389,
-      "mrr": 0.5234,
-      "ndcg10": 0.5524,
-      "staleAboveGold": 0.525,
+      "mrr": 0.5817,
+      "ndcg10": 0.5955,
+      "staleAboveGold": 0.025,
       "abstentionPrecision": 0.1702,
       "abstentionRecall": 0.32,
-      "falseAnswerRate": 0.3854,
-      "bytesPerQuery": 6700
+      "falseAnswerRate": 0.2829,
+      "bytesPerQuery": 6645
     },
     "substring": {
       "recallAt1": 0.0389,
@@ -29,7 +29,7 @@
       "abstentionPrecision": null,
       "abstentionRecall": 0,
       "falseAnswerRate": 0.9659,
-      "bytesPerQuery": 200115
+      "bytesPerQuery": 200159
     },
     "full": {
       "recallAt1": 0,
@@ -41,7 +41,7 @@
       "abstentionPrecision": null,
       "abstentionRecall": 0,
       "falseAnswerRate": 1,
-      "bytesPerQuery": 984323
+      "bytesPerQuery": 985923
     }
   }
 }
