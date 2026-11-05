@@ -152,11 +152,13 @@ describe('MinHash', () => {
     expect(sig).toEqual(minhashSignature(LONG_A))
     // Pinned from the first run: the permutation seeds are fixed, so a change
     // to the hash, the seed, or the shingling breaks every cached signature
-    // and must be a deliberate, versioned change.
+    // and must be a deliberate, versioned change. (Re-pinned once, when the
+    // tokenizer gained compound tokens for code identifiers: shingles are
+    // built from `tokenizeAll`, so that change moved the digest on purpose.)
     expect(Array.from(sig.slice(0, 4))).toEqual([9330135, 23946345, 15212012, 1720666])
     let sum = 0
     for (const v of sig) sum = (sum + v) % 1000000007
-    expect(sum).toBe(647482088)
+    expect(sum).toBe(875660784)
   })
 
   test('estimate tracks the exact shingle Jaccard', () => {
