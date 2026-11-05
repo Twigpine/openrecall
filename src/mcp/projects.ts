@@ -6,6 +6,7 @@
 
 import { sha256Hex } from '../hash.ts'
 import { validateNamespace } from '../namespace.ts'
+import type { Session } from './session.ts'
 import { bounded, denial, type MemoryClient, type ToolResult } from './tools.ts'
 
 export function projectId(value: string): string {
@@ -33,7 +34,12 @@ export function projectNamespace(sharedNamespace: string, id: string): string {
   )
 }
 
-export function makeProjects(client: MemoryClient, sharedNamespace: string) {
+/**
+ * The project tools. `session`, when given, learns every project namespace
+ * `open` registers in this process; `memory_save` reads that to route typed
+ * notes (`src/mcp/tools.ts`).
+ */
+export function makeProjects(client: MemoryClient, sharedNamespace: string, session?: Session) {
   const catalog = () => validateNamespace(`${validateNamespace(sharedNamespace)}/projects`)
 
   return {
@@ -46,6 +52,7 @@ export function makeProjects(client: MemoryClient, sharedNamespace: string) {
         await client.push(catalog(), {
           [`${sha256Hex(id)}.json`]: JSON.stringify({ version: 1, id, namespace }),
         })
+        session?.openedProjects.add(namespace)
         return {
           text:
             `Project: ${id}\nProject namespace: ${namespace}\nShared namespace: ${sharedNamespace}\n\n` +

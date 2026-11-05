@@ -1254,8 +1254,18 @@ export class OpenRecallClient {
    * precondition for that key and must never let a write assert some other
    * key's ABSENCE. See `observed`, where the same distinction cost a drifted
    * key every future write.
+   *
+   * `observe: false` reads without recording, as `hashes` offers. The MCP
+   * save reads the stored note before it writes (to carry its stamps
+   * forward), and that read must not rebase the write: a save computed from
+   * what this session read earlier has to be refused when the note moved
+   * since, and recording the fresh hash here would make the stale base match.
    */
-  async entry(namespace: string, entryKey: string): Promise<string> {
+  async entry(
+    namespace: string,
+    entryKey: string,
+    opts: { observe?: boolean } = {},
+  ): Promise<string> {
     const res = await this.request(
       'entry',
       namespace,
@@ -1280,7 +1290,8 @@ export class OpenRecallClient {
     } catch (err) {
       throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
     }
-    this.record(namespace, { [entryKey]: ciphertextHash(data.entry) }, [])
+    if (opts.observe !== false)
+      this.record(namespace, { [entryKey]: ciphertextHash(data.entry) }, [])
     return plaintext
   }
 

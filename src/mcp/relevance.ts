@@ -24,6 +24,8 @@
  * back empty rather than with whatever scored highest among the noise.
  */
 
+import { isHiddenKey } from './keys.ts'
+
 export type MemoryEntry = {
   key: string
   content: string
@@ -45,31 +47,34 @@ export type ScoredEntry = MemoryEntry & {
 }
 
 /**
- * Whether a key names a `MEMORY.md` index, skipped as ranking input.
+ * Which keys are skipped as ranking input: every `MEMORY.md` index and every
+ * bookkeeping entry under `sys.openrecall/`. The rule itself lives in
+ * `./keys.ts` (`isHiddenKey`); `isIndexKey` is re-exported from here because
+ * the tests of the index exclusion import it from this module.
  *
  * The memory guidance tells agents to keep a `MEMORY.md` table of contents, so
  * it names every other entry and carries the whole namespace's vocabulary
  * without answering anything. Ranked alongside real notes it wins any query
  * that spans a few topics and returns a list of links where the answer was
- * wanted, which is worse the larger the namespace gets.
+ * wanted, which is worse the larger the namespace gets. The access sidecar
+ * (`sys.openrecall/accessed.json`) has the same shape, every key in the
+ * namespace and nothing that answers, and the trash and history that later
+ * land under the same prefix are notes nobody asked to be reminded of.
  *
- * It is dropped from the INPUT rather than filtered out of the results,
+ * They are dropped from the INPUT rather than filtered out of the results,
  * because the results are the smaller half of the damage. Left in the corpus
- * it still counts toward the entry total and, worse, still adds itself to the
- * document frequency of every term it lists, so a term carried by exactly one
- * note looks like it is carried by two and the note that answers is
- * downweighted for it. Filtering after scoring fixes what is displayed and
+ * an index still counts toward the entry total and, worse, still adds itself
+ * to the document frequency of every term it lists, so a term carried by
+ * exactly one note looks like it is carried by two and the note that answers
+ * is downweighted for it. Filtering after scoring fixes what is displayed and
  * leaves that intact.
  *
  * At any depth: an agent that organizes a sub-tree the way the guide has it
  * organize the root keeps a `project/MEMORY.md` there too, and it has the
- * same shape and does the same damage as the root one. Before this change a
- * nested one was ranked on purpose, as "a note somebody wrote"; a fact filed
- * under an index key is still reachable through memory_get.
+ * same shape and does the same damage as the root one. A fact filed under a
+ * hidden key is still reachable through memory_get.
  */
-export function isIndexKey(key: string): boolean {
-  return key === 'MEMORY.md' || key.endsWith('/MEMORY.md')
-}
+export { isIndexKey } from './keys.ts'
 
 /**
  * Function words that carry no topical signal, removed before scoring.
@@ -344,7 +349,7 @@ type Doc = {
   content: string
   updatedAt?: string
   fingerprint: string
-  /** False for an index entry, which is tracked so `retain` sees it but never scored or counted. */
+  /** False for a hidden entry, which is tracked so `retain` sees it but never scored or counted. */
   candidate: boolean
   tf: Map<string, TermFrequency>
   /** Words per field (compounds excluded), what the length normalization reads. */
@@ -576,9 +581,10 @@ export function applyFloors(scored: ScoredEntry[], floors: Floors = FLOORS): Sco
  * rather than keeping postings lists: simpler, half the memory, and trivially
  * incremental, since removing a note is subtracting its own counts.
  *
- * An index entry (`isIndexKey`) is tracked so `retain` and `sync` see it, but
- * it is not a candidate: it is never scored, never counted in `searched`, and
- * contributes nothing to any statistic.
+ * A hidden entry (`isHiddenKey`: an index or a `sys.openrecall/` bookkeeping
+ * entry) is tracked so `retain` and `sync` see it, but it is not a candidate:
+ * it is never scored, never counted in `searched`, and contributes nothing to
+ * any statistic.
  */
 export class RecallIndex {
   private readonly docs = new Map<string, Doc>()
@@ -614,7 +620,7 @@ export class RecallIndex {
       return 'unchanged'
     }
     if (existing) this.subtract(existing)
-    const candidate = !isIndexKey(doc.key)
+    const candidate = !isHiddenKey(doc.key)
     const { tf, len } = candidate
       ? tokenizeDoc(doc.key, doc.content)
       : { tf: new Map<string, TermFrequency>(), len: [0, 0, 0, 0, 0] }

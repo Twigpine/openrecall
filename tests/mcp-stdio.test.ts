@@ -289,3 +289,35 @@ for (const l of launchers) {
     }, 30_000)
   })
 }
+
+/**
+ * The stamp carries the connecting agent's name and version, which only the
+ * real server over a real transport can prove: the in-process suites run on
+ * a default session whose agent is `unknown`.
+ */
+for (const l of launchers) {
+  describe(`stamped frontmatter over stdio — ${l.name}`, () => {
+    test('a save through the real server is stamped with the connecting agent', async () => {
+      const home = freshHome()
+      const c = await connect(l, { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p' })
+      try {
+        const saved = text(
+          await c.callTool({
+            name: 'memory_save',
+            arguments: { key: 'project/stamp.md', content: 'The build runs on bun.' },
+          }),
+        )
+        expect(saved).toMatch(/^saved "project\/stamp.md" in user:me \(v\d+\)$/)
+        const got = text(
+          await c.callTool({ name: 'memory_get', arguments: { key: 'project/stamp.md' } }),
+        )
+        expect(got).toContain('\nagent: test-agent/0.0.0\n')
+        expect(got).toMatch(/\nsession: s[0-9A-HJKMNP-TV-Z]{8}\n/)
+        expect(got).toContain('\ntype: project\n')
+        expect(got.endsWith('---\nThe build runs on bun.')).toBe(true)
+      } finally {
+        await c.close()
+      }
+    }, 30_000)
+  })
+}

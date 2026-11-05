@@ -17,9 +17,21 @@ import {
   OpenRecallTimeoutError,
   type PullOptions,
   type PullResult,
+  type PushResult,
 } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { validateNamespace } from '../namespace.ts'
+import {
+  ACCESS_FLUSH_THRESHOLD,
+  flushAccessed,
+  isSidecarOnlyConflict,
+  noteAccess,
+  prepareAccessed,
+  settleAccess,
+  today,
+} from './accessed.ts'
+import { FrontmatterError, type NoteType, parseFrontmatter, stampForSave } from './frontmatter.ts'
+import { ACCESSED_KEY, isHiddenKey, isSystemKey, SYSTEM_PREFIX } from './keys.ts'
 import {
   type IndexDoc,
   RecallIndex,
@@ -27,6 +39,8 @@ import {
   tokenize,
   tokenizeAll,
 } from './relevance.ts'
+import { neutralize } from './sanitize.ts'
+import { makeSession, type Session } from './session.ts'
 
 export type ToolResult = { text: string; isError?: boolean; timings?: Timings }
 
@@ -586,7 +600,69 @@ function fnv1a(s: string): string {
  */
 const MAX_INDEXED_NAMESPACES = 16
 
-export function makeTools(client: MemoryClient, defaultNamespace: string) {
+export type SaveOptions = {
+  /** Key of the older entry this one replaces; stamped into the frontmatter. */
+  supersedes?: string
+  /** Override the routing check, save over a locked note, or save over an unreadable one. */
+  force?: boolean
+}
+export type DeleteOptions = {
+  /** Delete a locked note. */
+  force?: boolean
+}
+export type ListOptions = {
+  /** Also list the bookkeeping entries under `sys.openrecall/`. */
+  includeSystem?: boolean
+}
+
+/** A namespace of the shape `memory_project` creates: `<shared>/projects/<sha256 hex>`. */
+export function isProjectNamespace(ns: string): boolean {
+  return /\/projects\/[0-9a-f]{64}$/.test(ns)
+}
+
+/** The refusal for a hand-written key under the reserved prefix. */
+function reservedKey(key: string, verb: string): string {
+  return (
+    `Refused to ${verb} "${key}": keys under ${SYSTEM_PREFIX} are bookkeeping the client ` +
+    'maintains by itself (the access-date sidecar, and later the trash and the version ' +
+    'history) and are never written by hand. Use a key outside that prefix.'
+  )
+}
+
+/** The second response line of a save whose agent-supplied stamps were replaced. */
+function correctedLine(fields: string[]): string {
+  const list =
+    fields.length === 1
+      ? fields[0]
+      : `${fields.slice(0, -1).join(', ')} and ${fields[fields.length - 1]}`
+  const plural = fields.length > 1
+  return `(stamped: ${list} ${plural ? 'are' : 'is'} set by the client; your value${plural ? 's were' : ' was'} replaced)`
+}
+
+/**
+ * Why a save or delete of a locked note is refused. Null when the stored
+ * note is not locked (or there is none). `locked: true` is the one frontmatter
+ * field an agent sets to say "do not change this without a human's say-so";
+ * `force: true` is how the agent says it has it.
+ */
+function lockedRefusal(
+  existing: string | null,
+  key: string,
+  ns: string,
+  action: 'save' | 'delete',
+): string | null {
+  if (existing === null) return null
+  if (parseFrontmatter(existing)?.fields.get('locked') !== true) return null
+  return action === 'save'
+    ? `Refused to save "${key}" in ${ns}: the stored note is locked (locked: true in its frontmatter). Read it with memory_get, and pass force: true if it really should change. Nothing was stored.`
+    : `Refused to delete "${key}" from ${ns}: the stored note is locked (locked: true in its frontmatter). Pass force: true if it really should go. "${key}" is still stored.`
+}
+
+export function makeTools(
+  client: MemoryClient,
+  defaultNamespace: string,
+  session: Session = makeSession(),
+) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
 
   /**
@@ -656,33 +732,216 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
     // "toString" must miss, never resolve to something off the prototype.
     if (!Object.hasOwn(entries, key))
       return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
+    if (!isHiddenKey(key)) noteAccess(session.pendingAccess, ns, key, today())
     return ok(`### ${key} (${ns})\n${entries[key]}`)
   }
 
-  return {
-    /** Persist one durable memory entry (encrypted before upload). */
-    save: timed(async (timer, key: string, content: string, namespace?: string) => {
-      const ns = nsOf(namespace)
-      try {
-        const r = await timer.time('fetch', () => client.push(ns, { [key]: content }))
-        timer.entries = 1
-        // A 2xx does not mean this key landed: the server refuses oversized and
-        // malformed entries per key and reports them here. Match on the key
-        // that was sent, since another key's refusal says nothing about this one.
-        const refused = r.skipped?.find(s => s.key === key)
-        if (refused) return fail(skippedText(key, ns, refused.reason))
-        const status = r.uploaded.length ? 'saved' : 'unchanged'
-        return ok(`${status} "${key}" in ${ns} (v${r.version})`)
-      } catch (e) {
-        if (e instanceof SecretFoundError) {
-          return fail(
-            `Refused to save "${key}" — it looks like it contains a secret:\n${e.message}`,
-          )
+  /**
+   * The note stored under `key`, or null when there is none. The two 404s
+   * (`empty`, `entry_not_found`) and a key the server will not look up are
+   * all "no note": the push that follows reports an invalid key with the
+   * right move, so there is nothing to read first. A body the manifest names
+   * and the store cannot serve is lost data, and a save over it is refused
+   * the way `memory_get` reports it, unless the caller forces.
+   *
+   * The read does not rebase the write (`observe: false`): the stale-base
+   * precondition compares the push against what this session read through
+   * recall, get or search, and a read made only to carry the stamps forward
+   * must not turn a stale save into a current one. A server that predates
+   * the entry view is read through the full pull, as `get` does; that path
+   * does record what it saw, so against such a server a save is conditional
+   * on the pull it just made rather than on the session's earlier read.
+   */
+  async function readExisting(ns: string, key: string, force: boolean): Promise<string | null> {
+    try {
+      return await client.entry(ns, key, { observe: false })
+    } catch (e) {
+      if (e instanceof OpenRecallHttpError) {
+        if (e.status === 404 && (e.code === 'empty' || e.code === 'entry_not_found')) return null
+        if (e.status === 400) return null
+        if (e.status === 503 && e.code === 'entry_unreadable') {
+          if (force) return null
+          throw new Rendered(unreadableEntry(key, ns))
         }
-        const d = denial(`Saving "${key}"`, ns, defaultNamespace, 'Nothing was stored.', e)
-        return fail(d ?? `save failed: ${bounded((e as Error).message)}`)
       }
-    }),
+      if (e instanceof OpenRecallProtocolError) {
+        const { entries } = await client.pull(ns)
+        return Object.hasOwn(entries, key) ? (entries[key] as string) : null
+      }
+      throw e
+    }
+  }
+
+  /**
+   * Where a note of this type belongs, against where it is being saved. A
+   * `user` note into a project namespace and a `project` or `reference` note
+   * into the shared namespace while a project is open are refused with the
+   * namespace that should have been used; `feedback` goes anywhere and gets
+   * a reminder when it lands in a project. Untyped notes are not routed, and
+   * nothing is routed when no project has been opened in this process, since
+   * there is then no project namespace to name.
+   */
+  function routeCheck(
+    type: NoteType | undefined,
+    key: string,
+    ns: string,
+  ): { refusal?: string; note?: string } {
+    if (!type) return {}
+    const projectShaped = isProjectNamespace(ns)
+    if (type === 'user' && projectShaped) {
+      return {
+        refusal:
+          `Refused to save "${key}" in ${ns}: it is a user note (type: user) and that is a project namespace. ` +
+          `Standing facts about the user belong in the shared namespace ${defaultNamespace}; save it there, ` +
+          'or pass force: true to keep it here. Nothing was stored.',
+      }
+    }
+    if (
+      (type === 'project' || type === 'reference') &&
+      ns === defaultNamespace &&
+      session.openedProjects.size > 0
+    ) {
+      const opened = [...session.openedProjects].join(', ')
+      return {
+        refusal:
+          `Refused to save "${key}" in ${ns}: it is a ${type} note and that is the shared namespace. ` +
+          `Project facts belong in the open project's namespace (${opened}); save it there, ` +
+          'or pass force: true to keep it here. Nothing was stored.',
+      }
+    }
+    if (type === 'feedback' && projectShaped) {
+      return {
+        note:
+          '(feedback saved in a project namespace applies to that project only; feedback that ' +
+          `applies everywhere belongs in ${defaultNamespace})`,
+      }
+    }
+    return {}
+  }
+
+  /**
+   * Push `entries` (and `deletions`) to `ns`, carrying the namespace's pending
+   * access stamps along as the sidecar when there are any, in the same
+   * request. A 409 confined to the sidecar is re-read and retried once; if it
+   * persists, or the sidecar cannot be read, the write goes alone and the
+   * stamps wait for the next one. Any other failure is the caller's to render.
+   */
+  async function pushWithAccess(
+    timer: Timer,
+    ns: string,
+    entries: Record<string, string>,
+    deletions?: string[],
+  ): Promise<PushResult> {
+    const opts = deletions ? { deletions } : undefined
+    const push = (e: Record<string, string>) => timer.time('fetch', () => client.push(ns, e, opts))
+    const pending = session.pendingAccess.get(ns)
+    if (!pending || pending.size === 0) return push(entries)
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const snapshot = new Map(pending)
+      let sidecar: string | null
+      try {
+        sidecar = await timer.time('fetch', () => prepareAccessed(client, ns, snapshot))
+      } catch {
+        return push(entries)
+      }
+      if (sidecar === null) {
+        settleAccess(pending, snapshot)
+        return push(entries)
+      }
+      try {
+        const r = await push({ ...entries, [ACCESSED_KEY]: sidecar })
+        if (!r.skipped?.some(s => s.key === ACCESSED_KEY)) settleAccess(pending, snapshot)
+        return r
+      } catch (e) {
+        if (!isSidecarOnlyConflict(e)) throw e
+        if (attempt === 1) return push(entries)
+      }
+    }
+    return push(entries)
+  }
+
+  /**
+   * The one flush that is not piggybacked: a namespace that has collected
+   * `ACCESS_FLUSH_THRESHOLD` pending keys in a process that has not written
+   * to it. Once per process per namespace, and never surfaced.
+   */
+  const thresholdFlushed = new Set<string>()
+  async function flushIfDue(timer: Timer, ns: string): Promise<void> {
+    const pending = session.pendingAccess.get(ns)
+    if (!pending || pending.size < ACCESS_FLUSH_THRESHOLD || thresholdFlushed.has(ns)) return
+    thresholdFlushed.add(ns)
+    await timer.time('fetch', () => flushAccessed(client, ns, pending))
+  }
+
+  return {
+    /**
+     * Persist one durable memory entry (encrypted before upload).
+     *
+     * Read, stamp, route, push. The stored note under `key` is read first (one
+     * bounded entry read, not a pull) so the stamp can keep its `id` and
+     * `created`, refuse a locked note, and tell a stale agent-supplied stamp
+     * from one carried over from `memory_get`. The stamp lives inside the
+     * encrypted body, so the server sees nothing new. The first response line
+     * keeps its shape; a second line reports replaced stamps, a third a
+     * routing reminder.
+     */
+    save: timed(
+      async (timer, key: string, content: string, namespace?: string, opts: SaveOptions = {}) => {
+        const ns = nsOf(namespace)
+        if (isSystemKey(key)) return fail(reservedKey(key, 'save'))
+        try {
+          const existing = await timer.time('fetch', () =>
+            readExisting(ns, key, opts.force === true),
+          )
+          const lock = lockedRefusal(existing, key, ns, 'save')
+          if (lock && !opts.force) return fail(lock)
+          let stamped: ReturnType<typeof stampForSave>
+          try {
+            stamped = stampForSave(existing, content, {
+              now: new Date().toISOString(),
+              agent: session.agentLabel(),
+              session: session.sessionId,
+              key,
+              // The server's timestamp for a legacy note, when a recall in this
+              // process has it; `created` falls back to now otherwise.
+              serverUpdatedAt: indexes.get(ns)?.doc(key)?.updatedAt,
+              supersedes: opts.supersedes,
+            })
+          } catch (e) {
+            if (e instanceof FrontmatterError) {
+              return fail(
+                `Refused to save "${key}": ${neutralize(bounded(e.message))} ` +
+                  `(frontmatter field "${e.field}"). Nothing was stored.`,
+              )
+            }
+            throw e
+          }
+          const route = routeCheck(stamped.meta.type, key, ns)
+          if (route.refusal && !opts.force) return fail(route.refusal)
+          const r = await pushWithAccess(timer, ns, { [key]: stamped.content })
+          timer.entries = 1
+          // A 2xx does not mean this key landed: the server refuses oversized and
+          // malformed entries per key and reports them here. Match on the key
+          // that was sent, since another key's refusal says nothing about this one.
+          const refused = r.skipped?.find(s => s.key === key)
+          if (refused) return fail(skippedText(key, ns, refused.reason))
+          const status = r.uploaded.includes(key) ? 'saved' : 'unchanged'
+          const lines = [`${status} "${key}" in ${ns} (v${r.version})`]
+          if (stamped.corrected.length) lines.push(neutralize(correctedLine(stamped.corrected)))
+          if (route.note) lines.push(route.note)
+          return ok(lines.join('\n'))
+        } catch (e) {
+          if (e instanceof Rendered) return fail(e.message)
+          if (e instanceof SecretFoundError) {
+            return fail(
+              `Refused to save "${key}" — it looks like it contains a secret:\n${e.message}`,
+            )
+          }
+          const d = denial(`Saving "${key}"`, ns, defaultNamespace, 'Nothing was stored.', e)
+          return fail(d ?? `save failed: ${bounded((e as Error).message)}`)
+        }
+      },
+    ),
 
     /** Rank stored memories by relevance to a natural-language query. */
     recall: timed(
@@ -733,7 +992,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               }
             }),
           )
-          if (pulled.every(p => p.docs.length === 0)) return ok(`(no memory stored in ${ns} yet)`)
+          // Bookkeeping entries are not memory: a namespace holding nothing but
+          // the access sidecar reads as one that holds nothing.
+          if (pulled.every(p => p.docs.every(d => isSystemKey(d.key))))
+            return ok(`(no memory stored in ${ns} yet)`)
           // The region shown for a hit is cut from what this call pulled,
           // never from the index's copy, so what the caller reads is what the
           // server served this time.
@@ -834,6 +1096,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               ? `\n\n(${n} further relevant entr${n === 1 ? 'y' : 'ies'} not shown: ${why}. Call memory_list, then memory_get by key.)`
               : ''
           const parts: string[] = []
+          const day = today()
           // Reserved at the worst case on BOTH axes, the widest count and the
           // longest reason, because the cap covers the whole returned string and
           // neither value is known until the loop below has finished.
@@ -857,14 +1120,14 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
                 omitted++
                 continue
               }
-              const region = regionFor(
-                contentOf(r.key, r.namespace ?? sources[0]) ?? r.content,
-                query,
-                allowed,
-              )
-              const part = header + region.text + (region.partial ? pointer : '')
+              const source = r.namespace ?? sources[0]
+              const region = regionFor(contentOf(r.key, source) ?? r.content, query, allowed)
+              // The region is what the model reads, so it is neutralized here;
+              // `memory_get` returns the same entry verbatim, as data.
+              const part = header + neutralize(region.text) + (region.partial ? pointer : '')
               budget -= joiner + part.length
               parts.push(part)
+              noteAccess(session.pendingAccess, source, r.key, day)
             }
             const shown = parts.length
             const tail = tailFor(
@@ -873,6 +1136,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             )
             return `${leadFor(shown)}${parts.join('\n\n')}${tail}`
           })
+          for (const source of sources) await flushIfDue(timer, source)
           return ok(formatted)
         } catch (e) {
           if (e instanceof Rendered) return fail(e.message)
@@ -934,6 +1198,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           if (e instanceof OpenRecallProtocolError) return getViaPull(timer, key, ns)
           throw e
         }
+        if (!isHiddenKey(key)) {
+          noteAccess(session.pendingAccess, ns, key, today())
+          await flushIfDue(timer, ns)
+        }
         return ok(`### ${key} (${ns})\n${body}`)
       } catch (e) {
         const d = denial(`Reading "${key}"`, ns, defaultNamespace, 'Nothing was read.', e)
@@ -951,14 +1219,19 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           const lost = await lostEntries(client, ns, version)
           if (lost) return fail(lost)
         }
+        // Bookkeeping entries are skipped: the sidecar names every key that was
+        // ever recalled, so it would match nearly any search for a key.
         const hits = await timer.time('rank', () =>
           Object.entries(entries).filter(
             ([key, content]) =>
-              key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle),
+              !isSystemKey(key) &&
+              (key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle)),
           ),
         )
         if (hits.length === 0) return ok(`no matches for "${query}" in ${ns}`)
-        const body = hits.map(([key, content]) => `- ${key}: ${snippet(content)}`).join('\n')
+        const body = hits
+          .map(([key, content]) => `- ${key}: ${neutralize(snippet(content))}`)
+          .join('\n')
         return ok(`${hits.length} match(es) for "${query}" in ${ns}:\n${body}`)
       } catch (e) {
         const d = denial('Searching memories', ns, defaultNamespace, 'No memories were read.', e)
@@ -966,16 +1239,27 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       }
     }),
 
-    /** List entry keys in a namespace (no content downloaded). */
-    list: timed(async (timer, namespace?: string) => {
+    /**
+     * List entry keys in a namespace (no content downloaded). Bookkeeping
+     * entries under `sys.openrecall/` are left out unless asked for: they are
+     * not notes, and a listing is what an agent reads to decide what exists.
+     */
+    list: timed(async (timer, namespace?: string, opts: ListOptions = {}) => {
       const ns = nsOf(namespace)
       try {
         const hashes = await timer.time('fetch', () => client.hashes(ns, { observe: false }))
-        const keys = Object.keys(hashes).sort()
+        const all = Object.keys(hashes).sort()
+        const keys = opts.includeSystem ? all : all.filter(k => !isSystemKey(k))
+        const hidden = all.length - keys.length
         timer.entries = keys.length
-        if (keys.length === 0) return ok(`(${ns} is empty)`)
+        if (all.length === 0) return ok(`(${ns} is empty)`)
+        const hiddenNote = hidden
+          ? `${hidden} bookkeeping entr${hidden === 1 ? 'y' : 'ies'} under ${SYSTEM_PREFIX} not listed; pass include_system: true to see ${hidden === 1 ? 'it' : 'them'}`
+          : ''
+        if (keys.length === 0) return ok(`(${ns} holds no notes; ${hiddenNote})`)
         return ok(
-          `${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} in ${ns}:\n${keys.map(k => `- ${k}`).join('\n')}`,
+          `${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} in ${ns}:\n${keys.map(k => `- ${k}`).join('\n')}` +
+            (hidden ? `\n(${hiddenNote})` : ''),
         )
       } catch (e) {
         const d = denial('Listing entries', ns, defaultNamespace, 'No entry keys were read.', e)
@@ -983,16 +1267,42 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       }
     }),
 
-    /** Delete one entry. */
-    delete: timed(async (timer, key: string, namespace?: string) => {
+    /**
+     * Delete one entry. The stored note is read first so a locked one is
+     * refused; pending access stamps for the namespace ride along in the
+     * same request, which then goes through the push route with a deletion
+     * rather than the bare delete.
+     */
+    delete: timed(async (timer, key: string, namespace?: string, opts: DeleteOptions = {}) => {
       const ns = nsOf(namespace)
+      if (isSystemKey(key)) return fail(reservedKey(key, 'delete'))
       try {
-        const r = await timer.time('fetch', () => client.delete(ns, key))
-        timer.entries = r.deleted ? 1 : 0
-        return r.deleted
-          ? ok(`deleted "${key}" from ${ns} (v${r.version})`)
+        const existing = await timer.time('fetch', () => readExisting(ns, key, true))
+        const lock = lockedRefusal(existing, key, ns, 'delete')
+        if (lock && !opts.force) return fail(lock)
+        let deleted: boolean
+        let version: number
+        if (session.pendingAccess.get(ns)?.size) {
+          const r = await pushWithAccess(timer, ns, {}, [key])
+          const refused = r.skipped?.find(s => s.key === key)
+          if (refused) {
+            return fail(
+              `Deleting "${key}" from ${ns} was refused by the server (${bounded(refused.reason, 80)}). "${key}" is still stored.`,
+            )
+          }
+          deleted = r.deleted.includes(key)
+          version = r.version
+        } else {
+          const r = await timer.time('fetch', () => client.delete(ns, key))
+          deleted = r.deleted
+          version = r.version
+        }
+        timer.entries = deleted ? 1 : 0
+        return deleted
+          ? ok(`deleted "${key}" from ${ns} (v${version})`)
           : ok(`nothing to delete — "${key}" is not in ${ns}`)
       } catch (e) {
+        if (e instanceof Rendered) return fail(e.message)
         const d = denial(`Deleting "${key}"`, ns, defaultNamespace, `"${key}" is still stored.`, e)
         return fail(d ?? `delete failed: ${bounded((e as Error).message)}`)
       }

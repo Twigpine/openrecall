@@ -12,6 +12,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, test } from 'bun:test'
 import { existsSync, readdirSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
+import { stripFrontmatter } from '../src/mcp/frontmatter.ts'
 import { _reset } from '../src/ratelimit.ts'
 
 const DATA_DIR = process.env.DATA_DIR as string
@@ -174,11 +175,15 @@ describe('e2e: the path a new user actually walks', () => {
     expect(stale.text).toContain('shared.md')
 
     // b's write is intact, and a can recover by doing what the text says.
-    expect((await client().pull(ns)).entries['shared.md']).toBe('from b')
+    expect(stripFrontmatter((await client().pull(ns)).entries['shared.md'] as string)).toBe(
+      'from b',
+    )
     await a.recall('shared')
     const retry = await a.save('shared.md', 'from a, rebased')
     expect(retry.isError).toBeUndefined()
-    expect((await client().pull(ns)).entries['shared.md']).toBe('from a, rebased')
+    expect(stripFrontmatter((await client().pull(ns)).entries['shared.md'] as string)).toBe(
+      'from a, rebased',
+    )
   })
 
   test('an entry the server refuses is not reported to the model as saved', async () => {

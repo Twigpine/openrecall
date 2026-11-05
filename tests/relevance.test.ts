@@ -4,6 +4,7 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { stampForSave } from '../src/mcp/frontmatter.ts'
 import {
   FLOORS,
   RecallIndex,
@@ -622,5 +623,59 @@ describe('tokenizeAll', () => {
     expect(all).not.toContain('i')
     for (const t of topical)
       expect(`${t} in tokenizeAll: ${all.includes(t)}`).toBe(`${t} in tokenizeAll: true`)
+  })
+})
+
+/**
+ * Hidden keys: the bookkeeping entries under `sys.openrecall/` join the
+ * indexes as non-candidates, and the tokens the save stamp writes into
+ * every note's frontmatter (`agent: claude-code/…`, the session id) never
+ * become ranking terms. The body field has been frontmatter-stripped since
+ * the BM25F ranker; this pins that the stamp cannot undo it.
+ */
+describe('hidden keys and stamped frontmatter never rank', () => {
+  const sidecar = JSON.stringify({ v: 1, keys: { 'deploy.md': '2026-11-05' } })
+
+  test('sys.openrecall/* is never a candidate and is not counted in searched', () => {
+    const notes = {
+      'deploy.md': 'Deploys go to Fly in region sin.',
+      'other.md': 'The weather is mild today.',
+    }
+    const withSystem = {
+      ...notes,
+      'sys.openrecall/accessed.json': sidecar,
+      'sys.openrecall/trash/old-deploy.md': 'Deploys go to Fly in region sin.',
+      'sys.openrecall/history/deploy.md.json': '{"deploy":"region sin"}',
+    }
+    const d = rankMemoriesDetailed('deploy region', withSystem)
+    expect(d.searched).toBe(2)
+    expect(d.results.map(r => r.key)).toEqual(['deploy.md'])
+    // Not merely filtered out of the results: absent from the statistics too,
+    // so the note that answers scores exactly what it scores without them.
+    const alone = rankMemoriesDetailed('deploy region', notes)
+    expect(d.results[0]?.score).toBe(alone.results[0]?.score as number)
+    expect(rankMemories('accessed sidecar keys', withSystem)).toHaveLength(0)
+  })
+
+  test('tokens that occur only in the stamped frontmatter do not rank', () => {
+    const stamped = stampForSave(null, 'Deploys go to Fly in region sin.\n', {
+      now: '2026-11-05T10:00:00.000Z',
+      agent: 'claude-code/2.1.284',
+      session: 'sABCDEFGH',
+      key: 'project/deploy.md',
+    })
+    expect(stamped.content).toContain('agent: claude-code/2.1.284')
+    const entries = {
+      'project/deploy.md': stamped.content,
+      'other.md': 'The weather is mild today.',
+    }
+    for (const q of ['claude', 'claude code', 'sABCDEFGH', 'session sABCDEFGH', 'agent'])
+      expect(
+        `${q}: ${rankMemories(q, entries)
+          .map(r => r.key)
+          .join(',')}`,
+      ).toBe(`${q}: `)
+    // Control: the body still ranks, so the stamp cost the note nothing.
+    expect(rankMemories('deploy region', entries)[0]?.key).toBe('project/deploy.md')
   })
 })

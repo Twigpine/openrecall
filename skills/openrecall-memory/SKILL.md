@@ -136,8 +136,16 @@ Depending on the agent, the tools may carry a prefix — e.g.
 same tools. If your agent shows MCP tools by name only until you look them up
 (a tool-search step), search for "openrecall" first.
 
-- `memory_save(key, content)` — `key` is a path that mirrors a memory directory
-  layout; `content` is markdown. Saving the same `key` overwrites it, unless the entry changed since this session last read it. A stale save is refused and names the keys that moved: read each with `memory_get`, merge, and save again.
+- `memory_save(key, content, supersedes?, force?)` — `key` is a path that
+  mirrors a memory directory layout; `content` is markdown. Saving the same
+  `key` overwrites it, unless the entry changed since this session last read
+  it. A stale save is refused and names the keys that moved: read each with
+  `memory_get`, merge, and save again. The client stamps the note's
+  frontmatter on every save (see "Frontmatter" below) and routes by type:
+  `user` facts go to the shared namespace, `project` and `reference` facts to
+  the open project's namespace, `feedback` to either. A save in the wrong
+  place is refused and names the right one; `force: true` overrides that, and
+  is also what edits a note marked `locked: true`.
 - `memory_recall(query, limit?)` — relevance-ranked entries for a query.
 - `memory_recall(query, namespaces: [shared, project], limit?)` — one ranked,
   bounded result across up to eight explicit namespaces. Use `namespace` or
@@ -177,6 +185,33 @@ In each saved file, prefer a tiny shape:
 
 Why: <why it matters — for feedback/project>
 ```
+
+#### Frontmatter
+
+Every note carries a YAML frontmatter block that the client stamps on save.
+You never write these fields by hand; a value you supply for one of them is
+replaced and the save response says so:
+
+- `id` — a ULID, fixed for the life of the note.
+- `created`, `updated` — ISO timestamps; `created` survives every update.
+- `agent`, `session` — which agent (`name/version`) and which session wrote
+  this version.
+
+Fields you may set, all optional:
+
+- `type` — one of `user`, `feedback`, `project`, `reference` (a closed set;
+  anything else is refused). Inferred from the key's first segment when the
+  key starts with one of those, so `feedback/run-tests.md` needs no `type:`.
+- `description` — one line; recall weights it heavily.
+- `tags` — up to 8 lowercase kebab-case words.
+- `supersedes` — the key of the older note this one replaces (or pass it as
+  the tool argument).
+- `expires` — `YYYY-MM-DD` after which the note is stale.
+- `locked` — `true` to refuse saves and deletes without `force: true`.
+
+Keys under `sys.openrecall/` are bookkeeping the client keeps (for example
+the access-date sidecar) and cannot be written by hand; `memory_list` hides
+them unless `include_system` is true.
 
 ## Maintain the memory, don't just append
 

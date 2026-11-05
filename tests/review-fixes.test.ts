@@ -8,7 +8,7 @@ import { OpenRecallClient, OpenRecallHttpError, OpenRecallTimeoutError } from '.
 import { makeProjects } from '../src/mcp/projects.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import { namespaceSlug } from '../src/namespace.ts'
-import { makeStubClient } from './stub-client.ts'
+import { httpError, makeStubClient } from './stub-client.ts'
 
 let server: ReturnType<typeof Bun.serve>
 let url: string
@@ -134,6 +134,9 @@ describe('tool text for server-chosen strings and timeouts', () => {
 
   test('a timed-out write says the outcome is unknown; a timed-out read does not', async () => {
     const stub = makeStubClient()
+    // `save` now reads the stored note before it writes, so the double's
+    // `entry` answers "no such note" on the write path and times out only when
+    // the read itself is what is being timed out.
     const failing = (operation: string) =>
       makeTools(
         {
@@ -145,6 +148,7 @@ describe('tool text for server-chosen strings and timeouts', () => {
             throw new OpenRecallTimeoutError('pull', 'user:me', 1000)
           },
           entry: async () => {
+            if (operation === 'push') throw httpError(404, 'entry_not_found')
             throw new OpenRecallTimeoutError('entry', 'user:me', 1000)
           },
         },
@@ -152,7 +156,7 @@ describe('tool text for server-chosen strings and timeouts', () => {
       )
     const w = await failing('push').save('k.md', 'body')
     expect(w.text).toContain('unknown whether the change was applied')
-    const r = await failing('push').get('k.md')
+    const r = await failing('entry').get('k.md')
     expect(r.isError).toBe(true)
     expect(r.text).not.toContain('unknown whether')
   })

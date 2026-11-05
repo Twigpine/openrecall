@@ -318,9 +318,10 @@ describe('memory_get over the single-entry view', () => {
     expect((await tools.save('gone.md', 'will be removed')).isError).toBeUndefined()
     expect((await tools.get('kept.md')).text).toContain('stays readable')
 
-    // Deterministic encryption: re-encrypting names the stored blob exactly.
+    // Deterministic encryption: re-encrypting what is stored (the body under
+    // the client's frontmatter stamp) names the stored blob exactly.
     const key = deriveKey('test-pass', ns)
-    const ct = encryptEntry(key, 'gone.md', 'will be removed')
+    const ct = encryptEntry(key, 'gone.md', await client.entry(ns, 'gone.md'))
     await getStore().delete(contentPath(nsSlug, ciphertextHash(ct)))
 
     const r = await tools.get('gone.md')
