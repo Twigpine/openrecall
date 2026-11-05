@@ -284,9 +284,12 @@ export function planSync(input: {
   const keys = new Set([...Object.keys(input.local), ...Object.keys(input.remote)])
   const actions: SyncAction[] = []
 
+  /** The key's baseline, or undefined when this pair never recorded it. */
   const baselineOf = (key: string): string | null | undefined =>
     Object.hasOwn(baselines, key) ? baselines[key] : undefined
+  /** Whether the pair has ever recorded this key. */
   const known = (key: string): boolean => Object.hasOwn(baselines, key)
+  /** A null or missing baseline cannot prove that a side is unchanged. */
   const changed = (hash: string, baseline: string | null | undefined): boolean =>
     baseline === undefined || baseline === null || hash !== baseline
 
@@ -794,6 +797,7 @@ export function formatSyncReport(r: SyncReport, dir: string): SyncReportLines {
 export function makeDebouncer(ms: number, fn: () => void): { schedule(): void; cancel(): void } {
   let timer: ReturnType<typeof setTimeout> | null = null
   return {
+    /** Push the pending run back by another quiet period. */
     schedule() {
       if (timer !== null) clearTimeout(timer)
       timer = setTimeout(() => {
@@ -801,6 +805,7 @@ export function makeDebouncer(ms: number, fn: () => void): { schedule(): void; c
         fn()
       }, ms)
     },
+    /** Drop a pending run without calling `fn`. */
     cancel() {
       if (timer !== null) {
         clearTimeout(timer)
@@ -865,6 +870,7 @@ export function watchDirectory(
   }
 
   return {
+    /** Stop watching and cancel any run the debouncer has pending. */
     close() {
       for (const stop of stoppers) stop()
     },

@@ -626,6 +626,7 @@ describe('runSync conflict resolution, by baseline and real timestamps', () => {
       entryStarted = resolve
     })
     const delayed = new Proxy(client, {
+      /** Hold the entry read open until the test edits the local file. */
       get(target, prop) {
         const value = Reflect.get(target, prop, target)
         if (prop === 'entry') {

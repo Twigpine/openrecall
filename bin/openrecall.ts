@@ -218,6 +218,7 @@ async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
   }
 
   const client = await makeClient(s)
+  /** Run one sync and set the exit code when it left work unresolved. */
   const once = async () => {
     const r = await runSync(dir, client, {
       namespace: ns,
