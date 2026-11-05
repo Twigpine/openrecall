@@ -126,7 +126,7 @@ describe('recall bench fixture', () => {
       expect(body.length).toBeGreaterThanOrEqual(100)
       expect(body.length).toBeLessThanOrEqual(1600)
       expect(body).toMatch(
-        /^---\nname: .+\ndescription: .+\ntype: (user|feedback|project|reference)\n---\n# /,
+        /^---\nname: .+\ndescription: .+\ntype: (user|feedback|project|reference)\n(?:updated: \d{4}-\d{2}-\d{2}\n)?---\n# /,
       )
       expect(corpus['MEMORY.md']).toContain(`](${q.gold})`)
     }
@@ -179,6 +179,17 @@ describe('recall bench fixture', () => {
       expect(corpus[q.superseded as string]).toBeDefined()
       expect(corpus[q.superseded as string]).toContain('Dated ')
       expect(corpus[q.gold as string]).toContain('replaces the earlier note')
+      // Both carry an `updated:` stamp and the gold's is the later one: that
+      // ordering, not the key or the body, is what the recency tiebreak reads.
+      const stampOf = (key: string) => /^updated: (\d{4}-\d{2}-\d{2})$/m.exec(corpus[key])?.[1]
+      const oldStamp = stampOf(q.superseded as string)
+      const newStamp = stampOf(q.gold as string)
+      expect(oldStamp).toBeDefined()
+      expect(newStamp).toBeDefined()
+      const later = (oldStamp as string) < (newStamp as string)
+      expect(`${q.id}: ${oldStamp} < ${newStamp} :: ${later}`).toBe(
+        `${q.id}: ${oldStamp} < ${newStamp} :: true`,
+      )
       const shared = sharedTerms(
         q.query,
         q.superseded as string,

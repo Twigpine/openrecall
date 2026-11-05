@@ -95,10 +95,16 @@ export const CORPUS: Record<string, string> = {
     'The smoke run must be green before a rollout; a red run stops it.',
   ].join('\n'),
 
+  // Stamped superseded the way `memory_save` with `mode: supersede` stamps a
+  // replaced note, so recall drops it from the candidates by default. It is
+  // textually as good a match for the datastore question as the current note,
+  // which is what made the "are we moving to postgres" pair a tie until then.
   'project/postgres-old.md': [
     '---',
     'name: postgres-old',
     'description: superseded note about the datastore',
+    'status: superseded',
+    'superseded_by: project/postgres-new.md',
     '---',
     'Dated 2026-01-04. We are planning to move the routing table into Postgres so',
     'two dispatchers can share it.',
@@ -403,9 +409,8 @@ export const TUNING: TuningPair[] = [
   {
     query: 'are we moving to postgres',
     expect: 'project/postgres-new.md',
-    closedBy: [],
-    residual: true,
-    note: 'accepted residual: the superseded note is textually just as good a match, and supersession needs the phase 2 confidence work',
+    closedBy: ['PR13'],
+    note: 'the superseded note is textually just as good a match (0.937 against 0.934), so no ranking change decides this; PR13 stamps it `status: superseded` and it is no longer a candidate unless asked for',
   },
 ]
 

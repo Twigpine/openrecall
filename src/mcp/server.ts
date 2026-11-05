@@ -278,10 +278,16 @@ export function makeServer(binding: ServerBinding): McpServer {
             'Search these namespaces together, for example the shared and project namespaces from memory_project. Use instead of namespace. Other projects are only searched when explicitly included.',
           ),
         limit: z.number().int().min(1).max(20).optional().describe('Max results (default 5).'),
+        include_inactive: z
+          .boolean()
+          .optional()
+          .describe('Also rank superseded, deleted and expired entries (hidden by default).'),
       },
     },
-    async ({ query, namespace, limit, namespaces }) =>
-      run('memory_recall', t => t.recall(query, namespace, limit, namespaces)),
+    async ({ query, namespace, limit, namespaces, include_inactive }) =>
+      run('memory_recall', t =>
+        t.recall(query, namespace, limit, namespaces, { includeInactive: include_inactive }),
+      ),
   )
 
   server.registerTool(

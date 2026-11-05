@@ -127,8 +127,27 @@ withheld, because that is the same lexical shape as an unanswerable question
 and no floor tells them apart. `stale` moved the wrong way for a reason the
 fixture makes visible: the newer note of each update pair carries an extra
 "replaces the earlier note" sentence, and a length-normalizing ranker prefers
-the shorter, older one; both rankers are recency-blind, and the tiebreak on
-`updatedAt` that fixes this is a later change.
+the shorter, older one; both rankers were recency-blind.
+
+Measured with the recency tiebreak (generator 2: each note of an update pair
+carries an `updated:` stamp, which the lexical ranker never reads, so its
+numbers on this corpus are the row above to the fourth decimal):
+
+```
+system        R@1     R@5    R@10     MRR  nDCG@10   stale    absP    absR   false  bytes/q  ms/q
+tfidf      0.5556  0.6167  0.6389  0.5817   0.5955  0.0250  0.1702  0.3200  0.2829     6645  29.6
+```
+
+After the floor, the hits scoring within 5% of the top one are reordered by
+`updated`, newest first (`RECENCY_BAND` in `src/mcp/relevance.ts`). That is
+the update-pair shape exactly, so `stale` fell from 0.525 to 0.025 and R@1,
+MRR, nDCG and the false-answer rate moved with it; R@5 and R@10 and the
+abstention columns did not move, because the band changes the order of what
+clears the floor and never what clears it. Notes stamped `status:
+superseded` or `deleted`, or past their `expires:` date, are not candidates
+unless the caller passes `include_inactive`; the fixture stamps none, so
+that exclusion is measured by the pinned postgres pair in
+`tests/recall-regression.test.ts` rather than here.
 
 **The preregistered rule.** `tests/bench/recall-baseline.json` holds the
 numbers the committed ranker produces for the committed seed and corpus
