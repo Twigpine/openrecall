@@ -307,8 +307,14 @@ describe('near-duplicate', () => {
   })
 
   test('the corpus contradiction pair, with the supersede phrased from the newer note', () => {
+    // The corpus ships the old note already stamped superseded (a ranking
+    // fixture); this case models the moment BEFORE anyone superseded it, so
+    // the stamp is removed from the copy under test.
     const restamp = (key: string, updated: string) =>
-      CORPUS[key].replace('---\n', `---\ntype: project\nupdated: ${updated}\n`)
+      CORPUS[key]
+        .replace(/^status: superseded\n/m, '')
+        .replace(/^superseded_by: .*\n/m, '')
+        .replace('---\n', `---\ntype: project\nupdated: ${updated}\n`)
     const entries = withIndex({
       ...BASE,
       'project/postgres-old.md': restamp('project/postgres-old.md', daysAgo(40)),
@@ -322,6 +328,16 @@ describe('near-duplicate', () => {
     expect(f.suggest).toContain(
       'memory_save "project/postgres-new.md" mode=supersede with supersedes: "project/postgres-old.md"',
     )
+  })
+
+  test('a pair already resolved by supersession is not reported again', () => {
+    // As shipped in the corpus: the old note carries status: superseded.
+    const entries = withIndex({
+      ...BASE,
+      'project/postgres-old.md': CORPUS['project/postgres-old.md'],
+      'project/postgres-new.md': CORPUS['project/postgres-new.md'],
+    })
+    expect(of(run(entries), 'near-duplicate')).toEqual([])
   })
 
   test('a key twin with different text is reported as such', () => {
