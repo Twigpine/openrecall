@@ -21,7 +21,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { mkdir, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 import { flattenServerText } from '../client/index.ts'
 import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
@@ -40,6 +40,7 @@ import {
 import {
   formatSyncReport,
   listMemoryFiles,
+  readMemoryFile,
   runSync,
   type SyncReport,
   type WatchHandle,
@@ -155,7 +156,22 @@ async function cmdPush(dir: string, namespace?: string) {
     throw new Error(`cannot read ${dir} completely; refusing to push an incomplete snapshot`)
   }
   const entries: Record<string, string> = {}
-  for (const f of listing.files) entries[f.key] = await readFile(f.path, 'utf8')
+  for (const f of listing.files) {
+    try {
+      entries[f.key] = (await readMemoryFile(f.path)).content
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      // The walker already skipped symlinks; this catches a path replaced
+      // between the walk and the read. Refuse rather than upload content from
+      // outside the directory the operator named.
+      if (code === 'ELOOP' || code === 'ENOENT' || code === 'ENOTREG') {
+        throw new Error(
+          `${f.path} changed while reading (${code}); refusing to push an inconsistent snapshot`,
+        )
+      }
+      throw err
+    }
+  }
   const r = await client.push(ns, entries)
   const skipped = r.skipped ?? []
   const summary = [`${r.uploaded.length} uploaded`, `${r.unchanged.length} unchanged`]
@@ -256,8 +272,9 @@ async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
   // promise, so the loop runs again with content it has not seen yet.
   //
   // `--watch` only sees LOCAL filesystem events: a change made on another
-  // machine is invisible until the next local edit. Use `--interval` when the
-  // directory must also poll for remote-only changes.
+  // machine is invisible until the next local edit. Use `--watch --interval`
+  // when the directory must also poll for remote-only changes; `--interval`
+  // without `--watch` still performs just the single sync above.
   for (;;) {
     let handle: WatchHandle | undefined
     const changed = new Promise<void>(resolve => {
@@ -429,10 +446,11 @@ function usage(code = 1): never {
       '                                       [--dry-run] [--prefer local|remote] [--prune] [--watch]\n' +
       '                                       [--interval <sec>]   bidirectional: newest write per\n' +
       '                                       entry wins; --watch sees local changes only, while\n' +
-      '                                       --interval also polls for remote ones; --prefer\n' +
-      '                                       resolves conflicts and remote deletions; --prune\n' +
-      '                                       deletes remote entries whose local file a previous\n' +
-      '                                       sync of this pair saw unchanged\n' +
+      '                                       --watch --interval <sec> also polls for remote ones;\n' +
+      '                                       --interval alone still performs one sync and exits;\n' +
+      '                                       --prefer resolves conflicts and remote deletions;\n' +
+      '                                       --prune deletes remote entries whose local file a\n' +
+      '                                       previous sync of this pair saw unchanged\n' +
       '  openrecall mcp                       run the stdio MCP server (memory tools)\n' +
       '  openrecall serve                     run the openrecall server (needs Bun)',
   )

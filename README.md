@@ -179,6 +179,7 @@ OpenClaude memory directories — change both sides at different times.
 openrecall sync ./memories                 # bidirectional, one round trip
 openrecall sync ./memories --dry-run       # plan and report, write nothing
 openrecall sync ./memories --watch         # re-sync whenever the directory settles
+openrecall sync ./memories --watch --interval 30  # poll every 30s for local and remote changes
 openrecall sync ./memories --prune         # also delete remote entries whose local
                                            # file a previous sync of this pair saw
 ```
@@ -206,10 +207,13 @@ re-uploaded: the local file is kept and the report names it. Re-run with
 them to the namespace.
 
 `--watch` re-runs the sync when the directory settles (debounced); on platforms
-without recursive watching it falls back to polling, and `--interval <sec>`
-polls at a fixed cadence instead. A watcher only sees **local** filesystem
-events, so a change made on another machine is not noticed until the next local
-edit; use `--interval` when the directory must also poll for remote changes.
+without recursive watching it falls back to polling. `--interval <sec>` only
+takes effect together with `--watch`: `--watch --interval <sec>` polls at that
+fixed cadence, while `--interval` on its own still performs one sync and exits.
+A watcher only sees **local** filesystem events, so a change made on another
+machine is not noticed until the next local edit; use `--watch --interval <sec>`
+when the directory must also poll for remote changes.
+
 `sync` also fixes an old asymmetry: `push`
 used to skip `.md` files more than three levels deep while `pull` wrote them at
 any depth, so a directory synced down and pushed back silently lost its deeper

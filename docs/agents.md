@@ -148,7 +148,8 @@ other:
 
 ```bash
 openrecall sync ~/memories                 # one round trip
-openrecall sync ~/memories --watch         # watch local changes; use --interval for remote polling
+openrecall sync ~/memories --watch         # watch local changes
+openrecall sync ~/memories --watch --interval 30  # also poll for remote changes
 openrecall sync ~/memories --prune --watch # also propagate local deletions
 ```
 
@@ -160,8 +161,9 @@ file AND the remote hash still matches that recording, so another agent's
 concurrent saves are downloaded, never destroyed. A remote deletion is
 reported and the local file is kept; `--prefer remote` applies the deletion
 while `--prefer local` restores the file. `--watch` reacts only to local
-filesystem events; use `--interval <sec>` when you also need periodic polling
-for remote-only changes. See
+filesystem events; use `--watch --interval <sec>` when you also need periodic
+polling for remote-only changes (`--interval` alone performs one sync and
+exits). See
 [README](../README.md#mirror-a-memory-directory) for the full contract.
 
 ## Troubleshooting

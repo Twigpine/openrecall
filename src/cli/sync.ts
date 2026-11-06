@@ -35,6 +35,7 @@
  * to serve.
  */
 
+import { randomUUID } from 'node:crypto'
 import { constants, watch as fsWatch } from 'node:fs'
 import {
   lstat,
@@ -43,6 +44,7 @@ import {
   readdir,
   readFile,
   realpath,
+  rename,
   rm,
   stat,
   utimes,
@@ -52,6 +54,7 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { OpenRecallClient } from '../../client/index.ts'
 import { flattenServerText } from '../../client/index.ts'
 import { sha256Hex } from '../hash.ts'
+import { withDirLock } from './local.ts'
 
 /** Only markdown files mirror, matching what `push` uploads and agents keep. */
 const MEMORY_EXTENSION = '.md'
@@ -89,6 +92,11 @@ export type MemoryListing = { files: MemoryFile[]; complete: boolean }
  * synced down and pushed back silently DROPPED its deeper files — the
  * asymmetry a mirror cannot have. Entry keys the server accepts are what
  * decides depth, not a walker's constant.
+ *
+ * Symlinks are deliberately not memory files. A link inside the mirror can
+ * point anywhere on disk, so following one would upload or re-encrypt content
+ * the caller never named as part of this directory. `lstat` also keeps the
+ * listing from following a link to decide whether the path is a file.
  */
 export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
   let entries: string[]
@@ -104,10 +112,12 @@ export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
     if (!rel.endsWith(MEMORY_EXTENSION)) continue
     const path = join(dir, rel)
     // A directory named `notes.md` passes the suffix test. It is not an entry,
-    // and reading it would fail with EISDIR and abort the whole run.
-    const info = await stat(path).catch(() => null)
+    // and reading it would fail with EISDIR and abort the whole run. `lstat`
+    // (rather than `stat`) also refuses a symlink without resolving its target.
+    const info = await lstat(path).catch(() => null)
     if (!info?.isFile()) {
-      // A vanished file makes the listing incomplete; a directory does not.
+      // A vanished file makes the listing incomplete; a directory or symlink
+      // does not — neither one ever was a memory file.
       if (info === null) complete = false
       continue
     }
@@ -116,6 +126,34 @@ export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
   return {
     files: files.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     complete,
+  }
+}
+
+/** A memory file's text and the mtime observed before it was read. */
+export type MemoryFileContents = { content: string; mtimeMs: number }
+
+/**
+ * Read one memory file without following a symlink.
+ *
+ * The listing rejects symlinks, but a path can be replaced between that
+ * `lstat` and this read. `O_NOFOLLOW` makes the open fail instead of reading
+ * through a link created after validation, and the descriptor's own `stat`
+ * proves the opened object is a regular file rather than a directory or a
+ * special file. A path that is no longer a regular file throws with code
+ * `ENOTREG` so callers can treat it as a changed snapshot.
+ */
+export async function readMemoryFile(path: string): Promise<MemoryFileContents> {
+  const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+  try {
+    const info = await handle.stat()
+    if (!info.isFile()) {
+      throw Object.assign(new Error(`${path} is not a regular file`), {
+        code: 'ENOTREG',
+      })
+    }
+    return { content: await handle.readFile('utf8'), mtimeMs: info.mtimeMs }
+  } finally {
+    await handle.close()
   }
 }
 
@@ -453,10 +491,51 @@ async function readSyncState(path: string): Promise<SyncStateFile> {
   }
 }
 
-/** Persist the pair state with owner-only permissions. */
+/**
+ * Persist the pair state with owner-only permissions.
+ *
+ * The complete JSON goes to a temporary file in the target's own directory
+ * first, then replaces the target with `rename`. A concurrent reader therefore
+ * sees either the previous complete file or the new complete file, never a
+ * truncated write that `readSyncState` would mistake for an empty state.
+ */
 async function writeSyncState(path: string, state: SyncStateFile): Promise<void> {
+  const dir = dirname(path)
+  await mkdir(dir, { recursive: true, mode: 0o700 })
+  const temp = join(dir, `.${randomUUID()}.sync-state.tmp`)
+  try {
+    await writeFile(temp, `${JSON.stringify(state, null, 2)}\n`, {
+      mode: 0o600,
+      flag: 'wx',
+    })
+    await rename(temp, path)
+  } catch (err) {
+    await rm(temp, { force: true })
+    throw err
+  }
+}
+
+/**
+ * Merge one pair's baselines into the newest state file under a cross-process
+ * lock.
+ *
+ * The state read that produces the merged file happens only after the lock is
+ * held. Two concurrent syncs of different directories therefore update
+ * different pairs without either one writing a stale whole-file snapshot over
+ * the other's baseline. The lock is only held for this short local transaction,
+ * not across the network work of a sync.
+ */
+async function updateSyncState(
+  path: string,
+  stateKey: string,
+  update: (pair: SyncBaselines) => SyncBaselines,
+): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  await writeFile(path, `${JSON.stringify(state, null, 2)}\n`, { mode: 0o600 })
+  await withDirLock(`${path}.lock`, async () => {
+    const state = await readSyncState(path)
+    state.pairs[stateKey] = update(state.pairs[stateKey] ?? {})
+    await writeSyncState(path, state)
+  })
 }
 
 // ─── Running a sync ──────────────────────────────────────────────────────
@@ -515,18 +594,31 @@ export async function runSync(
   // conflict ordering. A failed listing still yields the files it found, but
   // `complete` tells pruning not to treat the absence as local deletions.
   const listing = await listMemoryFiles(root)
+  let complete = listing.complete
   const local: Record<string, LocalEntry> = {}
   const contents: Record<string, string> = {}
   for (const f of listing.files) {
-    // Stat first: an edit after this point changes the mtime the download
-    // guard compares, so pairing an old read with a new mtime would let a
-    // download overwrite that edit.
-    const mtimeMs = (await stat(f.path)).mtimeMs
-    const content = await readFile(f.path, 'utf8')
-    contents[f.key] = content
+    // Open without following a symlink and take the mtime from that same
+    // descriptor before reading. A link substituted after the walk therefore
+    // cannot turn this read into an upload from outside the mirror, and a
+    // later edit still changes the mtime the download guard compares.
+    let read: MemoryFileContents
+    try {
+      read = await readMemoryFile(f.path)
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENOTREG') {
+        // The path changed into something this mirror does not carry after the
+        // walk. Do not upload it, and do not let --prune treat it as deleted.
+        complete = false
+        continue
+      }
+      throw err
+    }
+    contents[f.key] = read.content
     local[f.key] = {
-      hash: client.ciphertextHashOf(ns, f.key, content),
-      mtimeMs,
+      hash: client.ciphertextHashOf(ns, f.key, read.content),
+      mtimeMs: read.mtimeMs,
     }
   }
 
@@ -548,7 +640,7 @@ export async function runSync(
     remote,
     ...(opts.prefer ? { prefer: opts.prefer } : {}),
     ...(baselines ? { baselines } : {}),
-    prune: opts.prune === true && listing.complete,
+    prune: opts.prune === true && complete,
   })
 
   const report: SyncReport = {
@@ -584,6 +676,8 @@ export async function runSync(
     (a): a is Extract<SyncAction, { kind: 'download' }> => a.kind === 'download',
   )
   const wanted = new Set(downloads.map(a => a.key))
+  /** Ciphertext hash of the body actually written, not the metadata snapshot. */
+  const downloadedHashes = new Map<string, string>()
   let bodies: Record<string, string> | undefined
   if (wanted.size >= PULL_WHEN_DOWNLOADS_AT_LEAST) {
     // observe: false keeps the base armed by metadata; a pull in the middle of
@@ -649,6 +743,12 @@ export async function runSync(
       const when = new Date(a.remoteAt)
       await utimes(dest, when, when).catch(() => {})
     }
+
+    // Record the hash of what was actually written. A remote writer can replace
+    // the entry between the metadata read and this fetch, so the plan's remote
+    // hash may already be stale; using the write's own hash keeps the NEXT
+    // local edit a one-sided change instead of a guessed conflict.
+    downloadedHashes.set(a.key, client.ciphertextHashOf(ns, a.key, plaintext))
     report.downloaded.push({ key: a.key, reason: a.reason })
   }
 
@@ -687,6 +787,20 @@ export async function runSync(
       report.remoteDeleted.push(a.key)
       continue
     }
+    // The removal decision used the snapshot from the start of the sync. Check
+    // immediately before unlinking: an edit that landed while the sync was
+    // fetching must not be deleted. `lstat` also treats a substituted symlink
+    // as a local change instead of following it.
+    const planned = Object.hasOwn(local, a.key) ? local[a.key] : undefined
+    const current = await lstat(dest).catch(() => null)
+    if (
+      planned !== undefined &&
+      current !== null &&
+      (!current.isFile() || current.mtimeMs !== planned.mtimeMs)
+    ) {
+      report.remoteDeleted.push(a.key)
+      continue
+    }
     await rm(dest, { force: true })
     report.removedLocal.push(a.key)
   }
@@ -701,30 +815,28 @@ export async function runSync(
   // lets the NEXT sync tell a one-sided change from clock skew, and what makes
   // it safe to prune only a remote entry that has not changed since.
   if (opts.statePath) {
-    const after = await readSyncState(opts.statePath)
-    const oldPair = after.pairs[stateKey] ?? baselines ?? {}
-    const nextPair: SyncBaselines = {}
-
     const uploaded = new Set(report.uploaded.map(u => u.key))
-    const downloaded = new Set(report.downloaded.map(d => d.key))
     const unchanged = new Set(report.unchanged)
     const removedLocal = new Set(report.removedLocal)
     const pruned = new Set(report.pruned)
 
-    for (const key of Object.keys(local)) {
-      if (downloaded.has(key)) nextPair[key] = remote[key]?.hash ?? null
-      else if (uploaded.has(key) || unchanged.has(key)) nextPair[key] = local[key]?.hash ?? null
-      else if (removedLocal.has(key)) continue
-      else if (Object.hasOwn(oldPair, key)) nextPair[key] = oldPair[key] ?? null
-    }
-    for (const key of Object.keys(remote)) {
-      if (Object.hasOwn(local, key) || pruned.has(key)) continue
-      if (downloaded.has(key)) nextPair[key] = remote[key]?.hash ?? null
-      else if (Object.hasOwn(oldPair, key)) nextPair[key] = oldPair[key] ?? null
-    }
-
-    after.pairs[stateKey] = nextPair
-    await writeSyncState(opts.statePath, after)
+    // The update is applied to the latest state under a lock, so a concurrent
+    // sync of another pair keeps the baseline it recorded while this one ran.
+    await updateSyncState(opts.statePath, stateKey, oldPair => {
+      const nextPair: SyncBaselines = {}
+      for (const key of Object.keys(local)) {
+        if (downloadedHashes.has(key)) nextPair[key] = downloadedHashes.get(key) ?? null
+        else if (uploaded.has(key) || unchanged.has(key)) nextPair[key] = local[key]?.hash ?? null
+        else if (removedLocal.has(key)) continue
+        else if (Object.hasOwn(oldPair, key)) nextPair[key] = oldPair[key] ?? null
+      }
+      for (const key of Object.keys(remote)) {
+        if (Object.hasOwn(local, key) || pruned.has(key)) continue
+        if (downloadedHashes.has(key)) nextPair[key] = downloadedHashes.get(key) ?? null
+        else if (Object.hasOwn(oldPair, key)) nextPair[key] = oldPair[key] ?? null
+      }
+      return nextPair
+    })
   }
 
   return report

@@ -56,6 +56,7 @@ function touch(path: string, mtimeMs?: number): void {
 let runSync: typeof import('../src/cli/sync.ts').runSync
 let planSync: typeof import('../src/cli/sync.ts').planSync
 let listMemoryFiles: typeof import('../src/cli/sync.ts').listMemoryFiles
+let readMemoryFile: typeof import('../src/cli/sync.ts').readMemoryFile
 let walkMemoryFiles: typeof import('../src/cli/sync.ts').walkMemoryFiles
 let safeJoin: typeof import('../src/cli/sync.ts').safeJoin
 let makeDebouncer: typeof import('../src/cli/sync.ts').makeDebouncer
@@ -69,6 +70,7 @@ beforeAll(async () => {
     runSync,
     planSync,
     listMemoryFiles,
+    readMemoryFile,
     walkMemoryFiles,
     safeJoin,
     makeDebouncer,
@@ -122,6 +124,20 @@ describe('memory file listing', () => {
     mkdirSync(join(dir, 'notes.md'))
     put(dir, 'real.md', 'real')
     expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
+  })
+
+  test('a symlink is not a memory file, even when it points at readable text', async () => {
+    const dir = tempDir()
+    const outside = join(tempDir(), 'outside.md')
+    writeFileSync(outside, 'not part of this mirror')
+    symlinkSync(outside, join(dir, 'leak.md'))
+    put(dir, 'real.md', 'real')
+
+    expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
+    // A second line of defence: even a direct read refuses the link instead of
+    // following it to the outside file.
+    await expect(readMemoryFile(join(dir, 'leak.md'))).rejects.toThrow()
+    expect(readFileSync(outside, 'utf8')).toBe('not part of this mirror')
   })
 
   test('an unreadable or missing directory is empty, not an error', async () => {
@@ -651,6 +667,84 @@ describe('runSync conflict resolution, by baseline and real timestamps', () => {
     expect((await (await realClient()).pull(ns)).entries['note.md']).toBe('remote v2')
   })
 
+  test('a download records the hash of the body it wrote, not the metadata snapshot', async () => {
+    const ns = 'user:sync-download-hash-race'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'v2' })
+
+    let releaseEntry: (() => void) | undefined
+    const entryGate = new Promise<void>(resolve => {
+      releaseEntry = resolve
+    })
+    let entryStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      entryStarted = resolve
+    })
+    const delayed = new Proxy(client, {
+      /** Hold the entry read open until a newer remote body has landed. */
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'entry') {
+          return async (...args: unknown[]) => {
+            entryStarted?.()
+            await entryGate
+            return (value as (...a: unknown[]) => Promise<string>).call(target, ...args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as InstanceType<typeof OpenRecallClient>
+
+    const run = runSync(dir, delayed, { namespace: ns, statePath: state })
+    await started
+    await other.push(ns, { 'note.md': 'v3 written mid-fetch' })
+    releaseEntry?.()
+    await run
+
+    // The file got v3 even though metadata only knew v2. The baseline must
+    // therefore be v3's hash; otherwise the next local edit looks like a
+    // two-sided conflict and can lose to the server's newer timestamp.
+    const stateKey = await syncStateKeyOf(dir, ns)
+    const recorded = JSON.parse(readFileSync(state, 'utf8')) as {
+      pairs: Record<string, Record<string, string | null>>
+    }
+    expect(recorded.pairs[stateKey]?.['note.md']).toBe(
+      client.ciphertextHashOf(ns, 'note.md', 'v3 written mid-fetch'),
+    )
+    expect(await readFileUtf8(dir, 'note.md')).toBe('v3 written mid-fetch')
+
+    // A later local edit is one-sided against that baseline, so it uploads
+    // even with an older mtime that a timestamp tie-break would have lost.
+    put(dir, 'note.md', 'v4 local edit', Date.parse('2001-01-01T00:00:00.000Z'))
+    const next = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(next.uploaded).toEqual([{ key: 'note.md', reason: 'local-newer' }])
+    expect((await other.pull(ns)).entries['note.md']).toBe('v4 local edit')
+  })
+
+  test('a symlink in the mirror is skipped, never uploaded from outside', async () => {
+    const ns = 'user:sync-symlink-upload'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const outside = join(tempDir(), 'outside.md')
+    writeFileSync(outside, 'outside secret')
+    symlinkSync(outside, join(dir, 'leak.md'))
+    put(dir, 'real.md', 'inside')
+
+    const client = await realClient()
+    const r = await runSync(dir, client, { namespace: ns, statePath: state })
+    expect(r.uploaded).toEqual([{ key: 'real.md', reason: 'remote-missing' }])
+
+    const entries = (await (await realClient()).pull(ns)).entries
+    expect(entries).toEqual({ 'real.md': 'inside' })
+    expect(readFileSync(outside, 'utf8')).toBe('outside secret')
+  })
+
   test('a downloaded symlink cannot write through to a file outside the mirror', async () => {
     const ns = 'user:sync-symlink-download'
     const dir = tempDir()
@@ -857,6 +951,106 @@ describe('runSync remote deletions', () => {
     expect(remove.removedLocal).toEqual(['gone.md'])
     expect(existsSync(join(dir, 'gone.md'))).toBe(false)
     expect(Object.keys((await other.pull(ns)).entries)).toEqual([])
+  })
+
+  test('--prefer remote keeps a file edited while the sync is in flight', async () => {
+    const ns = 'user:sync-remote-delete-edit'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const path = put(dir, 'gone.md', 'local copy')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.delete(ns, 'gone.md')
+
+    let releaseMetadata: (() => void) | undefined
+    const metadataGate = new Promise<void>(resolve => {
+      releaseMetadata = resolve
+    })
+    let metadataStarted: (() => void) | undefined
+    const started = new Promise<void>(resolve => {
+      metadataStarted = resolve
+    })
+    const delayed = new Proxy(client, {
+      /** Hold the metadata read until the test edits the local file. */
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'metadata') {
+          return async (...args: unknown[]) => {
+            metadataStarted?.()
+            await metadataGate
+            return (value as (...a: unknown[]) => Promise<unknown>).call(target, ...args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as InstanceType<typeof OpenRecallClient>
+
+    const run = runSync(dir, delayed, {
+      namespace: ns,
+      statePath: state,
+      prefer: 'remote',
+    })
+    await started
+    // The local snapshot was taken before the metadata read; this edit lands
+    // while that read is still in flight, so removal must recheck before rm.
+    put(dir, 'gone.md', 'edited during the sync', Date.now() + 86_400_000)
+    releaseMetadata?.()
+    const r = await run
+
+    expect(r.removedLocal).toEqual([])
+    expect(r.remoteDeleted).toEqual(['gone.md'])
+    expect(readFileSync(path, 'utf8')).toBe('edited during the sync')
+  })
+})
+
+describe('sync state under concurrent syncs', () => {
+  test('different pairs share one state file without losing baselines', async () => {
+    const state = join(tempDir(), 'state.json')
+    const cases = Array.from({ length: 8 }, (_, i) => {
+      const dir = tempDir()
+      const ns = `user:sync-state-race-${i}`
+      put(dir, `note-${i}.md`, `content ${i}`)
+      return { dir, ns, key: `note-${i}.md` }
+    })
+
+    // Read the file while the syncs replace it. A non-atomic in-place writer
+    // can be caught mid-truncate here, producing invalid JSON.
+    let polling = true
+    const reader = (async () => {
+      while (polling) {
+        try {
+          JSON.parse(readFileSync(state, 'utf8'))
+        } catch (err) {
+          if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err
+        }
+        await new Promise(resolve => setTimeout(resolve, 1))
+      }
+    })()
+
+    try {
+      await Promise.all(
+        cases.map(async ({ dir, ns }) => {
+          const client = await realClient()
+          await runSync(dir, client, { namespace: ns, statePath: state })
+        }),
+      )
+    } finally {
+      polling = false
+      await reader
+    }
+
+    // Every pair's baseline survives: a final write that snapshotted the state
+    // before another pair finished would erase that pair here.
+    const recorded = JSON.parse(readFileSync(state, 'utf8')) as {
+      pairs: Record<string, Record<string, string | null>>
+    }
+    for (const { dir, ns, key } of cases) {
+      const stateKey = await syncStateKeyOf(dir, ns)
+      expect(recorded.pairs[stateKey]?.[key]).toMatch(/^sha256:/)
+    }
+    expect(existsSync(`${state}.lock`)).toBe(false)
   })
 })
 
