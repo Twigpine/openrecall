@@ -20,7 +20,13 @@ import {
 } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { validateNamespace } from '../namespace.ts'
-import { rankEntriesDetailed, tokenize, tokenizeAll } from './relevance.ts'
+import {
+  type IndexDoc,
+  RecallIndex,
+  stripFrontmatterText,
+  tokenize,
+  tokenizeAll,
+} from './relevance.ts'
 
 export type ToolResult = { text: string; isError?: boolean; timings?: Timings }
 
@@ -384,23 +390,6 @@ const MIN_REGION_CHARS = 80
 type Block = { text: string; heading: string; fence: boolean }
 
 /**
- * Drop YAML-ish frontmatter before the body is split into regions. It is
- * metadata the ranker already reads through `description:`, and returning it
- * alongside a body would spend the budget on the one part of an entry that
- * never answers the question.
- *
- * So frontmatter is never a region of an entry that HAS a body. It is not
- * unreachable, though: when the stripped body yields no block at all, the
- * fallback in `regionFor` emits the raw content, frontmatter included. That is
- * the whole entry, and an entry whose only content is its own description has
- * nothing else to show.
- */
-function stripFrontmatter(content: string): string {
-  const m = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(content)
-  return m ? content.slice(m[0].length) : content
-}
-
-/**
  * Split a body into candidate regions: blank-line-separated paragraphs, each
  * tagged with the heading it sits under. A fenced block is one atomic block
  * even when it contains blank lines, so a region boundary can never fall inside
@@ -526,7 +515,14 @@ function regionFor(
   query: string,
   cap: number,
 ): { text: string; partial: boolean } {
-  const body = stripFrontmatter(content).trim()
+  // Frontmatter is dropped before the body is split into regions. It is
+  // metadata the ranker reads as fields of its own (`name:`, `description:`),
+  // and returning it alongside a body would spend the budget on the one part
+  // of an entry that never answers the question. It is not unreachable: when
+  // the stripped body yields no block at all, the fallback below emits the raw
+  // content, frontmatter included, because an entry whose only content is its
+  // own description has nothing else to show.
+  const body = stripFrontmatterText(content).trim()
   const blocks = blocksOf(body)
   // No block at all means the entry is frontmatter-only, or whitespace, or
   // anything else the splitter finds nothing in. Emitting '' here rendered the
@@ -567,8 +563,74 @@ function regionFor(
 
 export type MemoryTools = ReturnType<typeof makeTools>
 
+/**
+ * FNV-1a over a string's UTF-16 code units, as eight hex digits. A cheap,
+ * stable digest for the recall index's fingerprint when the client has no
+ * ciphertext hash to offer: it only has to tell "this entry changed since the
+ * last recall" from "it did not", within one process, and it is paired with
+ * the entry's timestamp and length so a collision would need all three.
+ */
+function fnv1a(s: string): string {
+  let h = 0x811c9dc5
+  for (let i = 0; i < s.length; i++) {
+    h ^= s.charCodeAt(i)
+    h = Math.imul(h, 0x01000193) >>> 0
+  }
+  return h.toString(16).padStart(8, '0')
+}
+
+/**
+ * Namespaces whose recall index is kept warm. Eight is the most one recall
+ * may span; sixteen leaves room for an agent working two projects at once
+ * without the index of either being rebuilt on every switch.
+ */
+const MAX_INDEXED_NAMESPACES = 16
+
 export function makeTools(client: MemoryClient, defaultNamespace: string) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
+
+  /**
+   * One recall index per namespace, built the first time the namespace is
+   * recalled and brought up to date on every recall after that from the
+   * fingerprint of each pulled entry, so an unchanged entry is never
+   * re-tokenized. Plaintext lives here only as long as the process does, which
+   * is the same custody the decrypted pull already has. Least recently
+   * recalled is dropped past the cap, as `lruSet` does in the client.
+   */
+  const indexes = new Map<string, RecallIndex>()
+  function indexFor(ns: string): RecallIndex {
+    const idx = indexes.get(ns) ?? new RecallIndex()
+    indexes.delete(ns)
+    indexes.set(ns, idx)
+    while (indexes.size > MAX_INDEXED_NAMESPACES) {
+      const oldest = indexes.keys().next()
+      if (oldest.done) break
+      indexes.delete(oldest.value)
+    }
+    return idx
+  }
+
+  /**
+   * The pulled entries of one namespace as index documents. The fingerprint
+   * is the server's ciphertext hash when the client carries one (a later
+   * client does), else timestamp, length and a digest of the plaintext. The
+   * namespace is stamped on a document only when the caller named namespaces,
+   * because the `### key (ns)` header in the output keys off its presence.
+   */
+  function docsOf(r: PullResult, source: string, labelled: boolean): IndexDoc[] {
+    const hashes = r.hashes
+    return Object.entries(r.entries).map(([key, content]) => {
+      const updatedAt = r.updatedAt[key]
+      return {
+        id: key,
+        key,
+        ...(labelled ? { namespace: source } : {}),
+        content,
+        ...(updatedAt === undefined ? {} : { updatedAt }),
+        fingerprint: hashes?.[key] ?? `${updatedAt ?? ''}|${content.length}|${fnv1a(content)}`,
+      }
+    })
+  }
 
   /**
    * The read `get` used before the single-entry view existed, kept for a
@@ -645,22 +707,17 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           // agent needs first, and the lead line says so when it happens.
           // `get` and `search` do not allow it, nor does any write.
           let staleMs: number | null = null
-          const corpora = await Promise.all(
+          const pulled = await Promise.all(
             sources.map(async source => {
               try {
-                const { entries, version, served } = await pullTimed(timer, source, {
-                  allowStale: true,
-                })
-                if (served?.source === 'mirror') staleMs = Math.max(staleMs ?? 0, served.staleMs)
-                if (Object.keys(entries).length === 0 && served?.source !== 'mirror') {
-                  const lost = await lostEntries(client, source, version)
+                const r = await pullTimed(timer, source, { allowStale: true })
+                if (r.served?.source === 'mirror')
+                  staleMs = Math.max(staleMs ?? 0, r.served.staleMs)
+                if (Object.keys(r.entries).length === 0 && r.served?.source !== 'mirror') {
+                  const lost = await lostEntries(client, source, r.version)
                   if (lost) throw new Rendered(lost)
                 }
-                return Object.entries(entries).map(([key, content]) => ({
-                  key,
-                  content,
-                  ...(namespaces ? { namespace: source } : {}),
-                }))
+                return { source, entries: r.entries, docs: docsOf(r, source, !!namespaces) }
               } catch (err) {
                 if (err instanceof Rendered) throw err
                 const d = denial(
@@ -676,15 +733,32 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               }
             }),
           )
-          const entries = corpora.flat()
-          if (entries.length === 0) return ok(`(no memory stored in ${ns} yet)`)
+          if (pulled.every(p => p.docs.length === 0)) return ok(`(no memory stored in ${ns} yet)`)
+          // The region shown for a hit is cut from what this call pulled,
+          // never from the index's copy, so what the caller reads is what the
+          // server served this time.
+          const fresh = new Map(pulled.map(p => [p.source, p.entries]))
+          const contentOf = (key: string, source: string) => {
+            const entries = fresh.get(source)
+            return entries && Object.hasOwn(entries, key) ? entries[key] : undefined
+          }
           const {
             results: ranked,
             searched,
             belowFloor,
             trimmedByLimit,
             reason,
-          } = await timer.time('rank', () => rankEntriesDetailed(query, entries, limit))
+          } = await timer.time('rank', () =>
+            RecallIndex.rank(
+              pulled.map(p => {
+                const idx = indexFor(p.source)
+                idx.sync(p.docs)
+                return idx
+              }),
+              query,
+              limit,
+            ),
+          )
           if (ranked.length === 0 && searched === 0) {
             // Entries exist but none of them is a ranking candidate, which today
             // means the namespace holds nothing but its MEMORY.md index. "0
@@ -783,7 +857,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
                 omitted++
                 continue
               }
-              const region = regionFor(r.content, query, allowed)
+              const region = regionFor(
+                contentOf(r.key, r.namespace ?? sources[0]) ?? r.content,
+                query,
+                allowed,
+              )
               const part = header + region.text + (region.partial ? pointer : '')
               budget -= joiner + part.length
               parts.push(part)

@@ -1050,7 +1050,7 @@ function corpusFreeIdentifiers(raw: string): string[] {
  * a corpus edit is exactly the diff a reviewer should read as content rather
  * than as code.
  */
-function corpusRisks(raw: string): string[] {
+function corpusRisks(raw: string, allowed: readonly string[] = CORPUS_IDENTIFIERS): string[] {
   const out: string[] = []
   const code = stripToCode(raw)
   // Comments removed, string bodies kept: the sweep below needs to read inside
@@ -1059,8 +1059,7 @@ function corpusRisks(raw: string): string[] {
 
   const declared = declaredNames(code)
   for (const n of [...new Set(freeIdentifiers(code))].sort())
-    if (!declared.has(n) && !CORPUS_IDENTIFIERS.includes(n))
-      out.push(`names unvetted identifier \`${n}\``)
+    if (!declared.has(n) && !allowed.includes(n)) out.push(`names unvetted identifier \`${n}\``)
 
   const properties = [
     ...[...code.matchAll(/\.\s*([A-Za-z_$][\w$]*)/g)].map(m => m[1]),
@@ -1239,6 +1238,53 @@ describe('corpus provenance', () => {
       m => m[1],
     )
     expect(declared).toEqual([])
+  })
+})
+
+/**
+ * Globals the bench fixture generator may name, pinned exactly like
+ * CORPUS_IDENTIFIERS. `Math` is here for `Math.imul` in the seeded generator;
+ * it reaches no capability, and the banned-property sweep still applies to
+ * it. Everything else the module needs it declares itself.
+ */
+const FIXTURE_IDENTIFIERS = ['Math', 'Record', 'Set', 'String']
+
+/**
+ * The fixture's reproducibility payload: every export plus one full
+ * 2,000-entry generation, so two subprocesses must agree on the corpus bytes
+ * and the question list and not only on the constants.
+ */
+const fixtureProbe = (abs: string) => `
+const m = await import(${JSON.stringify(abs)})
+const norm = v =>
+  v instanceof Set ? { set: [...v] } : typeof v === 'function' ? { fn: String(v) } : v
+const payload = Object.keys(m).sort().map(k => [k, norm(m[k])])
+payload.push(['fixture(1, 2000)', m.fixture(1, 2000)])
+process.stdout.write(JSON.stringify(payload))
+`
+
+describe('bench fixture provenance', () => {
+  // Same rules as the corpus module, for the same reason: the recall bench
+  // generates a corpus from a seed, and the only way the numbers it produces
+  // can mean anything is if nothing about the machine it runs on reaches
+  // them. A generator that read a path, an env var or a clock would be a
+  // generator whose baseline nobody else could reproduce.
+  const FIXTURE_MODULE = join(REPO_ROOT, 'tests/bench/recall-fixture.ts')
+
+  test('the fixture module names nothing it does not declare, and loads nothing', () => {
+    const raw = readFileSync(FIXTURE_MODULE, 'utf8')
+    expect(corpusRisks(raw, FIXTURE_IDENTIFIERS)).toEqual([])
+    expect(corpusFreeIdentifiers(raw)).toEqual(FIXTURE_IDENTIFIERS)
+  })
+
+  test('the fixture module generates the same bytes under a different cwd and environment', () => {
+    const { risks, out } = reproducibility(fixtureProbe(FIXTURE_MODULE))
+    // Non-vacuous: the payload carries a whole 2,000-entry corpus.
+    expect(out.length).toBeGreaterThan(500_000)
+    expect(out).toContain('MEMORY.md')
+    expect(out).toContain('"kind":"paraphrase"')
+    expect(out).toContain('GENERATOR_VERSION')
+    expect(risks).toEqual([])
   })
 })
 
