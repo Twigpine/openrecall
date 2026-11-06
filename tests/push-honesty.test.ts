@@ -243,10 +243,14 @@ describe('openrecall push reports rejected entries', () => {
     const dir = join(home, 'memories')
     const pulled = join(home, 'pulled')
     const outside = join(home, 'outside.md')
+    const outsideDir = join(home, 'outside-dir')
     mkdirSync(dir)
+    mkdirSync(outsideDir)
     writeFileSync(join(dir, 'real.md'), 'inside the mirror')
     writeFileSync(outside, 'outside secret')
+    writeFileSync(join(outsideDir, 'nested.md'), 'nested outside secret')
     symlinkSync(outside, join(dir, 'leak.md'))
+    symlinkSync(outsideDir, join(dir, 'linkdir'))
     const env = { ...process.env } as Record<string, string | undefined>
     env.OPENRECALL_HOME = home
     env.OPENRECALL_PASSPHRASE = 'test-passphrase'
@@ -270,7 +274,9 @@ describe('openrecall push reports rejected entries', () => {
       expect(pull.exitCode).toBe(0)
       expect(readFileSync(join(pulled, 'real.md'), 'utf8')).toBe('inside the mirror')
       expect(existsSync(join(pulled, 'leak.md'))).toBe(false)
+      expect(existsSync(join(pulled, 'nested.md'))).toBe(false)
       expect(readFileSync(outside, 'utf8')).toBe('outside secret')
+      expect(readFileSync(join(outsideDir, 'nested.md'), 'utf8')).toBe('nested outside secret')
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

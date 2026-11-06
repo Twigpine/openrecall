@@ -193,6 +193,10 @@ untouched and reported, and `--prefer local` or `--prefer remote` decides. The
 state file also keeps each key's last-synced hash, so a clock-skewed local mtime
 cannot make unchanged bytes look like a new edit.
 
+Only regular `.md` files whose bytes live inside the directory are mirrored.
+Symlinked files and symlinked directories are skipped, so a link cannot pull
+content from elsewhere on disk into the namespace.
+
 `--prune` is state-guarded: an entry is deleted only when a previous sync of
 the same (directory, namespace) pair saw a local file for it AND the server's
 current ciphertext hash still matches the hash that sync recorded. A remote

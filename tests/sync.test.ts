@@ -136,8 +136,26 @@ describe('memory file listing', () => {
     expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
     // A second line of defence: even a direct read refuses the link instead of
     // following it to the outside file.
-    await expect(readMemoryFile(join(dir, 'leak.md'))).rejects.toThrow()
+    await expect(readMemoryFile(dir, join(dir, 'leak.md'))).rejects.toThrow()
     expect(readFileSync(outside, 'utf8')).toBe('not part of this mirror')
+  })
+
+  test('a symlinked parent directory cannot redirect a read outside the mirror', async () => {
+    const root = tempDir()
+    const outside = tempDir()
+    put(root, 'sub/note.md', 'inside the mirror')
+    put(outside, 'note.md', 'outside secret')
+
+    // Simulate the parent being swapped after the walk: the leaf name is still
+    // ordinary and passed `lstat`, but its directory now points elsewhere.
+    rmSync(join(root, 'sub'), { recursive: true })
+    symlinkSync(outside, join(root, 'sub'))
+
+    const err = (await readMemoryFile(root, join(root, 'sub', 'note.md')).catch(
+      e => e,
+    )) as NodeJS.ErrnoException
+    expect(err.code).toBe('EOUTSIDE')
+    expect(readFileSync(join(outside, 'note.md'), 'utf8')).toBe('outside secret')
   })
 
   test('an unreadable or missing directory is empty, not an error', async () => {

@@ -158,13 +158,19 @@ async function cmdPush(dir: string, namespace?: string) {
   const entries: Record<string, string> = {}
   for (const f of listing.files) {
     try {
-      entries[f.key] = (await readMemoryFile(f.path)).content
+      entries[f.key] = (await readMemoryFile(dir, f.path)).content
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
-      // The walker already skipped symlinks; this catches a path replaced
-      // between the walk and the read. Refuse rather than upload content from
-      // outside the directory the operator named.
-      if (code === 'ELOOP' || code === 'ENOENT' || code === 'ENOTREG') {
+      // The walker already skipped symlinks; this catches a parent or leaf
+      // replaced between the walk and the read. Refuse rather than upload
+      // content from outside the directory the operator named.
+      if (
+        code === 'ELOOP' ||
+        code === 'ENOENT' ||
+        code === 'ENOTREG' ||
+        code === 'EOUTSIDE' ||
+        code === 'ECHANGED'
+      ) {
         throw new Error(
           `${f.path} changed while reading (${code}); refusing to push an inconsistent snapshot`,
         )

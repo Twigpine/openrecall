@@ -36,7 +36,7 @@
  */
 
 import { randomUUID } from 'node:crypto'
-import { constants, watch as fsWatch } from 'node:fs'
+import { constants, type Dirent, watch as fsWatch } from 'node:fs'
 import {
   lstat,
   mkdir,
@@ -95,34 +95,39 @@ export type MemoryListing = { files: MemoryFile[]; complete: boolean }
  *
  * Symlinks are deliberately not memory files. A link inside the mirror can
  * point anywhere on disk, so following one would upload or re-encrypt content
- * the caller never named as part of this directory. `lstat` also keeps the
- * listing from following a link to decide whether the path is a file.
+ * the caller never named as part of this directory. The walk therefore checks
+ * each entry with `readdir`'s own type information (which does not follow
+ * links) and never descends into a symlinked directory.
  */
 export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
-  let entries: string[]
-  try {
-    entries = await readdir(dir, { recursive: true })
-  } catch {
-    return { files: [], complete: false }
-  }
-
   const files: MemoryFile[] = []
   let complete = true
-  for (const rel of entries) {
-    if (!rel.endsWith(MEMORY_EXTENSION)) continue
-    const path = join(dir, rel)
-    // A directory named `notes.md` passes the suffix test. It is not an entry,
-    // and reading it would fail with EISDIR and abort the whole run. `lstat`
-    // (rather than `stat`) also refuses a symlink without resolving its target.
-    const info = await lstat(path).catch(() => null)
-    if (!info?.isFile()) {
-      // A vanished file makes the listing incomplete; a directory or symlink
-      // does not — neither one ever was a memory file.
-      if (info === null) complete = false
+  const pending: { path: string; prefix: string }[] = [{ path: dir, prefix: '' }]
+
+  while (pending.length > 0) {
+    const current = pending.pop() as { path: string; prefix: string }
+    let entries: Dirent[]
+    try {
+      entries = await readdir(current.path, { withFileTypes: true })
+    } catch {
+      // A missing root and an unreadable subdirectory both mean the walk did
+      // not see the whole tree.
+      complete = false
       continue
     }
-    files.push({ key: rel.split(sep).join('/'), path })
+    for (const entry of entries) {
+      const key = current.prefix === '' ? entry.name : `${current.prefix}/${entry.name}`
+      const path = join(current.path, entry.name)
+      if (entry.isSymbolicLink()) continue
+      if (entry.isDirectory()) {
+        pending.push({ path, prefix: key })
+        continue
+      }
+      if (!entry.isFile() || !entry.name.endsWith(MEMORY_EXTENSION)) continue
+      files.push({ key, path })
+    }
   }
+
   return {
     files: files.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     complete,
@@ -132,25 +137,47 @@ export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
 /** A memory file's text and the mtime observed before it was read. */
 export type MemoryFileContents = { content: string; mtimeMs: number }
 
+/** An Error carrying a filesystem-style code callers can branch on. */
+function readError(message: string, code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(message), { code })
+}
+
 /**
- * Read one memory file without following a symlink.
+ * Read one memory file without leaving the mirror.
  *
  * The listing rejects symlinks, but a path can be replaced between that
- * `lstat` and this read. `O_NOFOLLOW` makes the open fail instead of reading
- * through a link created after validation, and the descriptor's own `stat`
- * proves the opened object is a regular file rather than a directory or a
- * special file. A path that is no longer a regular file throws with code
- * `ENOTREG` so callers can treat it as a changed snapshot.
+ * `lstat` and this read. Two checks cover the two ways a replacement can
+ * escape: `O_NOFOLLOW` refuses a link in the final component, and after the
+ * open the path is resolved again and required to stay inside `root` with the
+ * same device/inode as the opened descriptor. That second check catches a
+ * parent directory swapped for a symlink, which `O_NOFOLLOW` alone cannot see.
+ * The descriptor is never read when either check fails.
+ *
+ * Failures use filesystem-style codes: `ENOENT` when the path vanished,
+ * `EOUTSIDE` when it resolved outside the mirror, and `ECHANGED` when the
+ * path no longer names the opened file. `ENOTREG` means it is not a regular
+ * file. Callers treat each as an inconsistent snapshot rather than content to
+ * mirror.
  */
-export async function readMemoryFile(path: string): Promise<MemoryFileContents> {
+export async function readMemoryFile(root: string, path: string): Promise<MemoryFileContents> {
+  const rootReal = await realpath(root).catch(() => null)
+  if (rootReal === null) throw readError(`cannot resolve ${root}`, 'ENOENT')
+
   const handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
   try {
     const info = await handle.stat()
-    if (!info.isFile()) {
-      throw Object.assign(new Error(`${path} is not a regular file`), {
-        code: 'ENOTREG',
-      })
+    if (!info.isFile()) throw readError(`${path} is not a regular file`, 'ENOTREG')
+
+    const resolved = await realpath(path).catch(() => null)
+    if (resolved === null) throw readError(`${path} vanished while opening`, 'ENOENT')
+    if (!isInside(rootReal, resolved))
+      throw readError(`${path} resolves outside ${root}`, 'EOUTSIDE')
+
+    const resolvedInfo = await stat(resolved).catch(() => null)
+    if (resolvedInfo === null || resolvedInfo.dev !== info.dev || resolvedInfo.ino !== info.ino) {
+      throw readError(`${path} changed while opening`, 'ECHANGED')
     }
+
     return { content: await handle.readFile('utf8'), mtimeMs: info.mtimeMs }
   } finally {
     await handle.close()
@@ -604,10 +631,16 @@ export async function runSync(
     // later edit still changes the mtime the download guard compares.
     let read: MemoryFileContents
     try {
-      read = await readMemoryFile(f.path)
+      read = await readMemoryFile(root, f.path)
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
-      if (code === 'ENOENT' || code === 'ELOOP' || code === 'ENOTREG') {
+      if (
+        code === 'ENOENT' ||
+        code === 'ELOOP' ||
+        code === 'ENOTREG' ||
+        code === 'EOUTSIDE' ||
+        code === 'ECHANGED'
+      ) {
         // The path changed into something this mirror does not carry after the
         // walk. Do not upload it, and do not let --prune treat it as deleted.
         complete = false
