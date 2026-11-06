@@ -12,6 +12,15 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
+// A developer's own OPENRECALL_* exports would otherwise reach every
+// in-process settings lookup and every CLI child spawned with `...process.env`.
+// OPENRECALL_PASSPHRASE_FILE even outranks the passphrase a test sets, so a
+// suite would run under the developer's secret, or fail on a path that only
+// exists on their machine. Each test sets the OPENRECALL_* values it needs.
+for (const name of Object.keys(process.env)) {
+  if (name.startsWith('OPENRECALL_')) delete process.env[name]
+}
+
 process.env.STORE ??= 'fs'
 process.env.DATA_DIR ??= mkdtempSync(join(tmpdir(), 'openrecall-test-'))
 process.env.ALLOW_UNAUTHENTICATED ??= 'true'

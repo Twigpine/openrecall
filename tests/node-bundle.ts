@@ -50,6 +50,10 @@ export function nodeBundle(): Promise<string> {
   return bundle
 }
 
+/**
+ * Whether `pid` names a running process, mine or another user's. Signal 0
+ * checks without delivering anything; EPERM means it exists but is not ours.
+ */
 function alive(pid: number): boolean {
   try {
     process.kill(pid, 0)
@@ -70,6 +74,10 @@ function sweep(): void {
   }
 }
 
+/**
+ * Build the bundle into this process's temp dir in a child `bun` and return
+ * the path of its executable entry. Throws with the child's stderr on failure.
+ */
 async function build(): Promise<string> {
   sweep()
   const dir = join(tmpdir(), `${PREFIX}${process.pid}`)
