@@ -108,8 +108,53 @@ async function readEntryBytes(
 
 /** Full view: fetch every ciphertext entry blob. */
 export async function getData(namespace: string, nsSlug: string): Promise<MemoryData> {
-  const m = await readManifest(nsSlug)
+  let m = await readManifest(nsSlug)
   const store = getStore()
+  // Each body is kept with the manifest row it was read under, so the checksum
+  // and timestamp served for a key always describe the bytes served for it.
+  const bodies = new Map<string, { bytes: Uint8Array; meta: Manifest['entries'][string] }>()
+
+  const readKeys = async (keys: string[]): Promise<string[]> => {
+    const missing: string[] = []
+    await Promise.all(
+      keys.map(async key => {
+        const meta = m.entries[key]
+        if (!meta) return
+        const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
+        if (bytes) bodies.set(key, { bytes, meta })
+        else missing.push(key)
+      }),
+    )
+    return missing
+  }
+
+  let missing = await readKeys(Object.keys(m.entries))
+  // This read takes no namespace lock (local mode's cross-process lock covers
+  // writes only), so a write that lands between the manifest read and a blob
+  // read can move a key to a new hash and reclaim the old blob. As getEntry
+  // does, look again with the manifest that write published before calling
+  // the key drift. Bounded, so a writer that never pauses cannot starve a
+  // reader; whatever is still missing after that is manifest/blob drift, and
+  // one lost body must not take the whole read down with it.
+  for (let pass = 0; pass < 2 && missing.length > 0; pass++) {
+    const latest = await readManifest(nsSlug)
+    if (latest.version === m.version) break
+    m = latest
+    // Serve one manifest's state, never a mix. The write that moved the missing
+    // key may have changed, removed or added others too, and serving the newer
+    // version over bodies read under the older one would describe a state that
+    // never existed. A body read earlier stays only where the newer manifest
+    // still names the same bytes, and takes that manifest's row; the rest is
+    // read again under it. Reads go by content hash, so whatever comes back
+    // matches the row it was read for.
+    for (const [key, body] of bodies) {
+      const row = Object.hasOwn(m.entries, key) ? m.entries[key] : undefined
+      if (row && row.hash === body.meta.hash) body.meta = row
+      else bodies.delete(key)
+    }
+    missing = await readKeys(Object.keys(m.entries).filter(key => !bodies.has(key)))
+  }
+
   const entries: Record<string, string> = {}
   const entryChecksums: Record<string, string> = {}
   // Copied from the manifest the server already keeps, in the same pass and
@@ -117,16 +162,11 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
   // timestamp whose blob is missing. This is metadata the server authored
   // itself; nothing here reads or derives anything from plaintext.
   const entryUpdatedAt: Record<string, string> = {}
-
-  await Promise.all(
-    Object.entries(m.entries).map(async ([key, meta]) => {
-      const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
-      if (!bytes) return // manifest/blob drift — skip rather than 500
-      entries[key] = Buffer.from(bytes).toString('base64')
-      entryChecksums[key] = meta.hash
-      entryUpdatedAt[key] = meta.updatedAt
-    }),
-  )
+  for (const [key, { bytes, meta }] of bodies) {
+    entries[key] = Buffer.from(bytes).toString('base64')
+    entryChecksums[key] = meta.hash
+    entryUpdatedAt[key] = meta.updatedAt
+  }
 
   return {
     namespace,
