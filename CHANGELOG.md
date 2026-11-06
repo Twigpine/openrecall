@@ -5,6 +5,28 @@ automatically by [release-please](https://github.com/googleapis/release-please)
 from [Conventional Commits](https://www.conventionalcommits.org/) — edit commit
 messages, not this file.
 
+## [0.3.0](https://github.com/Twigpine/openrecall/compare/v0.2.1...v0.3.0) (2026-11-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* `GET /health` no longer returns `store`, and a namespace whose manifest cannot be parsed now answers 503 `manifest_unreadable` where it previously served an empty view. Without this footer release-please would cut a patch for a changed contract, because `bump-patch-for-minor-pre-major` is set.
+
+### Features
+
+* passphrase file, --version and standalone binaries ([#9](https://github.com/Twigpine/openrecall/issues/9)) ([b4d4e07](https://github.com/Twigpine/openrecall/commit/b4d4e077e4754d352e3132a0ded225fd961de0cf))
+
+
+### Bug Fixes
+
+* **ci:** resolve code scanning alerts ([#25](https://github.com/Twigpine/openrecall/issues/25)) ([b2ab6b5](https://github.com/Twigpine/openrecall/commit/b2ab6b535944ba4c11179ac3c8c2133fde3d65b7))
+* **cli:** never print the service key in the setup card ([#31](https://github.com/Twigpine/openrecall/issues/31)) ([ebac262](https://github.com/Twigpine/openrecall/commit/ebac26246607894183dd0cb717cdb40ae58bc9a8))
+* **mcp:** expose MCP server startup and tool-failure status ([#15](https://github.com/Twigpine/openrecall/issues/15)) ([d599a6a](https://github.com/Twigpine/openrecall/commit/d599a6a10e064f32bd5698d059c3ef69796420a8))
+* report refused pushes and honest delete results ([#13](https://github.com/Twigpine/openrecall/issues/13)) ([d3322fb](https://github.com/Twigpine/openrecall/commit/d3322fba123e9bf0a9fc298376b0c96a20c9fdd8))
+* **server:** answer bad requests with 4xx and bad config with a startup error ([#14](https://github.com/Twigpine/openrecall/issues/14)) ([4a0233e](https://github.com/Twigpine/openrecall/commit/4a0233e0ce01fd759c121ab1f43a66c7bdd6e341))
+* **tests:** isolate preflight from the real config and always test a … ([#35](https://github.com/Twigpine/openrecall/issues/35)) ([335e1aa](https://github.com/Twigpine/openrecall/commit/335e1aa7462d63439c2f9103ddab13faad47f151))
+* **tests:** prevent backtracking in frontmatter regex extraction ([#26](https://github.com/Twigpine/openrecall/issues/26)) ([c0d0d64](https://github.com/Twigpine/openrecall/commit/c0d0d64f6b80ec7231b978ccc74ec7f8cb827200))
+
 ## [0.2.1](https://github.com/Twigpine/openrecall/compare/v0.2.0...v0.2.1) (2026-11-03)
 
 
