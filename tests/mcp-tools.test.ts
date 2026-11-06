@@ -11,7 +11,8 @@ import { join } from 'node:path'
 import { OpenRecallClient, OpenRecallProtocolError } from '../client/index.ts'
 import { today } from '../src/mcp/accessed.ts'
 import { parseFrontmatter, stripFrontmatter } from '../src/mcp/frontmatter.ts'
-import { ACCESSED_KEY } from '../src/mcp/keys.ts'
+import { ACCESSED_KEY, LEGACY_INDEX_KEY } from '../src/mcp/keys.ts'
+import { GENERATED_MARKER } from '../src/mcp/memindex.ts'
 import { makeProjects, projectNamespace } from '../src/mcp/projects.ts'
 import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
 import { makeSession } from '../src/mcp/session.ts'
@@ -719,10 +720,12 @@ describe('recall no-match recovery', () => {
  */
 describe('AE7 stale write', () => {
   test("a save computed from a superseded read is refused, names the key, and B's write survives", async () => {
+    // Its own namespace: the shared one is at the test server's five-entry
+    // cap by now, the generated index being one of the five.
     const mk = () =>
       makeTools(
         new OpenRecallClient({ url: `http://localhost:${server.port}`, passphrase: 'mcp-pass' }),
-        'user:me',
+        'user:me/ae7',
       )
     const a = mk()
     const b = mk()
@@ -1192,8 +1195,12 @@ describe('a refused entry inside a successful push', () => {
     expect(r.text).toContain('entry_too_large')
     expect(r.text).not.toMatch(/\bsaved\b/)
     expect(r.text).not.toMatch(/\bunchanged\b/)
-    // And the server really is empty, so the refusal is not a mislabelled write.
-    expect((await real.list()).text).not.toContain('big.md')
+    // And the server really is empty, so the refusal is not a mislabelled write:
+    // the index regenerated for the note went in the same request, and was put
+    // back (here: removed, it had nothing else to list) once the note was refused.
+    const listed = await real.list()
+    expect(listed.text).not.toContain('big.md')
+    expect(listed.text).toContain('is empty')
   })
 })
 
@@ -1518,14 +1525,17 @@ describe('the access sidecar', () => {
     expect((await tools.save('a.md', 'The quokka ledger.\n', NS)).isError).toBeUndefined()
     await tools.recall('quokka ledger', NS)
     expect((await tools.save('b.md', 'The basalt tureen.\n', NS)).isError).toBeUndefined()
+    // The generated MEMORY.md is listed (it is an entry, and not bookkeeping);
+    // the sidecar is not.
     const plain = await tools.list(NS)
-    expect(plain.text).toContain('2 entries')
+    expect(plain.text).toContain('3 entries')
     expect(plain.text).toContain('- a.md')
     expect(plain.text).toContain('- b.md')
+    expect(plain.text).toContain('- MEMORY.md')
     expect(plain.text).not.toContain(ACCESSED_KEY)
     expect(plain.text).toContain('include_system')
     const all = await tools.list(NS, { includeSystem: true })
-    expect(all.text).toContain('3 entries')
+    expect(all.text).toContain('4 entries')
     expect(all.text).toContain(`- ${ACCESSED_KEY}`)
     // The sidecar names every recalled key, so a literal search for a key
     // would always hit it; and it is never a ranking candidate.
@@ -1608,6 +1618,211 @@ describe('neutralized recall, verbatim get', () => {
     expect(s.text).not.toContain('<system-reminder>')
     const g = await tools.get('notes/lantern.md', NS)
     expect(g.text).toContain(body)
+  })
+})
+
+/**
+ * The generated `MEMORY.md`, through the real server: regenerated in the same
+ * request as every save and delete, a hand-written index migrated on the first
+ * write, the Pinned section edited by saving the index itself, and an
+ * index-only 409 resolved without the agent seeing it. Own namespaces, and at
+ * most three notes each: the test server caps a namespace at five entries,
+ * and the index, the sidecar and the legacy copy each take one.
+ */
+describe('the generated MEMORY.md', () => {
+  const version = (r: ToolResult) => Number(/\(v(\d+)\)/.exec(r.text)?.[1])
+
+  test('a save writes the index with it; a second save adds its line; a delete drops the line in one version', async () => {
+    const NS = 'user:me/idx-basic'
+    const r1 = await tools.save(
+      'feedback/tests.md',
+      '---\ndescription: run the suite before done\n---\nRun it.\n',
+      NS,
+    )
+    expect(r1.isError).toBeUndefined()
+    expect(r1.text).toMatch(/^saved "feedback\/tests.md"/)
+    const idx = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(idx.startsWith(`# Memory index\n${GENERATED_MARKER}\n`)).toBe(true)
+    expect(idx).toContain('\n## Pinned\n')
+    expect(idx).toContain('\n## feedback\n- [tests](feedback/tests.md) — run the suite before done')
+    // The index is an entry (listed) with no frontmatter stamp of its own.
+    expect(idx.startsWith('---')).toBe(false)
+    expect((await tools.list(NS)).text).toContain('- MEMORY.md')
+
+    const r2 = await tools.save('project/arch.md', '---\ndescription: hexagonal\n---\nHex.\n', NS)
+    expect(r2.isError).toBeUndefined()
+    const idx2 = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(idx2).toContain('- [tests](feedback/tests.md) — run the suite before done')
+    expect(idx2).toContain('\n## project\n- [arch](project/arch.md) — hexagonal')
+
+    // Note and index go in one PUT, so the delete advances the version by one.
+    const d = await tools.delete('project/arch.md', NS)
+    expect(d.text).toMatch(/^deleted "project\/arch.md"/)
+    expect(version(d)).toBe(version(r2) + 1)
+    const idx3 = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(idx3).not.toContain('project/arch.md')
+    expect(idx3).not.toContain('## project')
+    expect(idx3).toContain('- [tests](feedback/tests.md)')
+  })
+
+  test('a hand-written index is migrated once: prose pinned, stale links counted, old text kept aside', async () => {
+    const NS = 'user:me/idx-legacy'
+    const legacy = [
+      '# Memory',
+      'Read the deploy note before touching prod.',
+      '- [deploy](project/deploy.md)',
+      '- [gone](project/gone.md)',
+      'Ask before deleting anything.',
+    ].join('\n')
+    // As an earlier release left it: pushed raw, with a note that has no stamp.
+    await client(NS).push(NS, { 'MEMORY.md': legacy, 'project/deploy.md': 'Deploys go via Fly.' })
+
+    const r = await tools.save(
+      'user/prefs.md',
+      '---\ndescription: terse answers\n---\nTerse.\n',
+      NS,
+    )
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain(
+      '(MEMORY.md is now generated; your 2 orientation lines were kept under "## Pinned"; ' +
+        `the old index was saved as ${LEGACY_INDEX_KEY})`,
+    )
+    expect(r.text).toContain('(1 stale index line dropped')
+    const idx = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(idx).toContain(GENERATED_MARKER)
+    expect(idx).toContain(
+      '## Pinned\nRead the deploy note before touching prod.\nAsk before deleting anything.\n',
+    )
+    // The unstamped note is filed by its key and listed without a description.
+    expect(idx.endsWith('\n## project\n- [deploy](project/deploy.md)')).toBe(true)
+    expect(idx).toContain('\n## user\n- [prefs](user/prefs.md) — terse answers')
+    expect(idx).not.toContain('gone.md')
+    expect(bodyOf(await tools.get(LEGACY_INDEX_KEY, NS))).toBe(legacy)
+    expect((await tools.list(NS)).text).not.toContain(LEGACY_INDEX_KEY)
+    expect((await tools.list(NS, { includeSystem: true })).text).toContain(`- ${LEGACY_INDEX_KEY}`)
+
+    // Once: the next save finds a generated index and migrates nothing.
+    const r2 = await tools.save('user/editor.md', 'vim\n', NS)
+    expect(r2.isError).toBeUndefined()
+    expect(r2.text).not.toContain('now generated')
+    expect(bodyOf(await tools.get(LEGACY_INDEX_KEY, NS))).toBe(legacy)
+  })
+
+  test('saving MEMORY.md by hand keeps only its Pinned section; the rest is regenerated', async () => {
+    const NS = 'user:me/idx-pinned'
+    expect(
+      (await tools.save('user/a.md', '---\ndescription: alpha\n---\nA.\n', NS)).isError,
+    ).toBeUndefined()
+    const idx = bodyOf(await tools.get('MEMORY.md', NS))
+    const edited = idx
+      .replace('## Pinned', '## Pinned\nStart with user/a.md.')
+      .replace('— alpha', '— tampered')
+    const r = await tools.save('MEMORY.md', edited, NS)
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toMatch(/^saved "MEMORY.md"/)
+    expect(r.text).toContain('only its "## Pinned" section (1 line) was taken from what you sent')
+    const after = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(after).toContain('\n## Pinned\nStart with user/a.md.\n')
+    expect(after).toContain('- [a](user/a.md) — alpha')
+    expect(after).not.toContain('tampered')
+    expect(after.startsWith('---')).toBe(false)
+    // Pinned survives the next regeneration.
+    await tools.save('user/b.md', '---\ndescription: beta\n---\nB.\n', NS)
+    const later = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(later).toContain('\n## Pinned\nStart with user/a.md.\n')
+    expect(later).toContain('- [b](user/b.md) — beta')
+  })
+
+  test('a namespace emptied of notes keeps its index only while something is pinned', async () => {
+    const NS = 'user:me/idx-empty'
+    await tools.save('user/a.md', 'Alpha.\n', NS)
+    await tools.delete('user/a.md', NS)
+    // Nothing to list and nothing pinned: the index went with the last note.
+    expect((await tools.list(NS)).text).toContain('is empty')
+    expect((await tools.recall('alpha', NS)).text).toContain(`(no memory stored in ${NS} yet)`)
+
+    await tools.save('user/a.md', 'Alpha.\n', NS)
+    const idx = bodyOf(await tools.get('MEMORY.md', NS))
+    await tools.save('MEMORY.md', idx.replace('## Pinned', '## Pinned\nOrientation.'), NS)
+    await tools.delete('user/a.md', NS)
+    const left = bodyOf(await tools.get('MEMORY.md', NS))
+    expect(left).toContain('\n## Pinned\nOrientation.')
+    expect(left).not.toContain('user/a.md')
+    expect((await tools.recall('alpha', NS)).text).toContain('holds only its MEMORY.md index')
+  })
+
+  test('another session regenerating the index does not block a save, and the index ends up naming every note', async () => {
+    const NS = 'user:me/idx-two'
+    const mk = () => makeTools(client(NS), NS)
+    const a = mk()
+    const b = mk()
+    expect((await a.save('a.md', '---\ndescription: alpha\n---\nA.\n', NS)).isError).toBeUndefined()
+    // A reads the index, so it holds a base for it that B is about to move.
+    await a.get('MEMORY.md', NS)
+    expect((await b.save('b.md', '---\ndescription: beta\n---\nB.\n', NS)).isError).toBeUndefined()
+    const r = await a.save('c.md', '---\ndescription: gamma\n---\nC.\n', NS)
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toMatch(/^saved "c.md"/)
+    expect(r.text).not.toContain('index not refreshed')
+    expect(r.text).not.toContain('409')
+    const idx = bodyOf(await b.get('MEMORY.md', NS))
+    for (const line of ['- [a](a.md) — alpha', '- [b](b.md) — beta', '- [c](c.md) — gamma']) {
+      expect(idx).toContain(line)
+    }
+  })
+
+  test('a 409 confined to the index is rebuilt and retried; a persistent one lets the note through alone', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'a.md': '---\ndescription: alpha\n---\nA.' }
+    const push = stub.push.bind(stub)
+    let conflicts = 1
+    stub.push = async (ns, entries, opts) => {
+      if (conflicts > 0 && Object.hasOwn(entries, 'MEMORY.md')) {
+        conflicts--
+        throw httpError(409, 'stale_base_version', { conflicts: { 'MEMORY.md': 'sha256:aa' } })
+      }
+      return push(ns, entries, opts)
+    }
+    const t = makeTools(stub, 'user:me')
+    const r = await t.save('b.md', '---\ndescription: beta\n---\nB.')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toMatch(/^saved "b.md"/)
+    expect(r.text).not.toContain('409')
+    expect(r.text).not.toContain('index not refreshed')
+    expect(stub.entries['MEMORY.md']).toContain('- [b](b.md) — beta')
+    expect(stub.entries['MEMORY.md']).toContain('- [a](a.md) — alpha')
+
+    // Contention that does not clear: the note lands, the index waits.
+    conflicts = Number.POSITIVE_INFINITY
+    const r2 = await t.save('c.md', '---\ndescription: gamma\n---\nC.')
+    expect(r2.isError).toBeUndefined()
+    expect(r2.text).toMatch(/^saved "c.md"/)
+    expect(r2.text).toContain('(index not refreshed; the next save will)')
+    expect(stub.entries['c.md']).toBeDefined()
+    expect(stub.entries['MEMORY.md']).not.toContain('c.md')
+
+    // A 409 naming the note itself is still the agent's, rendered as before.
+    stub.push = async () => {
+      throw httpError(409, 'stale_base_version', { conflicts: { 'b.md': 'sha256:bb' } })
+    }
+    const stale = await t.save('b.md', 'The beta note, again.')
+    expect(stale.isError).toBe(true)
+    expect(stale.text).toContain('409 stale base')
+    expect(stale.text).toContain('b.md')
+  })
+
+  test('the save response warns as the index nears its cap', async () => {
+    const stub = new StubClient()
+    for (let i = 0; i < 180; i++) {
+      stub.entries[`user/note-${String(i).padStart(3, '0')}.md`] =
+        `---\ndescription: fact number ${i}\n---\nFact ${i}.`
+    }
+    const t = makeTools(stub, 'user:me')
+    const r = await t.save('user/one-more.md', '---\ndescription: the last straw\n---\nStraw.')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toMatch(
+      /MEMORY\.md is at 18\d\/200 lines \(\d+\.\d\/25 KB\): merge or supersede stale entries \(memory_doctor lists candidates\)\./,
+    )
   })
 })
 

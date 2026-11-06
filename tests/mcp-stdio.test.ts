@@ -126,6 +126,13 @@ for (const l of launchers) {
         const list = text(await agentA.callTool({ name: 'memory_list', arguments: {} }))
         expect(list).toContain('prefs.md')
         expect(list).toContain('deploy.md')
+        // Each save regenerated MEMORY.md in its own request; whichever landed
+        // second rebuilt on top of the first, so the index names both notes.
+        const index = text(
+          await agentB.callTool({ name: 'memory_get', arguments: { key: 'MEMORY.md' } }),
+        )
+        expect(index).toContain('- [prefs](prefs.md)')
+        expect(index).toContain('- [deploy](deploy.md)')
 
         // Assert on the hit itself: a miss message echoes the query back, so a
         // bare toContain('pnpm') would pass even when nothing was recalled.
@@ -164,7 +171,8 @@ for (const l of launchers) {
           arguments: { query: 'what runs the build' },
         })
         const meta = (r as { _meta?: Record<string, unknown> })._meta
-        expect(meta?.[TIMINGS_META]).toMatchObject({ entries: 1 })
+        // Two entries read: the note and the MEMORY.md the save generated.
+        expect(meta?.[TIMINGS_META]).toMatchObject({ entries: 2 })
         // Off by default: the model's context carries nothing extra.
         expect(text(r)).not.toContain('[timings')
       } finally {
@@ -183,7 +191,7 @@ for (const l of launchers) {
           arguments: { query: 'what runs the build' },
         })
         expect(text(r)).toMatch(
-          /\n\n\[timings fetch=[\d.]+ms decrypt=[\d.]+ms rank=[\d.]+ms format=[\d.]+ms total=[\d.]+ms entries=1 bytes=\d+\]$/,
+          /\n\n\[timings fetch=[\d.]+ms decrypt=[\d.]+ms rank=[\d.]+ms format=[\d.]+ms total=[\d.]+ms entries=2 bytes=\d+\]$/,
         )
         const line = await stderrLine(errLines, s => s.includes('"tool":"memory_recall"'))
         expect(line).toBeDefined()

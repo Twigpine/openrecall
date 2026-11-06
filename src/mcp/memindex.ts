@@ -31,8 +31,16 @@
  *   lines are returned as `legacyLines`, which the caller may make the first
  *   Pinned block.
  * - Same notes, same pinned lines, same clock: byte-identical output.
+ * - `indexNoteOf` is the one bridge from a stored note to an `IndexNote`: the
+ *   frontmatter fields the index reads, with the type inferred from the key
+ *   (as the save stamp infers it) when the note carries none and the server's
+ *   timestamp standing in for `updated` on a note that was never stamped, so
+ *   a legacy `project/deploy.md` is filed under project. `linkTarget` reads
+ *   the key a hand-written index line points at, so the caller can count the
+ *   lines of a legacy index that name notes which no longer exist.
  */
 
+import { inferType, parseFrontmatter } from './frontmatter.ts'
 import { isHiddenKey } from './keys.ts'
 
 export type IndexStatus = 'active' | 'superseded' | 'deleted'
@@ -105,10 +113,59 @@ export function utf8Length(s: string): number {
  * lines are never adopted as legacy content.
  */
 const LINK_LINE =
-  /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[^\]]*\]\([^)]*\)|\S+\.md(?:\s*[:—–-]|\s*$)|[A-Za-z0-9][\w.-]*\/[\w./-]+\s*[:—–-])/
+  /^\s*(?:(?:[-*+]|\d+[.)])\s+)?(?:\[[^\]]*\]\(([^)]*)\)|(\S+\.md)(?:\s*[:—–-]|\s*$)|([A-Za-z0-9][\w.-]*\/[\w./-]+)\s*[:—–-])/
 
 export function isLinkLine(line: string): boolean {
   return LINK_LINE.test(line)
+}
+
+/**
+ * The key a link line points at: the target of its markdown link, or the bare
+ * key it opens with. Null for a line that is not a link line. A markdown
+ * target's optional `<…>` wrapper and title are stripped; what remains is
+ * whatever the author wrote, which the caller checks against the keys that
+ * exist rather than validating here.
+ */
+export function linkTarget(line: string): string | null {
+  const m = LINK_LINE.exec(line)
+  if (!m) return null
+  if (m[1] !== undefined) {
+    const target = m[1].trim()
+    const angled = /^<([^>]*)>/.exec(target)
+    return (angled ? angled[1] : target.split(/\s/)[0]).trim() || null
+  }
+  return (m[2] ?? m[3] ?? '').trim() || null
+}
+
+const INDEX_STATUSES: readonly string[] = ['active', 'superseded', 'deleted']
+
+/**
+ * A stored note as the index sees it. Only string-valued fields are read; a
+ * `status` outside the index's own set is treated as active, since the index
+ * hides a note for the two statuses it knows and has no opinion on others.
+ * The type falls back to the key's first segment, as `stampForSave` infers
+ * it; `serverUpdatedAt` stands in for `updated` on a note with no stamp.
+ */
+export function indexNoteOf(key: string, content: string, serverUpdatedAt?: string): IndexNote {
+  const fields = parseFrontmatter(content)?.fields
+  const str = (name: string): string | undefined => {
+    const v = fields?.get(name)
+    return typeof v === 'string' && v !== '' ? v : undefined
+  }
+  const status = str('status')
+  const note: IndexNote = { key }
+  const name = str('name')
+  if (name !== undefined) note.name = name
+  const description = str('description')
+  if (description !== undefined) note.description = description
+  const type = str('type') ?? inferType(key)
+  if (type !== undefined) note.type = type
+  const updated = str('updated') ?? serverUpdatedAt
+  if (updated !== undefined) note.updated = updated
+  if (status !== undefined && INDEX_STATUSES.includes(status)) note.status = status as IndexStatus
+  const expires = str('expires')
+  if (expires !== undefined) note.expires = expires
+  return note
 }
 
 /** An h1 or h2 heading: the only lines that end a Pinned section. */
