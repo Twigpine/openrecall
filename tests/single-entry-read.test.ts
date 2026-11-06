@@ -24,8 +24,10 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ciphertextHash, decryptEntry, deriveKey, encryptEntry } from '../client/crypto.ts'
+import { OpenRecallClient } from '../client/index.ts'
 import { handleRequest } from '../src/handler.ts'
 import { sha256Hex } from '../src/hash.ts'
+import { makeTools } from '../src/mcp/tools.ts'
 import { upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import { contentPath, entryPath, getStore } from '../src/store/index.ts'
@@ -295,4 +297,37 @@ describe('single-entry read: authorization', () => {
     // rather than the view being broken for every caller.
     expect(r.own).toEqual([200, 'ok', r.ct])
   }, 30_000)
+})
+
+/**
+ * The tool on top of the view, against the real handler: one entry comes back
+ * whole, and a body the manifest names but the store has lost is reported as
+ * loss for that key alone, while its neighbours still read.
+ */
+describe('memory_get over the single-entry view', () => {
+  test('reads one entry through the tool, and reports drift as loss', async () => {
+    const ns = 'user:entry-tool'
+    const nsSlug = namespaceSlug(ns)
+    const client = new OpenRecallClient({
+      url: 'http://t',
+      passphrase: 'test-pass',
+      fetch: (input, init) => handleRequest(new Request(input, init)),
+    })
+    const tools = makeTools(client, ns)
+    expect((await tools.save('kept.md', 'stays readable')).isError).toBeUndefined()
+    expect((await tools.save('gone.md', 'will be removed')).isError).toBeUndefined()
+    expect((await tools.get('kept.md')).text).toContain('stays readable')
+
+    // Deterministic encryption: re-encrypting names the stored blob exactly.
+    const key = deriveKey('test-pass', ns)
+    const ct = encryptEntry(key, 'gone.md', 'will be removed')
+    await getStore().delete(contentPath(nsSlug, ciphertextHash(ct)))
+
+    const r = await tools.get('gone.md')
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('gone.md')
+    expect(r.text).toContain('do not save over it')
+    expect(r.text).not.toMatch(/no entry|no memory stored/)
+    expect((await tools.get('kept.md')).text).toContain('stays readable')
+  })
 })

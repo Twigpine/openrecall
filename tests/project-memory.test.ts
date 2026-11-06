@@ -3,6 +3,7 @@ import { sha256Hex } from '../src/hash.ts'
 import { makeProjects, projectId, projectNamespace } from '../src/mcp/projects.ts'
 import { rankEntriesDetailed } from '../src/mcp/relevance.ts'
 import { type MemoryClient, makeTools } from '../src/mcp/tools.ts'
+import { httpError } from './stub-client.ts'
 
 function scopedClient() {
   const store = new Map<string, Record<string, string>>()
@@ -16,6 +17,14 @@ function scopedClient() {
       // an empty body at a version past zero reads as lost data.
       const entries = { ...store.get(namespace) }
       return { namespace, version: Object.keys(entries).length ? 1 : 0, entries, updatedAt: {} }
+    },
+    async entry(namespace, key) {
+      reads.push(namespace)
+      if (namespace === unreadable) throw new Error('store unavailable')
+      const entries = store.get(namespace) ?? {}
+      if (Object.keys(entries).length === 0) throw httpError(404, 'empty')
+      if (!Object.hasOwn(entries, key)) throw httpError(404, 'entry_not_found')
+      return entries[key] as string
     },
     async push(namespace, entries) {
       store.set(namespace, { ...store.get(namespace), ...entries })

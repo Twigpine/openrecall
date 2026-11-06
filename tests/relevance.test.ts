@@ -5,6 +5,8 @@
 
 import { describe, expect, test } from 'bun:test'
 import {
+  FLOORS,
+  RecallIndex,
   rankMemories,
   rankMemoriesDetailed,
   stemTerm,
@@ -18,6 +20,7 @@ import {
   DAMAGE_WORDS,
   HELD_OUT,
   nearCapCorpus,
+  OFF_DOMAIN,
   TUNING,
 } from './recall-corpus.ts'
 
@@ -166,12 +169,12 @@ describe('the relevance floor', () => {
   // The must-not case, and the reason the floor and soft coverage are one
   // change rather than two. A cooking question shares exactly one incidental
   // token with the corpus ("red", from "a red run stops it", plus a couple of
-  // one-token flukes), so today's ranker answers it with three print-routing
-  // notes. Removing the zero-coverage drop without a floor makes that worse,
-  // not better: nearly every entry would come back. An empty ranking is the
-  // only correct answer, and only the absolute half of the floor can produce
-  // it, because a relative cut measured against the top score can never trim
-  // the top hit.
+  // one-token flukes), so a ranker without a floor answers it with three
+  // print-routing notes. Removing the zero-coverage drop without a floor
+  // makes that worse, not better: nearly every entry would come back. An
+  // empty ranking is the only correct answer, and only a floor on the top hit
+  // can produce it, because a cut measured against the top score can never
+  // trim the top hit.
   const IRRELEVANT = 'how long should I braise short ribs in red wine'
 
   test('a query relevant to nothing clears no entry and returns an empty ranking', () => {
@@ -180,26 +183,82 @@ describe('the relevance floor', () => {
     expect(ranked.map(r => r.key)).toEqual([])
   })
 
-  // The absolute floor gates every member, not only the top hit. It used to
-  // decide nothing but whether the result set was empty, after which the
-  // relative cut took over, and a relative cut scales with the top score: a top
-  // hit just above the floor drops the bar to a quarter of it. Measured on this
-  // query, whose best entry scores 0.6507: the returned set was eleven entries
-  // deep and nine of them sat between 0.33 and 0.57, inside the band this
-  // corpus's floor was fitted to exclude as noise.
-  const WEAK_TOP = 'what should a fresh joiner do on day one'
-  // ABSOLUTE_FLOOR, which is not exported. Kept as a literal deliberately: this
-  // asserts the measured constant, so a silent change to it should surface here.
-  const FLOOR = 0.6
+  // The fitted constants, pinned as literals deliberately: the fit in
+  // src/mcp/relevance.ts and scripts/fit-floor.ts produced exactly these, so
+  // a silent change to any of them surfaces here and has to come with a refit.
+  test('the floor constants are the fitted ones', () => {
+    expect(FLOORS).toEqual({
+      TOP_FLOOR: 0.1,
+      GAP: 0.3,
+      CLEAR_FLOOR: 0.01,
+      MEMBER_FLOOR: 0.02,
+      REL_FLOOR: 0.1,
+    })
+  })
 
-  test('a returned member below the absolute floor never reaches the caller', () => {
+  // The member floors gate every member, not only the top hit. The weakest
+  // must-pass pair is the one to check them on: its top hit is answered
+  // through the clear route (norm 0.074, a lead of 0.87 over the runner-up),
+  // so the bar for its members sits as low as it ever does and a tail of
+  // one-token flukes is most likely to get in.
+  const WEAK_TOP = 'am I allowed to open a pull request'
+
+  test('a returned member below the member floors never reaches the caller', () => {
     const ranked = rankMemories(WEAK_TOP, CORPUS, Object.keys(CORPUS).length)
     // Non-vacuous: the query does have an answer, so this is not the empty case.
-    expect(ranked.length).toBeGreaterThan(0)
+    expect(ranked[0]?.key).toBe('feedback/outward-actions.md')
+    const top = ranked[0].score
     // Names the offenders on failure rather than asserting a count.
-    expect(ranked.filter(r => r.score < FLOOR).map(r => `${r.key}:${r.score.toFixed(4)}`)).toEqual(
-      [],
-    )
+    const offenders = ranked
+      .slice(1)
+      .filter(r => (r.norm ?? 0) < FLOORS.MEMBER_FLOOR || r.score < top * FLOORS.REL_FLOOR)
+      .map(r => `${r.key}:norm=${(r.norm ?? 0).toFixed(4)}:rel=${(r.score / top).toFixed(4)}`)
+    expect(offenders).toEqual([])
+  })
+
+  // The top hit is admitted by one of two routes and nothing else: a norm at
+  // or above TOP_FLOOR, or a clear lead with a norm at or above CLEAR_FLOOR.
+  // Every entry returned for any tuning or held-out query must satisfy that,
+  // and every probe answered must have a top hit that does.
+  test('every answered query has a top hit that clears one of the two routes', () => {
+    const index = new RecallIndex()
+    for (const [key, content] of Object.entries(CORPUS))
+      index.upsert({ id: key, key, content, fingerprint: '' })
+    const queries = [...TUNING.map(t => t.query), ...HELD_OUT.map(h => h.query), ...OFF_DOMAIN]
+    let answered = 0
+    for (const q of queries) {
+      const ranked = RecallIndex.rank([index], q, Object.keys(CORPUS).length).results
+      // The lead is measured over the unfloored scoring, since the runner-up
+      // may itself have been cut by the member floors.
+      const { scored } = RecallIndex.scoreAll([index], q)
+      const top = scored[0]
+      const norm = top?.norm ?? 0
+      const gap = top && top.score > 0 ? (top.score - (scored[1]?.score ?? 0)) / top.score : 0
+      const admitted = norm >= FLOORS.TOP_FLOOR || (gap >= FLOORS.GAP && norm >= FLOORS.CLEAR_FLOOR)
+      expect(
+        `${q} :: norm=${norm.toFixed(3)} gap=${gap.toFixed(2)} answered=${ranked.length > 0}`,
+      ).toBe(`${q} :: norm=${norm.toFixed(3)} gap=${gap.toFixed(2)} answered=${admitted}`)
+      if (ranked.length > 0) answered++
+    }
+    // Non-vacuous in both directions: some are answered and some are not.
+    expect(answered).toBeGreaterThanOrEqual(8)
+    expect(answered).toBeLessThan(queries.length)
+  })
+
+  // The off-domain probes are the other half of the fit: at most two of the
+  // twelve may be answered, and the two that are ("which river runs through
+  // Budapest" on `runs` in the CI description, "what tuning does a cello use"
+  // on `use` in the tone note) are answered through the clear route, as the
+  // sole entry carrying one query word. That is the shape the clear route
+  // exists to admit for paraphrases, and the floor cannot tell these apart
+  // from them; the number is stated rather than hidden.
+  test('at most two off-domain probes are answered, each by a sole carrier', () => {
+    const answered = OFF_DOMAIN.filter(q => rankMemories(q, CORPUS).length > 0)
+    expect(answered.length).toBeLessThanOrEqual(2)
+    for (const q of answered) {
+      const d = rankMemoriesDetailed(q, CORPUS, Object.keys(CORPUS).length)
+      expect(`${q} :: ${d.results.length} returned`).toBe(`${q} :: 1 returned`)
+    }
   })
 
   test('a relevant query still returns its answer and withholds the long tail', () => {
@@ -278,9 +337,14 @@ describe('the namespace-root index is excluded from ranking', () => {
     expect(leaks).toEqual([])
   })
 
-  // The must-not inverse. Only the namespace-root index is the guidance-named
-  // table of contents; `project/MEMORY.md` is a note somebody wrote, and a
-  // suffix or basename match would silently swallow it.
+  // A `MEMORY.md` at any depth is an index. An agent that organizes a
+  // sub-tree the way the guide has it organize the root keeps one there too,
+  // so `project/MEMORY.md` lists its folder's notes and carries their
+  // vocabulary without answering anything.
+  // This inverts the earlier pin that ranked it as "a note somebody wrote":
+  // a note whose answer is "the lantern is serviced every second Tuesday"
+  // belongs under a key of its own, and a user who put it in an index file
+  // gets it back through memory_get, not recall.
   const NESTED = {
     'MEMORY.md': '# index\n- [project](project/MEMORY.md)',
     'project/MEMORY.md': [
@@ -293,13 +357,13 @@ describe('the namespace-root index is excluded from ranking', () => {
     'other.md': 'Unrelated notes about the weather.',
   }
 
-  test('a nested MEMORY.md is an ordinary entry and still ranks', () => {
+  test('a nested MEMORY.md is an index too and never ranks', () => {
     const ranked = rankMemories('lantern maintenance', NESTED, 10)
-    expect(ranked.map(r => r.key)).toEqual(['project/MEMORY.md'])
+    expect(ranked.map(r => r.key)).toEqual([])
   })
 
-  test('only the root index is dropped from the searched count', () => {
-    expect(rankMemoriesDetailed('lantern maintenance', NESTED, 10).searched).toBe(2)
+  test('a nested index is dropped from the searched count like the root one', () => {
+    expect(rankMemoriesDetailed('lantern maintenance', NESTED, 10).searched).toBe(1)
   })
 
   // Degenerate namespace: the index is all there is. The ranker must return an
@@ -344,10 +408,12 @@ describe('the namespace-root index is excluded from ranking', () => {
     const at = (r: typeof excluded, key: string) => r.find(x => x.key === key)
     // The ordering flip, which is the observable form of the denominator
     // change: with the index counted the two notes score identically and
-    // `localeCompare` puts the wrong one first; the index itself, being an
-    // ordinary key here, beats them both.
+    // `localeCompare` puts the wrong one first. (The index under an ordinary
+    // key no longer beats them both, as it did before length normalization:
+    // its two mentions of `lantern` sit in a body twice as long as either
+    // note's, and BM25F counts that against it.)
     expect(excluded[0]?.key).toBe('note-z.md')
-    expect(counted[0]?.key).toBe('notes/toc.md')
+    expect(counted.map(r => r.key)).toContain('notes/toc.md')
     expect(counted.map(r => r.key).indexOf('note-a.md')).toBeLessThan(
       counted.map(r => r.key).indexOf('note-z.md'),
     )
@@ -509,9 +575,13 @@ describe('stemming does not manufacture matches', () => {
     const pinnedInOrder = ranked.filter(k => PRE_U2_ORDER.includes(k))
     expect(pinnedInOrder).toEqual(PRE_U2_ORDER.filter(k => ranked.includes(k)))
     // ...and nothing that used to rank below them (i.e. did not rank at all)
-    // may now sit above them.
+    // may now sit above them: either the floor withholds everything, or the
+    // pinned entry is first. The floor is allowed to empty this ranking
+    // because that is a stricter answer, not a reordered one.
     const firstPinned = ranked.findIndex(k => PRE_U2_ORDER.includes(k))
-    expect(`${UNRELATED} :: ${firstPinned}`).toBe(`${UNRELATED} :: 0`)
+    expect(`${UNRELATED} :: ${ranked.length === 0 ? 'empty' : firstPinned}`).toMatch(
+      /:: (empty|0)$/,
+    )
   })
 
   test('no pair of damage words becomes a match', () => {

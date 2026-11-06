@@ -30,11 +30,12 @@ import type { JSONRPCMessage } from '@modelcontextprotocol/sdk/types.js'
 import { z } from 'zod'
 import pkg from '../../package.json' with { type: 'json' }
 import { DEFAULT_NAMESPACE } from '../cli/settings.ts'
+import { logTiming } from '../log.ts'
 import { loadMemoryGuide, SHORT_INSTRUCTIONS } from './guide.ts'
 import { makeProjects } from './projects.ts'
 import { preflight } from './startup.ts'
 import { clearSetupError, getSetupError, recordSetupError, recordToolFailure } from './status.ts'
-import { type MemoryTools, makeTools, type ToolResult } from './tools.ts'
+import { type MemoryTools, makeTools, type Timings, type ToolResult } from './tools.ts'
 
 // The health of this server, for embedders and tests that would otherwise have
 // to scrape stderr for it. Re-exported from here because this is the module a
@@ -42,9 +43,43 @@ import { type MemoryTools, makeTools, type ToolResult } from './tools.ts'
 // can be read without starting a transport.
 export { getSetupError, hadToolError } from './status.ts'
 
-const toMcp = (r: ToolResult) => ({
-  content: [{ type: 'text' as const, text: r.text }],
+/**
+ * The `_meta` key every tool result carries its stage timings under. The MCP
+ * result shape has `_meta` for exactly this kind of side channel: a host can
+ * read it, a model never sees it, so observing a call costs no context.
+ * Reverse-DNS prefixed as the spec asks, so it cannot collide with a host's.
+ */
+export const TIMINGS_META = 'com.twigpine.openrecall/timings'
+
+/** Timings for a result that produced none: the setup refusal, a project tool. */
+const totalOnly = (startedAt: number): Timings => ({
+  fetch: 0,
+  decrypt: 0,
+  rank: 0,
+  format: 0,
+  total: Math.round((performance.now() - startedAt) * 100) / 100,
+  entries: 0,
+  bytes: 0,
+})
+
+/**
+ * The human-readable form, appended to the text only when OPENRECALL_TIMINGS=1:
+ * a reader of a transcript can see where a slow call went, at the price of a
+ * line of context per call, which is why it is opt-in.
+ */
+export const timingsTrailer = (t: Timings) =>
+  `[timings fetch=${t.fetch}ms decrypt=${t.decrypt}ms rank=${t.rank}ms format=${t.format}ms ` +
+  `total=${t.total}ms entries=${t.entries} bytes=${t.bytes}]`
+
+const toMcp = (r: ToolResult, trailer: boolean) => ({
+  content: [
+    {
+      type: 'text' as const,
+      text: trailer && r.timings ? `${r.text}\n\n${timingsTrailer(r.timings)}` : r.text,
+    },
+  ],
   ...(r.isError ? { isError: true } : {}),
+  ...(r.timings ? { _meta: { [TIMINGS_META]: r.timings } } : {}),
 })
 
 /**
@@ -114,6 +149,13 @@ export type ServerBinding = {
   tools: MemoryTools | null
   projects: ReturnType<typeof makeProjects> | null
   defaultNamespace: string
+  /**
+   * Append the timings trailer to every tool text and write one timing line
+   * per call on stderr (what OPENRECALL_TIMINGS=1 asks for). Opt-in: the
+   * trailer spends context and the line spends log space. The `_meta` timings
+   * are always there.
+   */
+  timings?: boolean
 }
 
 /**
@@ -139,11 +181,30 @@ export function makeServer(binding: ServerBinding): McpServer {
     text: setupDiagnostic ?? 'OpenRecall is not configured',
     isError: true,
   })
-  const run = async (fn: (t: MemoryTools) => Promise<ToolResult>) =>
-    toMcp(binding.tools ? await fn(binding.tools) : unconfigured())
+  const timingsOn = binding.timings === true
+  // Every result leaves with timings: the tool's own when it measured, else
+  // the wall time of the call (the setup refusal, a project tool).
+  const finish = (name: string, startedAt: number, r: ToolResult) => {
+    const timings = r.timings ?? totalOnly(startedAt)
+    if (timingsOn) {
+      logTiming({
+        tool: name,
+        fetchMs: timings.fetch,
+        decryptMs: timings.decrypt,
+        rankMs: timings.rank,
+        formatMs: timings.format,
+        totalMs: timings.total,
+        entries: timings.entries,
+        bytes: timings.bytes,
+      })
+    }
+    return toMcp({ ...r, timings }, timingsOn)
+  }
+  const run = async (name: string, fn: (t: MemoryTools) => Promise<ToolResult>) =>
+    finish(name, performance.now(), binding.tools ? await fn(binding.tools) : unconfigured())
   type Projects = NonNullable<ServerBinding['projects']>
-  const runProjects = async (fn: (p: Projects) => Promise<ToolResult>) =>
-    toMcp(binding.projects ? await fn(binding.projects) : unconfigured())
+  const runProjects = async (name: string, fn: (p: Projects) => Promise<ToolResult>) =>
+    finish(name, performance.now(), binding.projects ? await fn(binding.projects) : unconfigured())
 
   const server = new McpServer(
     { name: 'openrecall', version: pkg.version },
@@ -178,7 +239,7 @@ export function makeServer(binding: ServerBinding): McpServer {
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
       },
     },
-    async ({ key, content, namespace }) => run(t => t.save(key, content, namespace)),
+    async ({ key, content, namespace }) => run('memory_save', t => t.save(key, content, namespace)),
   )
 
   server.registerTool(
@@ -202,7 +263,7 @@ export function makeServer(binding: ServerBinding): McpServer {
       },
     },
     async ({ query, namespace, limit, namespaces }) =>
-      run(t => t.recall(query, namespace, limit, namespaces)),
+      run('memory_recall', t => t.recall(query, namespace, limit, namespaces)),
   )
 
   server.registerTool(
@@ -221,7 +282,7 @@ export function makeServer(binding: ServerBinding): McpServer {
           ),
       },
     },
-    async ({ project }) => runProjects(p => p.open(project)),
+    async ({ project }) => runProjects('memory_project', p => p.open(project)),
   )
 
   server.registerTool(
@@ -235,7 +296,7 @@ export function makeServer(binding: ServerBinding): McpServer {
         offset: z.number().int().min(0).optional().describe('Number of sorted projects to skip.'),
       },
     },
-    async ({ limit, offset }) => runProjects(p => p.list(limit, offset)),
+    async ({ limit, offset }) => runProjects('memory_projects', p => p.list(limit, offset)),
   )
 
   server.registerTool(
@@ -248,7 +309,7 @@ export function makeServer(binding: ServerBinding): McpServer {
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
       },
     },
-    async ({ query, namespace }) => run(t => t.search(query, namespace)),
+    async ({ query, namespace }) => run('memory_search', t => t.search(query, namespace)),
   )
 
   server.registerTool(
@@ -262,7 +323,7 @@ export function makeServer(binding: ServerBinding): McpServer {
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
       },
     },
-    async ({ key, namespace }) => run(t => t.get(key, namespace)),
+    async ({ key, namespace }) => run('memory_get', t => t.get(key, namespace)),
   )
 
   server.registerTool(
@@ -274,7 +335,7 @@ export function makeServer(binding: ServerBinding): McpServer {
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
       },
     },
-    async ({ namespace }) => run(t => t.list(namespace)),
+    async ({ namespace }) => run('memory_list', t => t.list(namespace)),
   )
 
   server.registerTool(
@@ -287,7 +348,7 @@ export function makeServer(binding: ServerBinding): McpServer {
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
       },
     },
-    async ({ key, namespace }) => run(t => t.delete(key, namespace)),
+    async ({ key, namespace }) => run('memory_delete', t => t.delete(key, namespace)),
   )
 
   return server
@@ -343,7 +404,12 @@ export async function main(options: StartupOptions = {}): Promise<void> {
     process.exit(1)
   }
 
-  const server = makeServer({ tools, projects, defaultNamespace })
+  const server = makeServer({
+    tools,
+    projects,
+    defaultNamespace,
+    timings: (options.env ?? process.env).OPENRECALL_TIMINGS === '1',
+  })
   await serveOn(server, options.transport ?? new StdioServerTransport())
   process.stderr.write(`[openrecall mcp] ready • store=${target} • namespace=${defaultNamespace}\n`)
 }

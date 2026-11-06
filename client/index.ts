@@ -46,6 +46,15 @@ export type OpenRecallClientOptions = {
 /** The subset of `fetch` the client needs. */
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>
 
+/**
+ * Where a pull's time went, in milliseconds, for the tool layer's per-stage
+ * timings: the transport round trip, the JSON parse, and the AES-GCM pass
+ * over every entry. `bytes` is the size of the response body. Optional on the
+ * result: a test double need not produce it, and a caller that does not look
+ * is not charged for it.
+ */
+export type ReadTimings = { fetchMs: number; parseMs: number; decryptMs: number; bytes: number }
+
 export type PullResult = {
   namespace: string
   version: number
@@ -75,6 +84,8 @@ export type PullResult = {
    * handled.
    */
   updatedAt: Record<string, string | undefined>
+  /** Stage timings of this read; see {@link ReadTimings}. */
+  timings?: ReadTimings
 }
 
 export type PushResult = {
@@ -169,6 +180,26 @@ export class OpenRecallTimeoutError extends Error {
   ) {
     super(`openrecall: ${operation} for ${namespace} got no answer within ${timeoutMs}ms`)
     this.name = 'OpenRecallTimeoutError'
+  }
+}
+
+/**
+ * The server answered 2xx with a body that is not the view that was asked for.
+ *
+ * A broken or misrouted server, or an older one that ignores a `view` it does
+ * not know and answers with the full namespace instead. Its own class so a
+ * caller can fall back to the older read it does understand, and so it is never
+ * confused with a decryption failure, which is the one error a caller is
+ * entitled to blame on the passphrase.
+ */
+export class OpenRecallProtocolError extends Error {
+  constructor(
+    readonly operation: string,
+    readonly namespace: string,
+    detail: string,
+  ) {
+    super(`openrecall: ${operation} for ${namespace}: ${detail}`)
+    this.name = 'OpenRecallProtocolError'
   }
 }
 
@@ -437,9 +468,11 @@ export class OpenRecallClient {
 
   /** Pull and decrypt all entries for a namespace. */
   async pull(namespace: string): Promise<PullResult> {
+    const fetchStarted = performance.now()
     const res = await this.request('pull', namespace, this.endpoint(namespace), {
       headers: this.headers(),
     })
+    const fetchMs = performance.now() - fetchStarted
     if (res.status === 404) {
       const err = httpError(res)
       // See hashesView: only the server's own `empty` is an empty namespace.
@@ -448,13 +481,21 @@ export class OpenRecallClient {
       // so there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
       lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
-      return { namespace, version: 0, entries: {}, updatedAt: {} }
+      return {
+        namespace,
+        version: 0,
+        entries: {},
+        updatedAt: {},
+        timings: { fetchMs, parseMs: 0, decryptMs: 0, bytes: res.raw.length },
+      }
     }
     if (!res.ok) throw httpError(res)
+    const parseStarted = performance.now()
     const data = JSON.parse(res.raw) as {
       version: number
       content?: { entries?: Record<string, string>; entryUpdatedAt?: unknown }
     }
+    const parseMs = performance.now() - parseStarted
     // Pre-existing gap, closed here because this method now hardens the sibling
     // field against exactly this class and leaving the container unchecked
     // would be inconsistent. A 200 whose body is missing `content.entries`
@@ -462,8 +503,10 @@ export class OpenRecallClient {
     // either way, but a protocol error names what went wrong.
     const entriesRaw = data.content?.entries
     if (!entriesRaw || typeof entriesRaw !== 'object') {
-      throw new Error(
-        `openrecall ${res.status} ${res.statusText}: malformed body (no content.entries)`,
+      throw new OpenRecallProtocolError(
+        'pull',
+        namespace,
+        `${res.status} ${res.statusText}: malformed body (no content.entries)`,
       )
     }
     const key = this.key(namespace)
@@ -474,6 +517,7 @@ export class OpenRecallClient {
     // against, but positive knowledge only, hence `enumerated: false`; see
     // `observed`.
     const seen: Record<string, string> = {}
+    const decryptStarted = performance.now()
     for (const [entryKey, b64] of Object.entries(entriesRaw)) {
       try {
         entries[entryKey] = decryptEntry(key, entryKey, b64)
@@ -482,12 +526,14 @@ export class OpenRecallClient {
       }
       seen[entryKey] = ciphertextHash(b64)
     }
+    const decryptMs = performance.now() - decryptStarted
     lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
     return {
       namespace,
       version: data.version,
       entries,
       updatedAt: sanitizeUpdatedAt(data.content?.entryUpdatedAt, entries),
+      timings: { fetchMs, parseMs, decryptMs, bytes: res.raw.length },
     }
   }
 
@@ -531,7 +577,11 @@ export class OpenRecallClient {
     // OpenRecallDecryptError, which is the one failure a caller is entitled to
     // blame on the passphrase.
     if (typeof data.entry !== 'string')
-      throw new Error(`openrecall: no entry in the response for "${entryKey}" in ${namespace}`)
+      throw new OpenRecallProtocolError(
+        'entry',
+        namespace,
+        `no entry in the response for "${entryKey}"`,
+      )
     let plaintext: string
     try {
       plaintext = decryptEntry(this.key(namespace), entryKey, data.entry)

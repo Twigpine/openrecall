@@ -72,6 +72,56 @@ export function logEvent(fields: Omit<OperationalEvent, 'timestamp'>): void {
   process.stderr.write(`${JSON.stringify(line)}\n`)
 }
 
+/**
+ * One MCP tool call's stage timings, written by the stdio server when
+ * OPENRECALL_TIMINGS=1. Same allowlist discipline as the rejection log, and
+ * for a sharper reason: this line is produced on the client side of the
+ * crypto, where the query and every entry are plaintext, and it lands in
+ * whatever log the launching agent keeps. Counts and durations only: no
+ * namespace, no key, no query, no content.
+ */
+export const TIMING_FIELDS = [
+  'timestamp',
+  'tool',
+  'fetchMs',
+  'decryptMs',
+  'rankMs',
+  'formatMs',
+  'totalMs',
+  'entries',
+  'bytes',
+] as const
+
+export type TimingLine = {
+  timestamp: string
+  /** The MCP tool name, e.g. `memory_recall`. */
+  tool: string
+  fetchMs: number
+  decryptMs: number
+  rankMs: number
+  formatMs: number
+  totalMs: number
+  entries: number
+  bytes: number
+}
+
+type TimingSink = ((line: TimingLine) => void) | null
+let timingSink: TimingSink = null
+
+/** Tests capture timing lines instead of writing them. Passing null restores stderr. */
+export function setTimingSink(next: TimingSink): void {
+  timingSink = next
+}
+
+export function logTiming(fields: Omit<TimingLine, 'timestamp'>): void {
+  const line: TimingLine = { timestamp: new Date().toISOString(), ...fields }
+  if (timingSink) {
+    timingSink(line)
+    return
+  }
+  process.stderr.write(`${JSON.stringify(line)}\n`)
+}
+
 export function logRejection(fields: Omit<Rejection, 'timestamp'>): void {
   const line: Rejection = { timestamp: new Date().toISOString(), ...fields }
   if (sink) {
