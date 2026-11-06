@@ -140,7 +140,19 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
     const latest = await readManifest(nsSlug)
     if (latest.version === m.version) break
     m = latest
-    missing = await readKeys(missing.filter(key => Object.hasOwn(m.entries, key)))
+    // Serve one manifest's state, never a mix. The write that moved the missing
+    // key may have changed, removed or added others too, and serving the newer
+    // version over bodies read under the older one would describe a state that
+    // never existed. A body read earlier stays only where the newer manifest
+    // still names the same bytes, and takes that manifest's row; the rest is
+    // read again under it. Reads go by content hash, so whatever comes back
+    // matches the row it was read for.
+    for (const [key, body] of bodies) {
+      const row = Object.hasOwn(m.entries, key) ? m.entries[key] : undefined
+      if (row && row.hash === body.meta.hash) body.meta = row
+      else bodies.delete(key)
+    }
+    missing = await readKeys(Object.keys(m.entries).filter(key => !bodies.has(key)))
   }
 
   const entries: Record<string, string> = {}
