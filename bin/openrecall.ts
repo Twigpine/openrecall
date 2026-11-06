@@ -4,7 +4,7 @@
  *
  * Usage:
  *   openrecall init [--url <local|https://…>] [--namespace <ns>] [--api-key <key>]
- *   openrecall setup [agent…|all] [--write] [--npx]
+ *   openrecall setup [agent…|all] [--write] [--launcher <auto|npx|/abs/path>]
  *   openrecall status [--timings]       show config, check the store, measure recall per stage
  *   openrecall card <owner> [url]         print the service paste-in card + a new passphrase
  *   openrecall push <dir> [namespace]   encrypt + upload changed .md entries
@@ -63,7 +63,7 @@ function parseArgs(argv: string[]): Args {
   return { positional, flags }
 }
 
-const VALUE_FLAGS = new Set(['url', 'namespace', 'api-key', 'scan'])
+const VALUE_FLAGS = new Set(['url', 'namespace', 'api-key', 'scan', 'launcher'])
 
 function flag(args: Args, name: string): string | undefined {
   const v = args.flags[name]
@@ -337,7 +337,8 @@ try {
       const { runSetup } = await import('../src/cli/setup.ts')
       const ok = await runSetup(args.positional, {
         write: args.flags.write === true,
-        npx: args.flags.npx === true,
+        // --npx is the older spelling of --launcher npx.
+        launcher: flag(args, 'launcher') ?? (args.flags.npx === true ? 'npx' : undefined),
       })
       if (!ok) process.exit(1)
       break
@@ -389,7 +390,7 @@ function usage(code = 1): never {
       'usage:\n' +
       '  openrecall init [--url <local|https://…>] [--namespace <ns>] [--api-key <key>]\n' +
       '                                       create ~/.openrecall/config.json (keeps your passphrase)\n' +
-      '  openrecall setup [agent…|all] [--write] [--npx]\n' +
+      '  openrecall setup [agent…|all] [--write] [--launcher <auto|npx|/abs/path>]\n' +
       '                                       connect Claude Code, Zero, OpenClaude, Codex, Cursor, …\n' +
       '  openrecall status [--timings]        show config and check the store; --timings measures recall per stage\n' +
       '  openrecall card <owner> [url]        print the service paste-in card + a new passphrase\n' +
