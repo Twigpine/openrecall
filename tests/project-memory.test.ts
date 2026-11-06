@@ -33,12 +33,6 @@ function scopedClient() {
     async hashes(namespace) {
       return Object.fromEntries(Object.keys(store.get(namespace) ?? {}).map(key => [key, 'hash']))
     },
-    async delete(namespace, key) {
-      const entries = store.get(namespace)
-      const deleted = entries ? Object.hasOwn(entries, key) : false
-      if (entries) delete entries[key]
-      return { namespace, version: Object.keys(entries ?? {}).length ? 1 : 0, deleted }
-    },
   }
   return { client, store, reads, failReads: (namespace: string) => (unreadable = namespace) }
 }

@@ -33,6 +33,7 @@ import { DEFAULT_NAMESPACE } from '../cli/settings.ts'
 import { logTiming } from '../log.ts'
 import { loadMemoryGuide, SHORT_INSTRUCTIONS } from './guide.ts'
 import { makeProjects } from './projects.ts'
+import { makeSession } from './session.ts'
 import { preflight } from './startup.ts'
 import { clearSetupError, getSetupError, recordSetupError, recordToolFailure } from './status.ts'
 import { type MemoryTools, makeTools, type Timings, type ToolResult } from './tools.ts'
@@ -156,6 +157,13 @@ export type ServerBinding = {
    * are always there.
    */
   timings?: boolean
+  /**
+   * Called with the `McpServer` as soon as it exists, before any transport is
+   * connected. `main()` uses it to let the session read the connected client's
+   * `initialize` info (`server.server.getClientVersion()`) off a server that
+   * is built after the tools are.
+   */
+  attach?: (server: McpServer) => void
 }
 
 /**
@@ -210,6 +218,7 @@ export function makeServer(binding: ServerBinding): McpServer {
     { name: 'openrecall', version: pkg.version },
     { instructions: SHORT_INSTRUCTIONS },
   )
+  binding.attach?.(server)
 
   // Full memory-usage protocol, served from the same SKILL.md the Claude Code
   // skill uses — so provider-neutral MCP clients can fetch the discipline too.
@@ -230,16 +239,25 @@ export function makeServer(binding: ServerBinding): McpServer {
     {
       title: 'Save a memory',
       description:
-        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`, unless it changed since this session last read it: then the save is refused as stale, and you should read the key with memory_get, merge, and save again.',
+        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`, unless it changed since this session last read it: then the save is refused as stale, and you should read the key with memory_get, merge, and save again. The client stamps YAML frontmatter on every save (id, type, created, updated, agent, session); you may set `type` (user, feedback, project, reference), `description`, `tags`, `expires` and `locked`. User notes belong in the shared namespace and project/reference notes in the open project namespace; a save in the wrong place is refused with the right one.',
       inputSchema: {
         key: z
           .string()
           .describe('Entry path within the namespace, e.g. "preferences.md" or "project/api.md".'),
         content: z.string().describe('The memory content (markdown).'),
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+        supersedes: z
+          .string()
+          .optional()
+          .describe('Key of the older entry this one replaces; stamped into frontmatter.'),
+        force: z
+          .boolean()
+          .optional()
+          .describe('Override the namespace routing check, or edit a locked entry.'),
       },
     },
-    async ({ key, content, namespace }) => run('memory_save', t => t.save(key, content, namespace)),
+    async ({ key, content, namespace, supersedes, force }) =>
+      run('memory_save', t => t.save(key, content, namespace, { supersedes, force })),
   )
 
   server.registerTool(
@@ -260,10 +278,16 @@ export function makeServer(binding: ServerBinding): McpServer {
             'Search these namespaces together, for example the shared and project namespaces from memory_project. Use instead of namespace. Other projects are only searched when explicitly included.',
           ),
         limit: z.number().int().min(1).max(20).optional().describe('Max results (default 5).'),
+        include_inactive: z
+          .boolean()
+          .optional()
+          .describe('Also rank superseded, deleted and expired entries (hidden by default).'),
       },
     },
-    async ({ query, namespace, limit, namespaces }) =>
-      run('memory_recall', t => t.recall(query, namespace, limit, namespaces)),
+    async ({ query, namespace, limit, namespaces, include_inactive }) =>
+      run('memory_recall', t =>
+        t.recall(query, namespace, limit, namespaces, { includeInactive: include_inactive }),
+      ),
   )
 
   server.registerTool(
@@ -330,25 +354,34 @@ export function makeServer(binding: ServerBinding): McpServer {
     'memory_list',
     {
       title: 'List memory entries',
-      description: 'List the entry keys stored in a namespace (no content downloaded).',
+      description:
+        'List the entry keys stored in a namespace (no content downloaded). Bookkeeping entries under `sys.openrecall/` are hidden unless `include_system` is true.',
       inputSchema: {
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+        include_system: z
+          .boolean()
+          .optional()
+          .describe('Also list the bookkeeping entries under sys.openrecall/.'),
       },
     },
-    async ({ namespace }) => run('memory_list', t => t.list(namespace)),
+    async ({ namespace, include_system }) =>
+      run('memory_list', t => t.list(namespace, { includeSystem: include_system })),
   )
 
   server.registerTool(
     'memory_delete',
     {
       title: 'Delete a memory',
-      description: 'Remove one entry from a namespace.',
+      description:
+        'Remove one entry from a namespace. A note whose frontmatter says `locked: true` is refused unless `force` is true.',
       inputSchema: {
         key: z.string().describe('Entry key to delete.'),
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
+        force: z.boolean().optional().describe('Delete a locked entry.'),
       },
     },
-    async ({ key, namespace }) => run('memory_delete', t => t.delete(key, namespace)),
+    async ({ key, namespace, force }) =>
+      run('memory_delete', t => t.delete(key, namespace, { force })),
   )
 
   return server
@@ -373,11 +406,17 @@ export type StartupOptions = {
  * configuration.
  */
 export async function main(options: StartupOptions = {}): Promise<void> {
-  const config = await preflight(options.env ?? process.env)
+  const env = options.env ?? process.env
+  const config = await preflight(env)
   let tools: MemoryTools | null = null
   let projects: ReturnType<typeof makeProjects> | null = null
   let defaultNamespace = DEFAULT_NAMESPACE
   let target = 'unconfigured'
+  // The session reads the connected agent's name and version off the server,
+  // which does not exist yet: `attach` below fills the holder once it does,
+  // and the SDK has the client's `initialize` info before any tool call.
+  const holder: { server?: McpServer } = {}
+  const session = makeSession({ agent: () => holder.server?.server.getClientVersion(), env })
   if (config.ready) {
     // A second start in the same process must not keep reporting the first
     // start's diagnosis. Only the setup error: the tool-failure flag records
@@ -389,8 +428,8 @@ export async function main(options: StartupOptions = {}): Promise<void> {
     // so they are the first thing in the launcher's log, and to stderr because
     // stdout belongs to the protocol.
     for (const w of config.warnings) process.stderr.write(`openrecall mcp: ${w}\n`)
-    tools = makeTools(config.client, defaultNamespace)
-    projects = makeProjects(config.client, defaultNamespace)
+    tools = makeTools(config.client, defaultNamespace, session)
+    projects = makeProjects(config.client, defaultNamespace, session)
   } else if (config.unconfigured) {
     const diagnosis =
       `OpenRecall is not set up: ${config.diagnostic}\n` +
@@ -408,7 +447,10 @@ export async function main(options: StartupOptions = {}): Promise<void> {
     tools,
     projects,
     defaultNamespace,
-    timings: (options.env ?? process.env).OPENRECALL_TIMINGS === '1',
+    timings: env.OPENRECALL_TIMINGS === '1',
+    attach: s => {
+      holder.server = s
+    },
   })
   await serveOn(server, options.transport ?? new StdioServerTransport())
   process.stderr.write(`[openrecall mcp] ready • store=${target} • namespace=${defaultNamespace}\n`)

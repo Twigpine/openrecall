@@ -16,6 +16,7 @@ import { join, resolve } from 'node:path'
 import { OpenRecallClient } from '../client/index.ts'
 import { config } from '../src/config.ts'
 import { handleRequest } from '../src/handler.ts'
+import { stripFrontmatter } from '../src/mcp/frontmatter.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 
 const ROOT = resolve(import.meta.dir, '..')
@@ -145,7 +146,10 @@ describe('MCP tools never claim a write the store refused', () => {
 
     expect(r.isError).toBeFalsy()
     expect(r.text).toContain('saved "prefs.md"')
-    expect((await client().pull(ns)).entries['prefs.md']).toBe('likes terse answers')
+    // The stored body is the content under the client's frontmatter stamp.
+    expect(stripFrontmatter((await client().pull(ns)).entries['prefs.md'] as string)).toBe(
+      'likes terse answers',
+    )
   })
 
   test('memory_delete says nothing was deleted when the key is absent', async () => {

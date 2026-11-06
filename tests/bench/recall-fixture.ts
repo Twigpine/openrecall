@@ -21,8 +21,10 @@
  *   prescribes. Most are 150-350 characters; some carry a few `Context:`
  *   sentences and reach 1,500.
  * - A quarter of the facts are update pairs: an older dated note with one
- *   value and a newer note with another. The newer one is the gold answer and
- *   the older one is the note a recency-blind ranker will tie with.
+ *   value and a newer note with another, each stamped `updated:` with its
+ *   date the way `memory_save` stamps a note. The newer one is the gold
+ *   answer and the older one is the note a recency-blind ranker will tie
+ *   with; the stamp is what a recency tiebreak has to go on.
  * - Noise up to `size`: a tenth of the corpus is long notes (1,000-2,000
  *   characters) that reuse a fact's topic words and subject without stating
  *   the fact, and the rest are short generic engineering notes on unrelated
@@ -54,7 +56,7 @@
  * different corpora.
  */
 
-export const GENERATOR_VERSION = '1'
+export const GENERATOR_VERSION = '2'
 
 export type QuestionKind = 'lexical' | 'paraphrase' | 'update' | 'unanswerable'
 
@@ -1015,8 +1017,11 @@ const UNANSWERABLE_FRAMES = [
  * Note assembly.
  * ----------------------------------------------------------------------- */
 
-function frontmatter(name: string, description: string, type: Folder): string {
-  return ['---', `name: ${name}`, `description: ${description}`, `type: ${type}`, '---'].join('\n')
+function frontmatter(name: string, description: string, type: Folder, updated?: string): string {
+  const lines = ['---', `name: ${name}`, `description: ${description}`, `type: ${type}`]
+  if (updated !== undefined) lines.push(`updated: ${updated}`)
+  lines.push('---')
+  return lines.join('\n')
 }
 
 function date(rng: Rng, year: number): string {
@@ -1043,11 +1048,12 @@ function factNote(
   value: string,
   keySuffix: string,
   lead: string,
+  updated?: string,
 ): Note {
   const name = `${tpl.slug}-${subject}${keySuffix}`
   const key = `${tpl.folder}/${name}.md`
   const description = tpl.description(subject)
-  const lines = [frontmatter(name, description, tpl.folder), `# ${tpl.title(subject)}`]
+  const lines = [frontmatter(name, description, tpl.folder, updated), `# ${tpl.title(subject)}`]
   lines.push(`${lead}${tpl.fact(subject, value)}`)
   // Length spread: most facts stay tiny, a few carry context and get long.
   const roll = rng()
@@ -1162,7 +1168,15 @@ export function fixture(seed: number, size: FixtureSize): Fixture {
       const datedIsNewer = rng() < 0.5
       const stamp = `-${(datedIsNewer ? newDate : oldDate).slice(0, 7)}`
       const oldKey = add(
-        factNote(rng, tpl, subject, older, datedIsNewer ? '' : stamp, `Dated ${oldDate}. `),
+        factNote(
+          rng,
+          tpl,
+          subject,
+          older,
+          datedIsNewer ? '' : stamp,
+          `Dated ${oldDate}. `,
+          oldDate,
+        ),
       )
       const newKey = add(
         factNote(
@@ -1172,6 +1186,7 @@ export function fixture(seed: number, size: FixtureSize): Fixture {
           value,
           datedIsNewer ? stamp : '',
           `Updated ${newDate}; replaces the earlier note. `,
+          newDate,
         ),
       )
       facts.push({ tpl, subject, key: newKey, superseded: oldKey })

@@ -22,7 +22,18 @@
  * below does. That split matters because a wrong recall answer delivered
  * confidently is worse than none: a query the corpus cannot answer has to come
  * back empty rather than with whatever scored highest among the noise.
+ *
+ * Two things the lexical score cannot see are read off a note's frontmatter
+ * instead (`NoteMeta`): a note stamped `status: superseded` or `deleted`, or
+ * one whose `expires:` date has passed, is not a candidate unless the caller
+ * asks for it, and among hits that score within a few percent of the top the
+ * most recently updated one goes first. Neither is a score term: the floor
+ * sees exactly the ranking it saw before, and a note the floor withheld is
+ * never promoted by its date.
  */
+
+import { parseFrontmatter } from './frontmatter.ts'
+import { isHiddenKey } from './keys.ts'
 
 export type MemoryEntry = {
   key: string
@@ -42,34 +53,112 @@ export type ScoredEntry = MemoryEntry & {
    * namespace and a 2,000-entry one.
    */
   norm?: number
+  /** What the note's frontmatter says about it, with `updated` resolved (see `NoteMeta`). */
+  meta?: NoteMeta
 }
 
 /**
- * Whether a key names a `MEMORY.md` index, skipped as ranking input.
+ * The frontmatter fields recall reads, as strings exactly as the note carries
+ * them. Everything is optional: a legacy note has none of it, and the manifest
+ * timestamp stands in for `updated` when the stamp is missing.
+ */
+export type NoteMeta = {
+  /** `type:`, the closed set the stamp writes or whatever a hand-written note says. */
+  type?: string
+  /** `updated:`, else (on a `ScoredEntry`) the manifest timestamp the caller passed as `updatedAt`. */
+  updated?: string
+  /** `agent:`, the `name/version` the stamp wrote. */
+  agent?: string
+  /** `status:`; `superseded` and `deleted` make the note inactive. */
+  status?: string
+  /** `superseded_by:`, the key of the note that replaced this one. */
+  supersededBy?: string
+  /** `expires:` as `YYYY-MM-DD`; a past date makes the note inactive. */
+  expires?: string
+}
+
+/** The frontmatter fields recall reads, off a note's content. Empty for a note without frontmatter. */
+export function noteMeta(content: string): NoteMeta {
+  const fm = parseFrontmatter(content)
+  if (!fm) return {}
+  const meta: NoteMeta = {}
+  const str = (k: string) => {
+    const v = fm.fields.get(k)
+    return typeof v === 'string' && v !== '' ? v : undefined
+  }
+  const type = str('type')
+  if (type !== undefined) meta.type = type
+  const updated = str('updated')
+  if (updated !== undefined) meta.updated = updated
+  const agent = str('agent')
+  if (agent !== undefined) meta.agent = agent
+  const status = str('status')
+  if (status !== undefined) meta.status = status
+  const supersededBy = str('superseded_by')
+  if (supersededBy !== undefined) meta.supersededBy = supersededBy
+  const expires = str('expires')
+  if (expires !== undefined) meta.expires = expires
+  return meta
+}
+
+/** Today as the UTC calendar date `expires:` is written in. */
+export function utcToday(now: Date = new Date()): string {
+  return now.toISOString().slice(0, 10)
+}
+
+const CALENDAR_DATE = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * Whether a note is out of the running: superseded or deleted by its own
+ * status line, or past its `expires:` date. The date compare is on the UTC
+ * calendar day, as the stamp validates the field, and an `expires:` that is
+ * not a calendar date never expires rather than expiring by accident.
+ */
+export function isInactive(meta: NoteMeta, today: string): boolean {
+  if (meta.status === 'superseded' || meta.status === 'deleted') return true
+  return meta.expires !== undefined && CALENDAR_DATE.test(meta.expires) && meta.expires < today
+}
+
+/**
+ * Hits scoring at least this fraction of the top score are one band, ordered
+ * by `updated` instead of by score. The band is for the update-pair shape: an
+ * older note and its replacement carry the same topic words and differ by a
+ * value and a sentence, so they land within a few percent of each other and
+ * the lexical order between them is decided by length normalization, which
+ * prefers whichever is shorter. Outside the band the score difference is a
+ * real difference in match and recency does not override it.
+ */
+export const RECENCY_BAND = 0.95
+
+/**
+ * Which keys are skipped as ranking input: every `MEMORY.md` index and every
+ * bookkeeping entry under `sys.openrecall/`. The rule itself lives in
+ * `./keys.ts` (`isHiddenKey`); `isIndexKey` is re-exported from here because
+ * the tests of the index exclusion import it from this module.
  *
  * The memory guidance tells agents to keep a `MEMORY.md` table of contents, so
  * it names every other entry and carries the whole namespace's vocabulary
  * without answering anything. Ranked alongside real notes it wins any query
  * that spans a few topics and returns a list of links where the answer was
- * wanted, which is worse the larger the namespace gets.
+ * wanted, which is worse the larger the namespace gets. The access sidecar
+ * (`sys.openrecall/accessed.json`) has the same shape, every key in the
+ * namespace and nothing that answers, and the trash and history that later
+ * land under the same prefix are notes nobody asked to be reminded of.
  *
- * It is dropped from the INPUT rather than filtered out of the results,
+ * They are dropped from the INPUT rather than filtered out of the results,
  * because the results are the smaller half of the damage. Left in the corpus
- * it still counts toward the entry total and, worse, still adds itself to the
- * document frequency of every term it lists, so a term carried by exactly one
- * note looks like it is carried by two and the note that answers is
- * downweighted for it. Filtering after scoring fixes what is displayed and
+ * an index still counts toward the entry total and, worse, still adds itself
+ * to the document frequency of every term it lists, so a term carried by
+ * exactly one note looks like it is carried by two and the note that answers
+ * is downweighted for it. Filtering after scoring fixes what is displayed and
  * leaves that intact.
  *
  * At any depth: an agent that organizes a sub-tree the way the guide has it
  * organize the root keeps a `project/MEMORY.md` there too, and it has the
- * same shape and does the same damage as the root one. Before this change a
- * nested one was ranked on purpose, as "a note somebody wrote"; a fact filed
- * under an index key is still reachable through memory_get.
+ * same shape and does the same damage as the root one. A fact filed under a
+ * hidden key is still reachable through memory_get.
  */
-export function isIndexKey(key: string): boolean {
-  return key === 'MEMORY.md' || key.endsWith('/MEMORY.md')
-}
+export { isIndexKey } from './keys.ts'
 
 /**
  * Function words that carry no topical signal, removed before scoring.
@@ -344,8 +433,16 @@ type Doc = {
   content: string
   updatedAt?: string
   fingerprint: string
-  /** False for an index entry, which is tracked so `retain` sees it but never scored or counted. */
+  /** The frontmatter fields, parsed once per content change; `updated` here is the stamp alone. */
+  meta: NoteMeta
+  /** False for a hidden entry, which is tracked so `retain` sees it but never scored or counted. */
   candidate: boolean
+  /**
+   * True for a candidate that is superseded, deleted or expired: tokenized,
+   * so it can be ranked on request, but kept out of the default statistics.
+   * Re-evaluated against the day of each query for the dated ones.
+   */
+  inactive: boolean
   tf: Map<string, TermFrequency>
   /** Words per field (compounds excluded), what the length normalization reads. */
   len: number[]
@@ -417,6 +514,16 @@ export type IndexDoc = {
    * string never matches, so a caller with no fingerprint always re-tokenizes.
    */
   fingerprint: string
+  /** The frontmatter fields, when the caller already parsed them; else `upsert` parses the content. */
+  meta?: NoteMeta
+}
+
+/** What `rank` may be asked beyond the query and the limit. */
+export type RankOptions = {
+  /** Rank superseded, deleted and expired notes too. Off by default. */
+  includeInactive?: boolean
+  /** The UTC calendar date `expires:` is compared against. Defaults to today. */
+  today?: string
 }
 
 export type RankedResult = {
@@ -424,6 +531,11 @@ export type RankedResult = {
   results: ScoredEntry[]
   /** Entries considered for this query, which excludes every `MEMORY.md` index. */
   searched: number
+  /**
+   * Superseded, deleted or expired entries left out of `searched`, so the
+   * caller can say they exist; 0 when `includeInactive` ranked them.
+   */
+  inactive: number
   /** Entries that scored but did not clear the floor. Excludes `limit` trimming. */
   belowFloor: number
   /**
@@ -519,6 +631,10 @@ export type Floors = {
  * `queue kestrel` case in `tests/relevance.test.ts`, 0.14 of the top); on the
  * harness no value tried for either cost a single gold.
  *
+ * Joined the tuning set after the fit, without moving it: "are we moving to
+ * postgres" (norm 0.46), which is decided by the old note being stamped
+ * superseded and dropped from the candidates, not by any constant here.
+ *
  * Reported, not fitted: HELD_OUT 4 of 12 top-1, the same four as before (the
  * sole-carrier paraphrases, all through the clear route). Against the
  * 2,000-entry harness this floor abstains on 8 of 25 unanswerable questions
@@ -566,6 +682,33 @@ export function applyFloors(scored: ScoredEntry[], floors: Floors = FLOORS): Sco
 }
 
 /**
+ * The document frequencies, total field lengths and note count of one group
+ * of notes, kept incrementally: adding a note adds its own counts, removing
+ * it subtracts them.
+ */
+class Stats {
+  n = 0
+  readonly df = new Map<string, number>()
+  readonly totalLen = [0, 0, 0, 0, 0]
+
+  add(d: Doc): void {
+    this.n++
+    for (let f = 0; f < FIELDS; f++) this.totalLen[f] += d.len[f]
+    for (const t of d.tf.keys()) this.df.set(t, (this.df.get(t) ?? 0) + 1)
+  }
+
+  subtract(d: Doc): void {
+    this.n--
+    for (let f = 0; f < FIELDS; f++) this.totalLen[f] -= d.len[f]
+    for (const t of d.tf.keys()) {
+      const n = (this.df.get(t) ?? 0) - 1
+      if (n > 0) this.df.set(t, n)
+      else this.df.delete(t)
+    }
+  }
+}
+
+/**
  * The corpus statistics of one namespace, kept between recalls and updated
  * per entry.
  *
@@ -576,15 +719,25 @@ export function applyFloors(scored: ScoredEntry[], floors: Floors = FLOORS): Sco
  * rather than keeping postings lists: simpler, half the memory, and trivially
  * incremental, since removing a note is subtracting its own counts.
  *
- * An index entry (`isIndexKey`) is tracked so `retain` and `sync` see it, but
- * it is not a candidate: it is never scored, never counted in `searched`, and
- * contributes nothing to any statistic.
+ * A hidden entry (`isHiddenKey`: an index or a `sys.openrecall/` bookkeeping
+ * entry) is tracked so `retain` and `sync` see it, but it is not a candidate:
+ * it is never scored, never counted in `searched`, and contributes nothing to
+ * any statistic.
+ *
+ * An inactive note (`isInactive`: superseded, deleted or expired by its own
+ * frontmatter) is tokenized but its counts go to a second set of statistics
+ * that a default query never reads, so it is neither scored nor counted in
+ * `searched` and adds nothing to any term's document frequency: the counts a
+ * miss reports describe the notes that could have answered, and a term that
+ * only a replaced note still carries is as rare as it is. A query that asks
+ * for inactive notes reads both sets, which is exactly ranking the union.
  */
 export class RecallIndex {
   private readonly docs = new Map<string, Doc>()
-  private readonly df = new Map<string, number>()
-  private readonly totalLen = [0, 0, 0, 0, 0]
-  private candidates = 0
+  private readonly active = new Stats()
+  private readonly inactiveStats = new Stats()
+  /** Ids of candidates with an `expires:` date, whose activity depends on the day of the query. */
+  private readonly dated = new Set<string>()
 
   /** Notes tracked, index entries included. */
   get size(): number {
@@ -614,10 +767,13 @@ export class RecallIndex {
       return 'unchanged'
     }
     if (existing) this.subtract(existing)
-    const candidate = !isIndexKey(doc.key)
+    const candidate = !isHiddenKey(doc.key)
     const { tf, len } = candidate
       ? tokenizeDoc(doc.key, doc.content)
       : { tf: new Map<string, TermFrequency>(), len: [0, 0, 0, 0, 0] }
+    // Parsed once per content change, like the term maps; a hidden entry's
+    // frontmatter is as irrelevant as its terms.
+    const meta = candidate ? (doc.meta ?? noteMeta(doc.content)) : {}
     const stored: Doc = {
       id: doc.id,
       key: doc.key,
@@ -625,7 +781,9 @@ export class RecallIndex {
       content: doc.content,
       updatedAt: doc.updatedAt,
       fingerprint: doc.fingerprint,
+      meta,
       candidate,
+      inactive: candidate && isInactive(meta, utcToday()),
       tf,
       len,
     }
@@ -641,6 +799,24 @@ export class RecallIndex {
     this.subtract(existing)
     this.docs.delete(id)
     return true
+  }
+
+  /**
+   * Move every dated note to the side of the line `today` puts it on. Called
+   * once per query, so a note that expires while the process lives stops
+   * ranking the day it expires, without re-tokenizing anything.
+   */
+  private refresh(today: string): void {
+    // Snapshot: moving a note deletes and re-adds its id in `dated`.
+    for (const id of [...this.dated]) {
+      const d = this.docs.get(id)
+      if (!d) continue
+      const inactive = isInactive(d.meta, today)
+      if (inactive === d.inactive) continue
+      this.subtract(d)
+      d.inactive = inactive
+      this.add(d)
+    }
   }
 
   /** Drop every note not in `ids`. Returns the ids removed. */
@@ -666,20 +842,19 @@ export class RecallIndex {
 
   private add(d: Doc): void {
     if (!d.candidate) return
-    this.candidates++
-    for (let f = 0; f < FIELDS; f++) this.totalLen[f] += d.len[f]
-    for (const t of d.tf.keys()) this.df.set(t, (this.df.get(t) ?? 0) + 1)
+    if (d.meta.expires !== undefined) this.dated.add(d.id)
+    ;(d.inactive ? this.inactiveStats : this.active).add(d)
   }
 
   private subtract(d: Doc): void {
     if (!d.candidate) return
-    this.candidates--
-    for (let f = 0; f < FIELDS; f++) this.totalLen[f] -= d.len[f]
-    for (const t of d.tf.keys()) {
-      const n = (this.df.get(t) ?? 0) - 1
-      if (n > 0) this.df.set(t, n)
-      else this.df.delete(t)
-    }
+    this.dated.delete(d.id)
+    ;(d.inactive ? this.inactiveStats : this.active).subtract(d)
+  }
+
+  /** The statistics a query reads: the active notes, plus the inactive ones when asked. */
+  private stats(includeInactive: boolean): Stats[] {
+    return includeInactive ? [this.active, this.inactiveStats] : [this.active]
   }
 
   /**
@@ -696,22 +871,30 @@ export class RecallIndex {
   static scoreAll(
     indexes: RecallIndex[],
     query: string,
-  ): { scored: ScoredEntry[]; searched: number; terms: string[] } {
+    opts: RankOptions = {},
+  ): { scored: ScoredEntry[]; searched: number; inactive: number; terms: string[] } {
+    const includeInactive = opts.includeInactive ?? false
+    const today = opts.today ?? utcToday()
     let searched = 0
+    let inactive = 0
     const total = [0, 0, 0, 0, 0]
     for (const idx of indexes) {
-      searched += idx.candidates
-      for (let f = 0; f < FIELDS; f++) total[f] += idx.totalLen[f]
+      idx.refresh(today)
+      for (const s of idx.stats(includeInactive)) {
+        searched += s.n
+        for (let f = 0; f < FIELDS; f++) total[f] += s.totalLen[f]
+      }
+      if (!includeInactive) inactive += idx.inactiveStats.n
     }
     const terms = [...new Set(tokenize(query))]
-    if (terms.length === 0 || searched === 0) return { scored: [], searched, terms }
+    if (terms.length === 0 || searched === 0) return { scored: [], searched, inactive, terms }
 
     const n = searched
     const compound = terms.map(isCompound)
     const words = compound.filter(c => !c).length
     const dfs = terms.map(t => {
       let df = 0
-      for (const idx of indexes) df += idx.df.get(t) ?? 0
+      for (const idx of indexes) for (const s of idx.stats(includeInactive)) df += s.df.get(t) ?? 0
       return df
     })
     // Never negative: a term in every note is worth ln(1 + 0.5 / (N + 0.5)).
@@ -738,7 +921,7 @@ export class RecallIndex {
     const scored: ScoredEntry[] = []
     for (const idx of indexes) {
       for (const d of idx.docs.values()) {
-        if (!d.candidate) continue
+        if (!d.candidate || (d.inactive && !includeInactive)) continue
         const wKey = FIELD_WEIGHT[KEY] / (oneMinusB[KEY] + bOver[KEY] * d.len[KEY])
         const wName = FIELD_WEIGHT[NAME] / (oneMinusB[NAME] + bOver[NAME] * d.len[NAME])
         const wDesc =
@@ -767,6 +950,10 @@ export class RecallIndex {
         // matches stay rankable and the floor decides what is returned. An
         // entry covering nothing scores zero and never clears it anyway.
         if (words > 0) score *= covered / words
+        // The stamp wins over the manifest: the manifest records the last
+        // write of the ciphertext, which a resave that changed nothing but a
+        // sidecar can move, while the stamp is the client's own record.
+        const updated = d.meta.updated ?? d.updatedAt
         scored.push({
           key: d.key,
           score,
@@ -774,6 +961,7 @@ export class RecallIndex {
           content: d.content,
           ...(d.namespace === undefined ? {} : { namespace: d.namespace }),
           ...(d.updatedAt === undefined ? {} : { updatedAt: d.updatedAt }),
+          meta: { ...d.meta, ...(updated === undefined ? {} : { updated }) },
         })
       }
     }
@@ -784,7 +972,7 @@ export class RecallIndex {
         a.key.localeCompare(b.key) ||
         (a.namespace ?? '').localeCompare(b.namespace ?? ''),
     )
-    return { scored, searched, terms }
+    return { scored, searched, inactive, terms }
   }
 
   /**
@@ -792,26 +980,69 @@ export class RecallIndex {
    * no-match message needs. This is the one scoring path: `rankEntriesDetailed`
    * builds a transient index and calls it.
    */
-  static rank(indexes: RecallIndex[], query: string, limit = 5): RankedResult {
-    const { scored, searched, terms } = RecallIndex.scoreAll(indexes, query)
+  static rank(indexes: RecallIndex[], query: string, limit = 5, opts?: RankOptions): RankedResult {
+    const { scored, searched, inactive, terms } = RecallIndex.scoreAll(indexes, query, opts)
     if (terms.length === 0)
-      return { results: [], searched, belowFloor: 0, trimmedByLimit: 0, reason: 'no-content-terms' }
+      return {
+        results: [],
+        searched,
+        inactive,
+        belowFloor: 0,
+        trimmedByLimit: 0,
+        reason: 'no-content-terms',
+      }
     const kept = applyFloors(scored)
     if (kept.length === 0)
       return {
         results: [],
         searched,
+        inactive,
         belowFloor: searched,
         trimmedByLimit: 0,
         reason: 'below-floor',
       }
     return {
-      results: kept.slice(0, limit),
+      results: recencyOrder(kept).slice(0, limit),
       searched,
+      inactive,
       belowFloor: searched - kept.length,
       trimmedByLimit: Math.max(0, kept.length - limit),
     }
   }
+}
+
+/** `updated` as a number for ordering; undefined when absent or not a date. */
+function whenOf(entry: ScoredEntry): number | undefined {
+  const s = entry.meta?.updated
+  if (s === undefined) return undefined
+  const t = Date.parse(s)
+  return Number.isNaN(t) ? undefined : t
+}
+
+/**
+ * Reorder the band of hits scoring within `RECENCY_BAND` of the top one by
+ * `updated`, newest first, and leave everything after the band as it was.
+ * Applied after the floor and before the limit, so it can neither promote a
+ * withheld entry nor change which entries clear the floor. Dated entries go
+ * before undated ones; within equal dates, and among the undated, the score
+ * order with its key and namespace tiebreaks is kept (the sort is stable).
+ */
+export function recencyOrder(kept: ScoredEntry[]): ScoredEntry[] {
+  const top = kept[0]
+  if (!top) return kept
+  const floor = top.score * RECENCY_BAND
+  let n = 0
+  while (n < kept.length && kept[n].score >= floor) n++
+  if (n < 2) return kept
+  const band = kept.slice(0, n).sort((a, b) => {
+    const ta = whenOf(a)
+    const tb = whenOf(b)
+    if (ta === tb) return 0
+    if (ta === undefined) return 1
+    if (tb === undefined) return -1
+    return tb - ta
+  })
+  return [...band, ...kept.slice(n)]
 }
 
 /**
@@ -823,6 +1054,7 @@ export function rankEntriesDetailed(
   query: string,
   entries: MemoryEntry[],
   limit = 5,
+  opts?: RankOptions,
 ): RankedResult {
   const index = new RecallIndex()
   for (const e of entries) {
@@ -835,7 +1067,7 @@ export function rankEntriesDetailed(
       fingerprint: '',
     })
   }
-  return RecallIndex.rank([index], query, limit)
+  return RecallIndex.rank([index], query, limit, opts)
 }
 
 /**
@@ -847,11 +1079,13 @@ export function rankMemoriesDetailed(
   query: string,
   entries: Record<string, string>,
   limit = 5,
+  opts?: RankOptions,
 ): RankedResult {
   return rankEntriesDetailed(
     query,
     Object.entries(entries).map(([key, content]) => ({ key, content })),
     limit,
+    opts,
   )
 }
 

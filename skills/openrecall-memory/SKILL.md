@@ -37,6 +37,9 @@ For a project task, establish its scope before recalling:
    scopes together within one result limit and size cap. Each hit names its
    namespace; include that namespace in follow-up `memory_get` calls. Other
    projects are searched only when you explicitly include their namespaces.
+   Each hit ends with a provenance trailer `[type · agent · updated date]`;
+   superseded and deleted entries are hidden unless you pass
+   `include_inactive`.
 
 Opening a project **does not change tool defaults**. Pass the namespace
 explicitly when saving, listing, searching, reading, or deleting. Store project
@@ -136,8 +139,16 @@ Depending on the agent, the tools may carry a prefix — e.g.
 same tools. If your agent shows MCP tools by name only until you look them up
 (a tool-search step), search for "openrecall" first.
 
-- `memory_save(key, content)` — `key` is a path that mirrors a memory directory
-  layout; `content` is markdown. Saving the same `key` overwrites it, unless the entry changed since this session last read it. A stale save is refused and names the keys that moved: read each with `memory_get`, merge, and save again.
+- `memory_save(key, content, supersedes?, force?)` — `key` is a path that
+  mirrors a memory directory layout; `content` is markdown. Saving the same
+  `key` overwrites it, unless the entry changed since this session last read
+  it. A stale save is refused and names the keys that moved: read each with
+  `memory_get`, merge, and save again. The client stamps the note's
+  frontmatter on every save (see "Frontmatter" below) and routes by type:
+  `user` facts go to the shared namespace, `project` and `reference` facts to
+  the open project's namespace, `feedback` to either. A save in the wrong
+  place is refused and names the right one; `force: true` overrides that, and
+  is also what edits a note marked `locked: true`.
 - `memory_recall(query, limit?)` — relevance-ranked entries for a query.
 - `memory_recall(query, namespaces: [shared, project], limit?)` — one ranked,
   bounded result across up to eight explicit namespaces. Use `namespace` or
@@ -158,16 +169,18 @@ same tools. If your agent shows MCP tools by name only until you look them up
 
 Keep a flat, predictable layout:
 
-- `MEMORY.md` — a short index: one line per memory with a link and a hook.
+- `MEMORY.md` — the index: generated from each entry's `description` on
+  every save, one line per note grouped by type, plus a `## Pinned` section
+  you may edit.
 - `user/*.md`, `feedback/*.md`, `project/*.md`, `reference/*.md` — one fact per
   file, named in kebab-case (`feedback/run-tests-before-done.md`).
 
 `memory_recall` never returns `MEMORY.md`. An index is a list of pointers, so it
 matches a bit of every query and answers none of them, and returning it would
-spend a recall slot that a real entry should have had. Keep it anyway: it is the
-table of contents you read deliberately with `memory_get('MEMORY.md')`, or
-alongside `memory_list`, when you are orienting in an unfamiliar namespace or
-following up a recall that found nothing.
+spend a recall slot that a real entry should have had. It is the table of
+contents you read deliberately with `memory_get('MEMORY.md')`, or alongside
+`memory_list`, when you are orienting in an unfamiliar namespace or following
+up a recall that found nothing.
 
 In each saved file, prefer a tiny shape:
 
@@ -178,12 +191,43 @@ In each saved file, prefer a tiny shape:
 Why: <why it matters — for feedback/project>
 ```
 
+#### Frontmatter
+
+Every note carries a YAML frontmatter block that the client stamps on save.
+You never write these fields by hand; a value you supply for one of them is
+replaced and the save response says so:
+
+- `id` — a ULID, fixed for the life of the note.
+- `created`, `updated` — ISO timestamps; `created` survives every update.
+- `agent`, `session` — which agent (`name/version`) and which session wrote
+  this version.
+
+Fields you may set, all optional:
+
+- `type` — one of `user`, `feedback`, `project`, `reference` (a closed set;
+  anything else is refused). Inferred from the key's first segment when the
+  key starts with one of those, so `feedback/run-tests.md` needs no `type:`.
+- `description` — one line; recall weights it heavily.
+- `tags` — up to 8 lowercase kebab-case words.
+- `supersedes` — the key of the older note this one replaces (or pass it as
+  the tool argument).
+- `expires` — `YYYY-MM-DD` after which the note is stale.
+- `locked` — `true` to refuse saves and deletes without `force: true`.
+
+Keys under `sys.openrecall/` are bookkeeping the client keeps (for example
+the access-date sidecar) and cannot be written by hand; `memory_list` hides
+them unless `include_system` is true.
+
 ## Maintain the memory, don't just append
 
 - **Check before adding.** `memory_search` for an existing file on the topic and
   update it rather than creating a near-duplicate.
-- **Keep `MEMORY.md` current.** When you add a fact, add its one-line pointer to
-  the index; when you delete one, remove the line.
+- **`MEMORY.md` is generated** from each entry's `description` on every save;
+  do not edit the generated lines. Put orientation notes in its `## Pinned`
+  section (20 lines max): save `MEMORY.md` with the edited section and the
+  rest is regenerated around it. A hand-written index is migrated on the
+  first save: its prose lines become the Pinned section and the old text is
+  kept under `sys.openrecall/MEMORY.before-generated.md`.
 - **Correct and prune.** If a fact turns out to be wrong or outdated, fix or
   `memory_delete` it. Stale memory is worse than none.
 - **Trust but verify.** A recalled fact reflects what was true when it was

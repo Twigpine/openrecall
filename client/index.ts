@@ -116,6 +116,20 @@ export type PullOptions = {
    * namespace the server may have moved on from.
    */
   allowStale?: boolean
+  /**
+   * What the pull records as this client's write base. `true` (the default)
+   * records the whole namespace, as every read does. A list of keys records
+   * exactly those: the hash each listed key was decrypted from, or its
+   * absence when the read enumerated the namespace and did not list it (an
+   * earlier sighting of it is cleared either way), and nothing about any
+   * other key. `false` records nothing.
+   *
+   * For a caller that reads the namespace in order to rewrite one derived
+   * entry conditionally, without rebasing a write it is about to make for a
+   * key it read earlier: the MCP save pulls to regenerate `MEMORY.md` on every
+   * write, and that read must not turn a stale save into a current one.
+   */
+  observe?: boolean | string[]
 }
 
 /** What a bulk `entries` read returned, decrypted, with one status per key asked for. */
@@ -240,6 +254,13 @@ export class OpenRecallDecryptError extends Error {
 type Observed = {
   hashes: Record<string, string>
   enumerated: boolean
+  /**
+   * Keys a partial but enumerating read (`pull` with `observe: [...]`) found
+   * missing. Asserted absent on the next write, exactly as an enumerated read
+   * asserts every key it did not list, so two sessions creating the same
+   * derived entry at once still conflict instead of overwriting each other.
+   */
+  absent?: Set<string>
 }
 
 /** One answered request: the status line plus the body, already read. */
@@ -730,7 +751,7 @@ export class OpenRecallClient {
     } catch (err) {
       clock.fetchMs += performance.now() - started
       if (opts.allowStale && this.mirror && isUnreachable(err)) {
-        const stale = await this.pullFromMirror(namespace, clock)
+        const stale = await this.pullFromMirror(namespace, clock, opts.observe)
         if (stale) return stale
       }
       throw err
@@ -742,7 +763,7 @@ export class OpenRecallClient {
       // Enumerated, unlike the full view: `empty` means no manifest exists, so
       // there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
-      lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      this.observePull(namespace, opts.observe, {}, {}, true)
       this.remember(namespace, new Map())
       await this.mirrorWrite(namespace, 0, [], {})
       return {
@@ -882,10 +903,7 @@ export class OpenRecallClient {
     this.remember(namespace, next)
     // The legacy path records what it decrypted, exactly as the full view
     // always has; the incremental path records the manifest. See `observed`.
-    lruSet(this.observed, namespace, {
-      hashes: enumerated ? live : { ...hashes },
-      enumerated,
-    })
+    this.observePull(namespace, opts.observe, enumerated ? live : { ...hashes }, hashes, enumerated)
     await this.mirrorWrite(
       namespace,
       version,
@@ -1086,7 +1104,11 @@ export class OpenRecallClient {
    * it records is not enumerated: the manifest on disk is this client's
    * memory of the server, not the server.
    */
-  private async pullFromMirror(namespace: string, clock: Clock): Promise<PullResult | null> {
+  private async pullFromMirror(
+    namespace: string,
+    clock: Clock,
+    observe: PullOptions['observe'],
+  ): Promise<PullResult | null> {
     const mirror = this.mirror
     if (!mirror) return null
     const t = performance.now()
@@ -1121,7 +1143,7 @@ export class OpenRecallClient {
       next.set(cacheKey(entryKey, h.hash), { plaintext: h.plaintext, size: h.size })
     }
     this.remember(namespace, next)
-    lruSet(this.observed, namespace, { hashes: { ...hashes }, enumerated: false })
+    this.observePull(namespace, observe, { ...hashes }, hashes, false)
     const fetched = Date.parse(m.fetchedAt)
     const staleMs = Number.isFinite(fetched) ? Math.max(0, Date.now() - fetched) : 0
     return {
@@ -1254,8 +1276,18 @@ export class OpenRecallClient {
    * precondition for that key and must never let a write assert some other
    * key's ABSENCE. See `observed`, where the same distinction cost a drifted
    * key every future write.
+   *
+   * `observe: false` reads without recording, as `hashes` offers. The MCP
+   * save reads the stored note before it writes (to carry its stamps
+   * forward), and that read must not rebase the write: a save computed from
+   * what this session read earlier has to be refused when the note moved
+   * since, and recording the fresh hash here would make the stale base match.
    */
-  async entry(namespace: string, entryKey: string): Promise<string> {
+  async entry(
+    namespace: string,
+    entryKey: string,
+    opts: { observe?: boolean } = {},
+  ): Promise<string> {
     const res = await this.request(
       'entry',
       namespace,
@@ -1280,7 +1312,8 @@ export class OpenRecallClient {
     } catch (err) {
       throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
     }
-    this.record(namespace, { [entryKey]: ciphertextHash(data.entry) }, [])
+    if (opts.observe !== false)
+      this.record(namespace, { [entryKey]: ciphertextHash(data.entry) }, [])
     return plaintext
   }
 
@@ -1407,6 +1440,21 @@ export class OpenRecallClient {
       stored,
       deletions.filter(k => !refused.has(k)),
     )
+    // What this client just wrote is what the server now holds under these
+    // hashes, so the next pull can reuse it as it reuses anything it
+    // decrypted: a write followed by a pull of the same namespace (the MCP
+    // save regenerates the index that way) costs the hashes round trip and
+    // nothing more. The sizes are ciphertext sizes, as for a decrypted body.
+    if (this.cacheEnabled && Object.keys(stored).length > 0) {
+      const cache = this.cacheFor(namespace) ?? new Map<string, Cached>()
+      for (const [k, hash] of Object.entries(stored)) {
+        cache.set(cacheKey(k, hash), {
+          plaintext: entries[k] as string,
+          size: Buffer.byteLength(toUpload[k] as string, 'base64'),
+        })
+      }
+      this.remember(namespace, cache)
+    }
     return {
       namespace,
       version: result.version,
@@ -1497,10 +1545,45 @@ export class OpenRecallClient {
     for (const k of keys) {
       const hash = Object.hasOwn(observed.hashes, k) ? observed.hashes[k] : undefined
       if (hash !== undefined) base[k] = hash
-      else if (observed.enumerated) base[k] = null
+      else if (observed.enumerated || observed.absent?.has(k)) base[k] = null
     }
     if (Object.keys(base).length === 0) return null
     return { base }
+  }
+
+  /**
+   * What a pull leaves in `observed`, per {@link PullOptions.observe}: the
+   * whole namespace (`whole`, which for an enumerating read is the manifest),
+   * only the listed keys (their decrypted-from hash out of `returned`, or
+   * cleared), or nothing.
+   */
+  private observePull(
+    namespace: string,
+    observe: PullOptions['observe'],
+    whole: Record<string, string>,
+    returned: Record<string, string>,
+    enumerated: boolean,
+  ): void {
+    if (observe === false) return
+    if (observe === undefined || observe === true) {
+      lruSet(this.observed, namespace, { hashes: whole, enumerated })
+      return
+    }
+    let observed = this.observed.get(namespace)
+    if (!observed) observed = { hashes: {}, enumerated: false }
+    lruSet(this.observed, namespace, observed)
+    for (const k of observe) {
+      if (Object.hasOwn(returned, k)) {
+        observed.hashes[k] = returned[k] as string
+        observed.absent?.delete(k)
+      } else {
+        delete observed.hashes[k]
+        if (enumerated) {
+          observed.absent ??= new Set()
+          observed.absent.add(k)
+        }
+      }
+    }
   }
 
   /**
@@ -1516,7 +1599,10 @@ export class OpenRecallClient {
     let observed = this.observed.get(namespace)
     if (!observed) observed = { hashes: {}, enumerated: false }
     lruSet(this.observed, namespace, observed)
-    for (const [k, hash] of Object.entries(written)) observed.hashes[k] = hash
+    for (const [k, hash] of Object.entries(written)) {
+      observed.hashes[k] = hash
+      observed.absent?.delete(k)
+    }
     for (const k of deleted) delete observed.hashes[k]
   }
 }

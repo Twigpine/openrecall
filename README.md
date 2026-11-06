@@ -129,12 +129,12 @@ MCP server and the memory skill:
 
 | Tool | Purpose |
 |---|---|
-| `memory_save(key, content)` | persist a durable fact |
+| `memory_save(key, content, supersedes?, force?)` | persist a durable fact; the client stamps its frontmatter (id, type, created, updated, agent, session) and routes it by type |
 | `memory_recall(query)` | rank stored memories by relevance (locally) and return the matching part of each |
 | `memory_search(query)` | literal keyword or substring search |
 | `memory_get(key)` | read one entry in full |
-| `memory_list()` | list entry keys |
-| `memory_delete(key)` | remove an entry |
+| `memory_list(include_system?)` | list entry keys (bookkeeping under `sys.openrecall/` hidden unless asked) |
+| `memory_delete(key, force?)` | remove an entry (`force` for one marked `locked: true`) |
 | `memory_project(project)` | register or reopen a stable project memory scope |
 | `memory_projects(limit?, offset?)` | discover projects in the encrypted directory |
 

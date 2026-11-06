@@ -4,9 +4,14 @@
  */
 
 import { describe, expect, test } from 'bun:test'
+import { stampForSave } from '../src/mcp/frontmatter.ts'
 import {
   FLOORS,
+  isInactive,
+  noteMeta,
+  RECENCY_BAND,
   RecallIndex,
+  rankEntriesDetailed,
   rankMemories,
   rankMemoriesDetailed,
   stemTerm,
@@ -274,14 +279,17 @@ describe('rankMemoriesDetailed', () => {
   // The counts exist for the no-match message U7 builds, and an unread count is
   // an unchecked one, so they are pinned here rather than at their consumer.
   //
-  // One fewer than the corpus: the namespace-root `MEMORY.md` never enters
-  // ranking input, so it is not among the entries searched either. Reporting it
-  // as searched would be the same defect as ranking it, one layer along.
-  const all = Object.keys(CORPUS).length - 1
+  // Two fewer than the corpus: the namespace-root `MEMORY.md` never enters
+  // ranking input, so it is not among the entries searched either (reporting
+  // it as searched would be the same defect as ranking it, one layer along),
+  // and `project/postgres-old.md` is stamped superseded, so it is counted as
+  // left out rather than as searched.
+  const all = Object.keys(CORPUS).length - 2
 
   test('reports what was searched and what the floor withheld', () => {
     const d = rankMemoriesDetailed('namespace validation rules', CORPUS, 5)
     expect(d.searched).toBe(all)
+    expect(d.inactive).toBe(1)
     expect(d.results[0]?.key).toBe('reference/namespaces.md')
     // belowFloor counts what the floor withheld, not what `limit` trimmed:
     // results plus below-floor must not add up to more than the corpus.
@@ -622,5 +630,298 @@ describe('tokenizeAll', () => {
     expect(all).not.toContain('i')
     for (const t of topical)
       expect(`${t} in tokenizeAll: ${all.includes(t)}`).toBe(`${t} in tokenizeAll: true`)
+  })
+})
+
+/**
+ * Hidden keys: the bookkeeping entries under `sys.openrecall/` join the
+ * indexes as non-candidates, and the tokens the save stamp writes into
+ * every note's frontmatter (`agent: claude-code/…`, the session id) never
+ * become ranking terms. The body field has been frontmatter-stripped since
+ * the BM25F ranker; this pins that the stamp cannot undo it.
+ */
+describe('hidden keys and stamped frontmatter never rank', () => {
+  const sidecar = JSON.stringify({ v: 1, keys: { 'deploy.md': '2026-11-05' } })
+
+  test('sys.openrecall/* is never a candidate and is not counted in searched', () => {
+    const notes = {
+      'deploy.md': 'Deploys go to Fly in region sin.',
+      'other.md': 'The weather is mild today.',
+    }
+    const withSystem = {
+      ...notes,
+      'sys.openrecall/accessed.json': sidecar,
+      'sys.openrecall/trash/old-deploy.md': 'Deploys go to Fly in region sin.',
+      'sys.openrecall/history/deploy.md.json': '{"deploy":"region sin"}',
+    }
+    const d = rankMemoriesDetailed('deploy region', withSystem)
+    expect(d.searched).toBe(2)
+    expect(d.results.map(r => r.key)).toEqual(['deploy.md'])
+    // Not merely filtered out of the results: absent from the statistics too,
+    // so the note that answers scores exactly what it scores without them.
+    const alone = rankMemoriesDetailed('deploy region', notes)
+    expect(d.results[0]?.score).toBe(alone.results[0]?.score as number)
+    expect(rankMemories('accessed sidecar keys', withSystem)).toHaveLength(0)
+  })
+
+  test('tokens that occur only in the stamped frontmatter do not rank', () => {
+    const stamped = stampForSave(null, 'Deploys go to Fly in region sin.\n', {
+      now: '2026-11-05T10:00:00.000Z',
+      agent: 'claude-code/2.1.284',
+      session: 'sABCDEFGH',
+      key: 'project/deploy.md',
+    })
+    expect(stamped.content).toContain('agent: claude-code/2.1.284')
+    const entries = {
+      'project/deploy.md': stamped.content,
+      'other.md': 'The weather is mild today.',
+    }
+    for (const q of ['claude', 'claude code', 'sABCDEFGH', 'session sABCDEFGH', 'agent'])
+      expect(
+        `${q}: ${rankMemories(q, entries)
+          .map(r => r.key)
+          .join(',')}`,
+      ).toBe(`${q}: `)
+    // Control: the body still ranks, so the stamp cost the note nothing.
+    expect(rankMemories('deploy region', entries)[0]?.key).toBe('project/deploy.md')
+  })
+})
+
+describe('recency tiebreak', () => {
+  // Long filler so that a one-word length difference between the two notes
+  // of a pair lands within the band rather than outside it: the body's
+  // length normalization reads `len / avg`, and against short filler one
+  // extra word is a ten-percent score difference.
+  const filler: Record<string, string> = {}
+  for (let i = 0; i < 4; i++)
+    filler[`filler-${i}.md`] =
+      `Unrelated note ${i} about the weather, the garden, the kettle and the post, written at some length so the corpus has an ordinary average note size. `.repeat(
+        2,
+      )
+  const OLD = 'The routing table lives in Postgres.'
+  const NEW = 'The routing table now lives in SQLite.'
+  const stamp = (updated: string, body: string) => `---\nupdated: ${updated}\n---\n${body}`
+
+  test('two entries scoring within the band return the newer first, scores untouched', () => {
+    // Control: undated, the shorter and older note wins on length alone and
+    // the two sit within the band of each other.
+    const undated = { 'project/db-a.md': OLD, 'project/db-b.md': NEW, ...filler }
+    const control = rankMemoriesDetailed('routing table', undated).results
+    expect(control.map(r => r.key)).toEqual(['project/db-a.md', 'project/db-b.md'])
+    expect(control[1].score).toBeGreaterThanOrEqual(control[0].score * RECENCY_BAND)
+    expect(control[1].score).toBeLessThan(control[0].score)
+
+    const dated = {
+      'project/db-a.md': stamp('2025-03-01T09:00:00.000Z', OLD),
+      'project/db-b.md': stamp('2026-02-01T09:00:00.000Z', NEW),
+      ...filler,
+    }
+    const r = rankMemoriesDetailed('routing table', dated).results
+    expect(r.map(x => x.key)).toEqual(['project/db-b.md', 'project/db-a.md'])
+    // The order moved and nothing else: the stamp is not a score term.
+    expect(r[0].score).toBeCloseTo(control[1].score, 12)
+    expect(r[1].score).toBeCloseTo(control[0].score, 12)
+    expect(r[0].meta?.updated).toBe('2026-02-01T09:00:00.000Z')
+  })
+
+  test('outside the band the score order holds however old the winner is', () => {
+    const entries = {
+      'project/db-a.md': `---\ndescription: the routing table\nupdated: 2024-01-01\n---\n${OLD}`,
+      'project/db-b.md': stamp('2026-02-01', NEW),
+      ...filler,
+    }
+    const r = rankMemoriesDetailed('routing table', entries).results
+    expect(r.map(x => x.key)).toEqual(['project/db-a.md', 'project/db-b.md'])
+    expect(r[1].score).toBeLessThan(r[0].score * RECENCY_BAND)
+  })
+
+  test('entries without a date keep the key tiebreak, behind any dated one in the band', () => {
+    const tied = { 'project/db-a.md': OLD, 'project/db-b.md': OLD, ...filler }
+    expect(rankMemories('routing table', tied).map(r => r.key)).toEqual([
+      'project/db-a.md',
+      'project/db-b.md',
+    ])
+    const oneDated = { ...tied, 'project/db-b.md': stamp('2026-02-01', OLD) }
+    expect(rankMemories('routing table', oneDated).map(r => r.key)).toEqual([
+      'project/db-b.md',
+      'project/db-a.md',
+    ])
+    const sameDate = {
+      'project/db-a.md': stamp('2026-02-01', OLD),
+      'project/db-b.md': stamp('2026-02-01', OLD),
+      ...filler,
+    }
+    expect(rankMemories('routing table', sameDate).map(r => r.key)).toEqual([
+      'project/db-a.md',
+      'project/db-b.md',
+    ])
+  })
+
+  test('the newest entry outside the band is not promoted into it', () => {
+    const entries = {
+      'project/db-a.md': stamp('2025-01-01', OLD),
+      'project/db-b.md': stamp('2026-01-01', OLD),
+      // Half the query, the newest date of the three.
+      'project/db-c.md': stamp('2027-01-01', 'The table of contents.'),
+      ...filler,
+    }
+    const r = rankMemoriesDetailed('routing table', entries).results
+    expect(r.map(x => x.key)).toEqual(['project/db-b.md', 'project/db-a.md', 'project/db-c.md'])
+    expect(r[2].score).toBeLessThan(r[0].score * RECENCY_BAND)
+  })
+
+  test('the manifest timestamp stands in for a missing stamp', () => {
+    const r = rankEntriesDetailed('routing table', [
+      { key: 'project/db-a.md', content: OLD, updatedAt: '2025-01-01T00:00:00Z' },
+      { key: 'project/db-b.md', content: OLD, updatedAt: '2026-01-01T00:00:00Z' },
+      ...Object.entries(filler).map(([key, content]) => ({ key, content })),
+    ]).results
+    expect(r.map(x => x.key)).toEqual(['project/db-b.md', 'project/db-a.md'])
+    expect(r[0].meta?.updated).toBe('2026-01-01T00:00:00Z')
+    // And the stamp wins over the manifest when both are present.
+    const stamped = rankEntriesDetailed('routing table', [
+      {
+        key: 'project/db-a.md',
+        content: stamp('2027-01-01', OLD),
+        updatedAt: '2025-01-01T00:00:00Z',
+      },
+      { key: 'project/db-b.md', content: OLD, updatedAt: '2026-01-01T00:00:00Z' },
+      ...Object.entries(filler).map(([key, content]) => ({ key, content })),
+    ]).results
+    expect(stamped.map(x => x.key)).toEqual(['project/db-a.md', 'project/db-b.md'])
+  })
+
+  test('a withheld entry is never promoted by its date', () => {
+    const entries = {
+      'project/db-a.md': stamp('2025-01-01', OLD),
+      // Shares nothing with the query that the filler does not, and is newest.
+      'project/db-z.md': stamp('2027-01-01', 'The weather is mild today.'),
+      ...filler,
+    }
+    expect(rankMemories('routing table', entries).map(r => r.key)).toEqual(['project/db-a.md'])
+  })
+})
+
+describe('inactive notes are not candidates unless asked', () => {
+  const notes = {
+    'project/db-new.md': 'The routing table lives in SQLite.',
+    'other.md': 'The weather is mild today.',
+  }
+  const superseded =
+    '---\nstatus: superseded\nsuperseded_by: project/db-new.md\n---\nThe routing table lives in Postgres.'
+
+  test('a superseded note is excluded by default, counted apart, and included on request', () => {
+    const all = { ...notes, 'project/db-old.md': superseded }
+    const d = rankMemoriesDetailed('routing table', all)
+    expect(d.searched).toBe(2)
+    expect(d.inactive).toBe(1)
+    expect(d.results.map(r => r.key)).toEqual(['project/db-new.md'])
+    // Absent from the statistics too, like a hidden key: the note that answers
+    // scores exactly what it scores with the superseded one deleted.
+    expect(d.results[0].score).toBe(
+      rankMemoriesDetailed('routing table', notes).results[0].score as number,
+    )
+
+    const inc = rankMemoriesDetailed('routing table', all, 5, { includeInactive: true })
+    expect(inc.searched).toBe(3)
+    expect(inc.inactive).toBe(0)
+    expect(inc.results.map(r => r.key)).toEqual(['project/db-new.md', 'project/db-old.md'])
+    expect(inc.results[1].meta).toEqual({
+      status: 'superseded',
+      supersededBy: 'project/db-new.md',
+    })
+  })
+
+  test('a deleted note is treated the same', () => {
+    const all = {
+      ...notes,
+      'sys.openrecall/trash/db-old.md':
+        '---\nstatus: deleted\n---\nThe routing table lives in Postgres.',
+      'project/db-gone.md':
+        '---\nstatus: deleted\ndeleted: 2026-11-01\n---\nThe routing table lives in Postgres.',
+    }
+    const d = rankMemoriesDetailed('routing table', all)
+    // The trashed copy is a hidden key and is not even counted as inactive.
+    expect(`${d.searched}/${d.inactive}`).toBe('2/1')
+    expect(d.results.map(r => r.key)).toEqual(['project/db-new.md'])
+    const inc = rankMemoriesDetailed('routing table', all, 5, { includeInactive: true })
+    expect(inc.results.map(r => r.key)).toEqual(['project/db-gone.md', 'project/db-new.md'])
+  })
+
+  test('a miss reports the inactive notes it did not search', () => {
+    const all = { ...notes, 'project/db-old.md': superseded }
+    const d = rankMemoriesDetailed('postgres', all)
+    expect(d.results).toEqual([])
+    expect(d.reason).toBe('below-floor')
+    expect(`${d.searched}/${d.belowFloor}/${d.inactive}`).toBe('2/2/1')
+    const inc = rankMemoriesDetailed('postgres', all, 5, { includeInactive: true })
+    expect(inc.results.map(r => r.key)).toEqual(['project/db-old.md'])
+  })
+
+  test('an expired note is excluded from the day after its date, and included on request', () => {
+    const all = {
+      ...notes,
+      'project/db-temp.md':
+        '---\nexpires: 2026-11-04\n---\nThe routing table lives in a temp file.',
+    }
+    const onTheDay = rankMemoriesDetailed('routing table', all, 5, { today: '2026-11-04' })
+    expect(`${onTheDay.searched}/${onTheDay.inactive}`).toBe('3/0')
+    expect(onTheDay.results.map(r => r.key)).toContain('project/db-temp.md')
+    const after = rankMemoriesDetailed('routing table', all, 5, { today: '2026-11-05' })
+    expect(`${after.searched}/${after.inactive}`).toBe('2/1')
+    expect(after.results.map(r => r.key)).toEqual(['project/db-new.md'])
+    const asked = rankMemoriesDetailed('routing table', all, 5, {
+      today: '2026-11-05',
+      includeInactive: true,
+    })
+    expect(`${asked.searched}/${asked.inactive}`).toBe('3/0')
+    expect(asked.results.map(r => r.key)).toContain('project/db-temp.md')
+  })
+
+  test('a long-lived index moves a note across the line the day it expires', () => {
+    const idx = new RecallIndex()
+    const all = {
+      ...notes,
+      'project/db-temp.md':
+        '---\nexpires: 2026-11-04\n---\nThe routing table lives in a temp file.',
+    }
+    for (const [key, content] of Object.entries(all))
+      idx.upsert({ id: key, key, content, fingerprint: key })
+    expect(RecallIndex.rank([idx], 'routing table', 5, { today: '2026-11-04' }).searched).toBe(3)
+    const expired = RecallIndex.rank([idx], 'routing table', 5, { today: '2026-11-05' })
+    expect(`${expired.searched}/${expired.inactive}`).toBe('2/1')
+    // The statistics followed it: same score as an index never holding it.
+    expect(expired.results[0].score).toBe(
+      rankMemoriesDetailed('routing table', notes).results[0].score as number,
+    )
+    // And back, for a clock that is behind.
+    expect(RecallIndex.rank([idx], 'routing table', 5, { today: '2026-11-03' }).searched).toBe(3)
+  })
+
+  test('an expires that is not a calendar date never expires', () => {
+    const all = { ...notes, 'project/db-temp.md': '---\nexpires: soon\n---\nThe routing table.' }
+    const d = rankMemoriesDetailed('routing table', all, 5, { today: '2099-01-01' })
+    expect(`${d.searched}/${d.inactive}`).toBe('3/0')
+    expect(isInactive({ expires: 'soon' }, '2099-01-01')).toBe(false)
+    expect(isInactive({ expires: '2026-11-04' }, '2026-11-05')).toBe(true)
+    expect(isInactive({ expires: '2026-11-04' }, '2026-11-04')).toBe(false)
+    expect(isInactive({ status: 'active' }, '2026-11-04')).toBe(false)
+  })
+
+  test('noteMeta reads the six fields and nothing else', () => {
+    expect(
+      noteMeta(
+        '---\nid: 01X\ntype: feedback\ndescription: d\nupdated: 2026-11-05T10:00:00.000Z\nagent: claude-code/2.1.284\nstatus: superseded\nsuperseded_by: a/b.md\nexpires: 2027-01-01\nlocked: true\n---\nbody',
+      ),
+    ).toEqual({
+      type: 'feedback',
+      updated: '2026-11-05T10:00:00.000Z',
+      agent: 'claude-code/2.1.284',
+      status: 'superseded',
+      supersededBy: 'a/b.md',
+      expires: '2027-01-01',
+    })
+    expect(noteMeta('no frontmatter')).toEqual({})
+    expect(noteMeta('---\nupdated:\n---\nbody')).toEqual({})
   })
 })

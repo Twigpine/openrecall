@@ -17,16 +17,56 @@ import {
   OpenRecallTimeoutError,
   type PullOptions,
   type PullResult,
+  type PushResult,
 } from '../../client/index.ts'
 import { SecretFoundError } from '../../client/secretscan.ts'
 import { validateNamespace } from '../namespace.ts'
 import {
+  ACCESS_FLUSH_THRESHOLD,
+  flushAccessed,
+  mergeAccessed,
+  noteAccess,
+  parseAccessed,
+  serializeAccessed,
+  settleAccess,
+  today,
+} from './accessed.ts'
+import {
+  FrontmatterError,
+  inferType,
+  type NoteType,
+  parseFrontmatter,
+  stampForSave,
+} from './frontmatter.ts'
+import {
+  ACCESSED_KEY,
+  INDEX_KEY,
+  isHiddenKey,
+  isSystemKey,
+  LEGACY_INDEX_KEY,
+  SYSTEM_PREFIX,
+} from './keys.ts'
+import {
+  generateIndex,
+  type IndexNote,
+  indexNoteOf,
+  linkTarget,
+  MAX_BYTES,
+  MAX_LINES,
+  MAX_PINNED,
+  parseIndex,
+} from './memindex.ts'
+import {
   type IndexDoc,
+  isInactive,
+  type NoteMeta,
   RecallIndex,
   stripFrontmatterText,
   tokenize,
   tokenizeAll,
 } from './relevance.ts'
+import { neutralize } from './sanitize.ts'
+import { makeSession, type Session } from './session.ts'
 
 export type ToolResult = { text: string; isError?: boolean; timings?: Timings }
 
@@ -118,13 +158,15 @@ const timed =
 
 /**
  * The client surface these tools actually use. Declared structurally, and
- * narrowed to the five methods, so a test double is checked against the real
+ * narrowed to the four methods, so a test double is checked against the real
  * client's signatures by the compiler instead of being waved through with an
  * `as unknown as OpenRecallClient` cast. Two stubs had already drifted under those
  * casts (one returning `skipped` where `PushResult` says `unchanged`, and
- * omitting `namespace`), which is exactly the drift a cast hides.
+ * omitting `namespace`), which is exactly the drift a cast hides. `delete` is
+ * not among them: every delete goes through `push` with a deletion, because it
+ * carries the regenerated index in the same request.
  */
-export type MemoryClient = Pick<OpenRecallClient, 'pull' | 'push' | 'hashes' | 'delete' | 'entry'>
+export type MemoryClient = Pick<OpenRecallClient, 'pull' | 'push' | 'hashes' | 'entry'>
 
 /** Entry order by key. Not the default sort, which compares "key,value" pairs. */
 const byKey = ([a]: [string, unknown], [b]: [string, unknown]) => (a < b ? -1 : 1)
@@ -561,6 +603,45 @@ function regionFor(
   return { text: out, partial: out !== content.trim() }
 }
 
+/**
+ * Longest provenance trailer a hit carries. Every part of it is frontmatter
+ * an author wrote, so like the region it is bounded rather than trusted.
+ */
+const MAX_TRAILER_CHARS = 160
+
+/** `updated` as the calendar day it names, or undefined when it names none. */
+function dayOf(updated: string): string | undefined {
+  const t = Date.parse(updated)
+  if (!Number.isNaN(t)) return new Date(t).toISOString().slice(0, 10)
+  return /^\d{4}-\d{2}-\d{2}/.test(updated) ? updated.slice(0, 10) : undefined
+}
+
+/** Why an inactive note is in the output at all, for the trailer of a hit shown on request. */
+function whyInactive(meta: NoteMeta): string {
+  if (meta.supersededBy) return `superseded by ${meta.supersededBy}`
+  if (meta.status === 'superseded' || meta.status === 'deleted') return meta.status
+  return `expired ${meta.expires}`
+}
+
+/**
+ * The last line of every hit: `[type · agent · updated YYYY-MM-DD]`, each part
+ * left out when the note does not say, and nothing at all when none of it is
+ * known, so a bare legacy note renders exactly as before. A note without a
+ * `type:` stamp shows the type its key implies, which is what the next save
+ * would stamp. When the caller asked for inactive notes, a hit that is one
+ * says why it is inactive, so a replaced fact is never read as current.
+ */
+function trailerFor(key: string, meta: NoteMeta | undefined, inactive: boolean): string {
+  const parts: string[] = []
+  const type = meta?.type ?? inferType(key)
+  if (type) parts.push(type)
+  if (meta?.agent) parts.push(meta.agent)
+  const day = meta?.updated === undefined ? undefined : dayOf(meta.updated)
+  if (day) parts.push(`updated ${day}`)
+  if (inactive && meta) parts.push(whyInactive(meta))
+  return parts.length ? `\n[${clip(parts.join(' · '), MAX_TRAILER_CHARS)}]` : ''
+}
+
 export type MemoryTools = ReturnType<typeof makeTools>
 
 /**
@@ -586,7 +667,112 @@ function fnv1a(s: string): string {
  */
 const MAX_INDEXED_NAMESPACES = 16
 
-export function makeTools(client: MemoryClient, defaultNamespace: string) {
+export type SaveOptions = {
+  /** Key of the older entry this one replaces; stamped into the frontmatter. */
+  supersedes?: string
+  /** Override the routing check, save over a locked note, or save over an unreadable one. */
+  force?: boolean
+}
+export type DeleteOptions = {
+  /** Delete a locked note. */
+  force?: boolean
+}
+export type ListOptions = {
+  /** Also list the bookkeeping entries under `sys.openrecall/`. */
+  includeSystem?: boolean
+}
+export type RecallOptions = {
+  /** Also rank superseded, deleted and expired notes, which are hidden by default. */
+  includeInactive?: boolean
+}
+
+/** A namespace of the shape `memory_project` creates: `<shared>/projects/<sha256 hex>`. */
+export function isProjectNamespace(ns: string): boolean {
+  return /\/projects\/[0-9a-f]{64}$/.test(ns)
+}
+
+/** The refusal for a hand-written key under the reserved prefix. */
+function reservedKey(key: string, verb: string): string {
+  return (
+    `Refused to ${verb} "${key}": keys under ${SYSTEM_PREFIX} are bookkeeping the client ` +
+    'maintains by itself (the access-date sidecar, and later the trash and the version ' +
+    'history) and are never written by hand. Use a key outside that prefix.'
+  )
+}
+
+/** The second response line of a save whose agent-supplied stamps were replaced. */
+function correctedLine(fields: string[]): string {
+  const list =
+    fields.length === 1
+      ? fields[0]
+      : `${fields.slice(0, -1).join(', ')} and ${fields[fields.length - 1]}`
+  const plural = fields.length > 1
+  return `(stamped: ${list} ${plural ? 'are' : 'is'} set by the client; your value${plural ? 's were' : ' was'} replaced)`
+}
+
+/**
+ * The keys a write carries for its own bookkeeping. A 409 confined to them
+ * is another session's bookkeeping landing first, which the tool layer
+ * resolves by rebuilding on top of it; a 409 naming anything else is the
+ * agent's to resolve.
+ */
+const BOOKKEEPING_KEYS: readonly string[] = [INDEX_KEY, ACCESSED_KEY, LEGACY_INDEX_KEY]
+
+/** The keys a 409 names, or null when `e` is not a 409 or names none. */
+function conflictKeys(e: unknown): string[] | null {
+  if (!(e instanceof OpenRecallHttpError) || e.status !== 409) return null
+  const raw = e.details?.conflicts
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null
+  const keys = Object.keys(raw as Record<string, unknown>)
+  return keys.length > 0 ? keys : null
+}
+
+function isBookkeepingOnlyConflict(e: unknown): boolean {
+  return conflictKeys(e)?.every(k => BOOKKEEPING_KEYS.includes(k)) ?? false
+}
+
+const INDEX_NOT_REFRESHED = '(index not refreshed; the next save will)'
+
+const plural = (n: number, one: string, many = `${one}s`) => (n === 1 ? one : many)
+
+/** What a write to a namespace carries besides the caller's entries, and what to say about it. */
+type IndexPlan = {
+  /** The index to push, or null when what is stored is already right. */
+  text: string | null
+  /** True when the stored index should go: nothing left to list and nothing pinned. */
+  remove: boolean
+  /** The hand-written index to copy aside, on the first regeneration over one. */
+  backup: string | null
+  /** Response lines about the index. */
+  notes: string[]
+}
+
+type Bookkept = { result: PushResult; notes: string[] }
+
+/**
+ * Why a save or delete of a locked note is refused. Null when the stored
+ * note is not locked (or there is none). `locked: true` is the one frontmatter
+ * field an agent sets to say "do not change this without a human's say-so";
+ * `force: true` is how the agent says it has it.
+ */
+function lockedRefusal(
+  existing: string | null,
+  key: string,
+  ns: string,
+  action: 'save' | 'delete',
+): string | null {
+  if (existing === null) return null
+  if (parseFrontmatter(existing)?.fields.get('locked') !== true) return null
+  return action === 'save'
+    ? `Refused to save "${key}" in ${ns}: the stored note is locked (locked: true in its frontmatter). Read it with memory_get, and pass force: true if it really should change. Nothing was stored.`
+    : `Refused to delete "${key}" from ${ns}: the stored note is locked (locked: true in its frontmatter). Pass force: true if it really should go. "${key}" is still stored.`
+}
+
+export function makeTools(
+  client: MemoryClient,
+  defaultNamespace: string,
+  session: Session = makeSession(),
+) {
   const nsOf = (ns?: string) => (ns?.trim() ? ns.trim() : defaultNamespace)
 
   /**
@@ -599,15 +785,31 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
    */
   const indexes = new Map<string, RecallIndex>()
   function indexFor(ns: string): RecallIndex {
-    const idx = indexes.get(ns) ?? new RecallIndex()
-    indexes.delete(ns)
-    indexes.set(ns, idx)
-    while (indexes.size > MAX_INDEXED_NAMESPACES) {
-      const oldest = indexes.keys().next()
+    return warm(indexes, ns, () => new RecallIndex())
+  }
+
+  /**
+   * The index's view of each note (`IndexNote`), parsed once per ciphertext
+   * hash and kept per namespace, so regenerating `MEMORY.md` over a
+   * 2,000-note namespace parses only the notes that changed since the last
+   * write. Same custody and bound as the recall index above.
+   */
+  const indexNotes = new Map<string, Map<string, { fingerprint: string; note: IndexNote }>>()
+  function indexNotesFor(ns: string) {
+    return warm(indexNotes, ns, () => new Map<string, { fingerprint: string; note: IndexNote }>())
+  }
+
+  /** `map[ns]`, created by `make` when absent, moved to most-recent, oldest dropped past the cap. */
+  function warm<T>(map: Map<string, T>, ns: string, make: () => T): T {
+    const v = map.get(ns) ?? make()
+    map.delete(ns)
+    map.set(ns, v)
+    while (map.size > MAX_INDEXED_NAMESPACES) {
+      const oldest = map.keys().next()
       if (oldest.done) break
-      indexes.delete(oldest.value)
+      map.delete(oldest.value)
     }
-    return idx
+    return v
   }
 
   /**
@@ -656,33 +858,434 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
     // "toString" must miss, never resolve to something off the prototype.
     if (!Object.hasOwn(entries, key))
       return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
+    if (!isHiddenKey(key)) noteAccess(session.pendingAccess, ns, key, today())
     return ok(`### ${key} (${ns})\n${entries[key]}`)
   }
 
-  return {
-    /** Persist one durable memory entry (encrypted before upload). */
-    save: timed(async (timer, key: string, content: string, namespace?: string) => {
-      const ns = nsOf(namespace)
-      try {
-        const r = await timer.time('fetch', () => client.push(ns, { [key]: content }))
-        timer.entries = 1
-        // A 2xx does not mean this key landed: the server refuses oversized and
-        // malformed entries per key and reports them here. Match on the key
-        // that was sent, since another key's refusal says nothing about this one.
-        const refused = r.skipped?.find(s => s.key === key)
-        if (refused) return fail(skippedText(key, ns, refused.reason))
-        const status = r.uploaded.length ? 'saved' : 'unchanged'
-        return ok(`${status} "${key}" in ${ns} (v${r.version})`)
-      } catch (e) {
-        if (e instanceof SecretFoundError) {
-          return fail(
-            `Refused to save "${key}" — it looks like it contains a secret:\n${e.message}`,
-          )
+  /**
+   * The note stored under `key`, or null when there is none. The two 404s
+   * (`empty`, `entry_not_found`) and a key the server will not look up are
+   * all "no note": the push that follows reports an invalid key with the
+   * right move, so there is nothing to read first. A body the manifest names
+   * and the store cannot serve is lost data, and a save over it is refused
+   * the way `memory_get` reports it, unless the caller forces.
+   *
+   * The read does not rebase the write (`observe: false`): the stale-base
+   * precondition compares the push against what this session read through
+   * recall, get or search, and a read made only to carry the stamps forward
+   * must not turn a stale save into a current one. A server that predates
+   * the entry view is read through the full pull, as `get` does; that path
+   * does record what it saw, so against such a server a save is conditional
+   * on the pull it just made rather than on the session's earlier read.
+   */
+  async function readExisting(ns: string, key: string, force: boolean): Promise<string | null> {
+    try {
+      return await client.entry(ns, key, { observe: false })
+    } catch (e) {
+      if (e instanceof OpenRecallHttpError) {
+        if (e.status === 404 && (e.code === 'empty' || e.code === 'entry_not_found')) return null
+        if (e.status === 400) return null
+        if (e.status === 503 && e.code === 'entry_unreadable') {
+          if (force) return null
+          throw new Rendered(unreadableEntry(key, ns))
         }
-        const d = denial(`Saving "${key}"`, ns, defaultNamespace, 'Nothing was stored.', e)
-        return fail(d ?? `save failed: ${bounded((e as Error).message)}`)
       }
-    }),
+      if (e instanceof OpenRecallProtocolError) {
+        const { entries } = await client.pull(ns)
+        return Object.hasOwn(entries, key) ? (entries[key] as string) : null
+      }
+      throw e
+    }
+  }
+
+  /**
+   * Where a note of this type belongs, against where it is being saved. A
+   * `user` note into a project namespace and a `project` or `reference` note
+   * into the shared namespace while a project is open are refused with the
+   * namespace that should have been used; `feedback` goes anywhere and gets
+   * a reminder when it lands in a project. Untyped notes are not routed, and
+   * nothing is routed when no project has been opened in this process, since
+   * there is then no project namespace to name.
+   */
+  function routeCheck(
+    type: NoteType | undefined,
+    key: string,
+    ns: string,
+  ): { refusal?: string; note?: string } {
+    if (!type) return {}
+    const projectShaped = isProjectNamespace(ns)
+    if (type === 'user' && projectShaped) {
+      return {
+        refusal:
+          `Refused to save "${key}" in ${ns}: it is a user note (type: user) and that is a project namespace. ` +
+          `Standing facts about the user belong in the shared namespace ${defaultNamespace}; save it there, ` +
+          'or pass force: true to keep it here. Nothing was stored.',
+      }
+    }
+    if (
+      (type === 'project' || type === 'reference') &&
+      ns === defaultNamespace &&
+      session.openedProjects.size > 0
+    ) {
+      const opened = [...session.openedProjects].join(', ')
+      return {
+        refusal:
+          `Refused to save "${key}" in ${ns}: it is a ${type} note and that is the shared namespace. ` +
+          `Project facts belong in the open project's namespace (${opened}); save it there, ` +
+          'or pass force: true to keep it here. Nothing was stored.',
+      }
+    }
+    if (type === 'feedback' && projectShaped) {
+      return {
+        note:
+          '(feedback saved in a project namespace applies to that project only; feedback that ' +
+          `applies everywhere belongs in ${defaultNamespace})`,
+      }
+    }
+    return {}
+  }
+
+  /**
+   * The `MEMORY.md` a write to `ns` should carry: the index regenerated over
+   * the pulled namespace with the write applied on top, so the saved key is
+   * listed with its new description and the deleted key is gone, in the same
+   * request as the write itself.
+   *
+   * The Pinned lines come from the index as it will stand after the write:
+   * the stored one, or the text being saved when the write is the index
+   * itself, which is how an agent edits its Pinned section. A hand-maintained
+   * index (no marker) is adopted on the way: its prose lines become the first
+   * Pinned block, its link lines are re-derived from the notes and those that
+   * name a note which no longer exists are counted, and the stored text is
+   * copied whole to `LEGACY_INDEX_KEY` once, so nothing an agent wrote there
+   * is lost. No index is created for a namespace that holds no notes, and one
+   * that has nothing left to list and nothing pinned is removed: an empty
+   * projection is bookkeeping, not memory, and a namespace holding only it
+   * would otherwise never read as empty again.
+   */
+  function planIndex(
+    ns: string,
+    view: PullResult,
+    entries: Record<string, string>,
+    deletions: string[],
+  ): IndexPlan {
+    const stored = Object.hasOwn(view.entries, INDEX_KEY)
+      ? (view.entries[INDEX_KEY] as string)
+      : null
+    const after: Record<string, string> = { ...view.entries, ...entries }
+    for (const k of deletions) delete after[k]
+    const savingIndex = Object.hasOwn(entries, INDEX_KEY)
+    const source = savingIndex ? (entries[INDEX_KEY] as string) : stored
+    const parsed = parseIndex(source)
+    let pinned = parsed.pinned
+    let stale = 0
+    if (source !== null && !parsed.generated) {
+      pinned = [...parsed.pinned, ...parsed.legacyLines].slice(0, MAX_PINNED)
+      for (const line of source.split(/\r?\n/)) {
+        const target = linkTarget(line)
+        if (target !== null && !target.includes('://') && !Object.hasOwn(after, target)) stale++
+      }
+    }
+    const backup =
+      stored !== null &&
+      !parseIndex(stored).generated &&
+      !Object.hasOwn(view.entries, LEGACY_INDEX_KEY)
+        ? stored
+        : null
+
+    const cache = indexNotesFor(ns)
+    const notes: IndexNote[] = []
+    const live = new Set<string>()
+    for (const key of Object.keys(after)) {
+      if (isHiddenKey(key)) continue
+      live.add(key)
+      const content = after[key] as string
+      if (Object.hasOwn(entries, key)) {
+        // The write itself: its stored hash is not known until it lands, so it
+        // is parsed now and cached from the next pull like any other note.
+        notes.push(indexNoteOf(key, content))
+        continue
+      }
+      const updatedAt = view.updatedAt[key]
+      const fingerprint =
+        view.hashes?.[key] ?? `${updatedAt ?? ''}|${content.length}|${fnv1a(content)}`
+      const hit = cache.get(key)
+      if (hit && hit.fingerprint === fingerprint) {
+        notes.push(hit.note)
+        continue
+      }
+      const note = indexNoteOf(key, content, updatedAt)
+      cache.set(key, { fingerprint, note })
+      notes.push(note)
+    }
+    for (const key of cache.keys()) if (!live.has(key)) cache.delete(key)
+
+    if (notes.length === 0 && pinned.length === 0 && !savingIndex) {
+      return { text: null, remove: stored !== null, backup, notes: [] }
+    }
+    const generated = generateIndex(notes, pinned, new Date())
+    const lines: string[] = []
+    if (backup !== null) {
+      const kept = pinned.length
+      lines.push(
+        `(MEMORY.md is now generated; ${
+          kept
+            ? `your ${kept} orientation ${plural(kept, 'line')} ${kept === 1 ? 'was' : 'were'} kept under "## Pinned"; `
+            : ''
+        }the old index was saved as ${LEGACY_INDEX_KEY})`,
+      )
+    } else if (savingIndex) {
+      lines.push(
+        `(MEMORY.md is generated from each note's frontmatter: only its "## Pinned" section ` +
+          `(${pinned.length} ${plural(pinned.length, 'line')}) was taken from what you sent; the rest was regenerated)`,
+      )
+    }
+    if (stale > 0) {
+      lines.push(
+        `(${stale} stale index ${plural(stale, 'line')} dropped: ${stale === 1 ? 'it' : 'they'} pointed at ` +
+          `${stale === 1 ? 'a key' : 'keys'} that no longer ${stale === 1 ? 'exists' : 'exist'})`,
+      )
+    }
+    if (generated.nearCap) {
+      lines.push(
+        `MEMORY.md is at ${generated.lines}/${MAX_LINES} lines (${(generated.bytes / 1000).toFixed(1)}/${MAX_BYTES / 1000} KB): ` +
+          'merge or supersede stale entries (memory_doctor lists candidates).',
+      )
+    }
+    return {
+      text: savingIndex || generated.text !== stored ? generated.text : null,
+      remove: false,
+      backup,
+      notes: lines,
+    }
+  }
+
+  /**
+   * The index after a push in which the server refused one of the entries it
+   * was regenerated for: it names a note that does not exist, and the save's
+   * own response says nothing was stored. Put it back the way the notes
+   * stand, best effort; a failure here leaves a line the next write corrects.
+   */
+  async function repairIndex(
+    timer: Timer,
+    ns: string,
+    view: PullResult,
+    entries: Record<string, string>,
+    deletions: string[],
+    refused: string[],
+  ): Promise<void> {
+    const rest: Record<string, string> = {}
+    for (const [k, v] of Object.entries(entries)) if (!refused.includes(k)) rest[k] = v
+    const stored = Object.hasOwn(view.entries, INDEX_KEY)
+      ? (view.entries[INDEX_KEY] as string)
+      : null
+    const again = planIndex(ns, view, rest, deletions)
+    const text = again.remove ? null : (again.text ?? stored)
+    try {
+      await timer.time('fetch', () =>
+        text === null
+          ? client.push(ns, {}, { deletions: [INDEX_KEY] })
+          : client.push(ns, { [INDEX_KEY]: text }),
+      )
+    } catch {
+      // Best effort only.
+    }
+  }
+
+  /**
+   * Push `entries` (and `deletions`) to `ns` together with the namespace's
+   * bookkeeping, in one request: the regenerated `MEMORY.md` when it would
+   * differ from what is stored (and the copy of a hand-written one on the
+   * first regeneration), and the pending access stamps as the sidecar when
+   * there are any. All of it is derived from one pull of the namespace, which
+   * is cheap once the in-process cache is warm (a hashes round trip and the
+   * changed bodies) and records a base for the bookkeeping keys only, so the
+   * write's own precondition stays whatever this session's earlier reads made
+   * it: a stale save is still refused as one.
+   *
+   * A 409 confined to the bookkeeping keys is another session's bookkeeping
+   * landing first: re-pull, rebuild on top of it, retry once. If it conflicts
+   * again, the namespace cannot be read whole (a body that will not decrypt,
+   * say), or the server refuses the larger write for size, the caller's
+   * entries go alone and the response says the index was not refreshed: a
+   * note is never held back by index contention. A 409 naming the caller's
+   * own key is the caller's to render. A write of the index itself has
+   * nothing to go alone with and surfaces its failure.
+   */
+  async function pushWithBookkeeping(
+    timer: Timer,
+    ns: string,
+    entries: Record<string, string>,
+    deletions: string[] = [],
+  ): Promise<Bookkept> {
+    const push = (e: Record<string, string>, d: string[]) =>
+      timer.time('fetch', () => client.push(ns, e, d.length ? { deletions: d } : undefined))
+    const pending = session.pendingAccess.get(ns)
+    const writesIndex = Object.hasOwn(entries, INDEX_KEY)
+    const skipIndex = deletions.includes(INDEX_KEY)
+    let alone: string | null = null
+    let lastConflict: unknown
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let view: PullResult
+      try {
+        view = await pullTimed(timer, ns, { observe: [...BOOKKEEPING_KEYS] })
+      } catch (e) {
+        if (writesIndex) throw e
+        alone = INDEX_NOT_REFRESHED
+        break
+      }
+      const extra: Record<string, string> = {}
+      let plan: IndexPlan | null = null
+      let dels = deletions
+      if (!skipIndex) {
+        plan = await timer.time('format', () => planIndex(ns, view, entries, deletions))
+        if (plan.text !== null) extra[INDEX_KEY] = plan.text
+        if (plan.remove) dels = [...deletions, INDEX_KEY]
+        if (plan.backup !== null) extra[LEGACY_INDEX_KEY] = plan.backup
+      }
+      const stamps = pending?.size ? pending : null
+      let snapshot: Map<string, string> | null = null
+      if (stamps) {
+        snapshot = new Map(stamps)
+        const storedSidecar = Object.hasOwn(view.entries, ACCESSED_KEY)
+          ? (view.entries[ACCESSED_KEY] as string)
+          : null
+        const merged = mergeAccessed(parseAccessed(storedSidecar), snapshot)
+        if (merged.changed) extra[ACCESSED_KEY] = serializeAccessed(merged.sidecar)
+        else settleAccess(stamps, snapshot)
+      }
+      try {
+        const r = await push({ ...entries, ...extra }, dels)
+        if (
+          stamps &&
+          snapshot &&
+          Object.hasOwn(extra, ACCESSED_KEY) &&
+          !r.skipped?.some(s => s.key === ACCESSED_KEY)
+        ) {
+          settleAccess(stamps, snapshot)
+        }
+        const skipped = (r.skipped ?? []).map(s => s.key)
+        const refused = skipped.filter(k => Object.hasOwn(entries, k))
+        if (plan !== null && plan.text !== null && refused.length > 0) {
+          await repairIndex(timer, ns, view, entries, deletions, refused)
+        }
+        const notes =
+          plan === null ? [] : skipped.includes(INDEX_KEY) ? [INDEX_NOT_REFRESHED] : plan.notes
+        return { result: r, notes }
+      } catch (e) {
+        if (isBookkeepingOnlyConflict(e)) {
+          lastConflict = e
+          continue
+        }
+        if (e instanceof OpenRecallHttpError && e.status === 413 && Object.keys(extra).length) {
+          if (writesIndex) throw e
+          alone = `(index not refreshed: the write with it would exceed a storage limit on ${ns} (${bounded(e.code, 40)}))`
+          break
+        }
+        throw e
+      }
+    }
+    if (writesIndex) throw lastConflict
+    return { result: await push(entries, deletions), notes: [alone ?? INDEX_NOT_REFRESHED] }
+  }
+
+  /**
+   * The one flush that is not piggybacked: a namespace that has collected
+   * `ACCESS_FLUSH_THRESHOLD` pending keys in a process that has not written
+   * to it. Once per process per namespace, and never surfaced.
+   */
+  const thresholdFlushed = new Set<string>()
+  async function flushIfDue(timer: Timer, ns: string): Promise<void> {
+    const pending = session.pendingAccess.get(ns)
+    if (!pending || pending.size < ACCESS_FLUSH_THRESHOLD || thresholdFlushed.has(ns)) return
+    thresholdFlushed.add(ns)
+    await timer.time('fetch', () => flushAccessed(client, ns, pending))
+  }
+
+  return {
+    /**
+     * Persist one durable memory entry (encrypted before upload).
+     *
+     * Read, stamp, route, push. The stored note under `key` is read first (one
+     * bounded entry read, not a pull) so the stamp can keep its `id` and
+     * `created`, refuse a locked note, and tell a stale agent-supplied stamp
+     * from one carried over from `memory_get`. The stamp lives inside the
+     * encrypted body, so the server sees nothing new. The push carries the
+     * regenerated `MEMORY.md` in the same request (`pushWithBookkeeping`);
+     * saving `MEMORY.md` itself edits its Pinned section and nothing else.
+     * The first response line keeps its shape; a second line reports replaced
+     * stamps, a third a routing reminder, and any lines about the index follow.
+     */
+    save: timed(
+      async (timer, key: string, content: string, namespace?: string, opts: SaveOptions = {}) => {
+        const ns = nsOf(namespace)
+        if (isSystemKey(key)) return fail(reservedKey(key, 'save'))
+        try {
+          let toPush = content
+          let corrected: string[] = []
+          let routeNote: string | undefined
+          // The root index is not a note: it is regenerated from the notes on
+          // every write, so it carries no stamp and no type to route, and the
+          // one part of what the agent sends that survives is its Pinned
+          // section (`planIndex`). Everything else is read, stamped and routed.
+          if (key !== INDEX_KEY) {
+            const existing = await timer.time('fetch', () =>
+              readExisting(ns, key, opts.force === true),
+            )
+            const lock = lockedRefusal(existing, key, ns, 'save')
+            if (lock && !opts.force) return fail(lock)
+            let stamped: ReturnType<typeof stampForSave>
+            try {
+              stamped = stampForSave(existing, content, {
+                now: new Date().toISOString(),
+                agent: session.agentLabel(),
+                session: session.sessionId,
+                key,
+                // The server's timestamp for a legacy note, when a recall in this
+                // process has it; `created` falls back to now otherwise.
+                serverUpdatedAt: indexes.get(ns)?.doc(key)?.updatedAt,
+                supersedes: opts.supersedes,
+              })
+            } catch (e) {
+              if (e instanceof FrontmatterError) {
+                return fail(
+                  `Refused to save "${key}": ${neutralize(bounded(e.message))} ` +
+                    `(frontmatter field "${e.field}"). Nothing was stored.`,
+                )
+              }
+              throw e
+            }
+            const route = routeCheck(stamped.meta.type, key, ns)
+            if (route.refusal && !opts.force) return fail(route.refusal)
+            toPush = stamped.content
+            corrected = stamped.corrected
+            routeNote = route.note
+          }
+          const { result: r, notes } = await pushWithBookkeeping(timer, ns, { [key]: toPush })
+          timer.entries += 1
+          // A 2xx does not mean this key landed: the server refuses oversized and
+          // malformed entries per key and reports them here. Match on the key
+          // that was sent, since another key's refusal says nothing about this one.
+          const refused = r.skipped?.find(s => s.key === key)
+          if (refused) return fail(skippedText(key, ns, refused.reason))
+          const status = r.uploaded.includes(key) ? 'saved' : 'unchanged'
+          const lines = [`${status} "${key}" in ${ns} (v${r.version})`]
+          if (corrected.length) lines.push(neutralize(correctedLine(corrected)))
+          if (routeNote) lines.push(routeNote)
+          lines.push(...notes)
+          return ok(lines.join('\n'))
+        } catch (e) {
+          if (e instanceof Rendered) return fail(e.message)
+          if (e instanceof SecretFoundError) {
+            return fail(
+              `Refused to save "${key}" — it looks like it contains a secret:\n${e.message}`,
+            )
+          }
+          const d = denial(`Saving "${key}"`, ns, defaultNamespace, 'Nothing was stored.', e)
+          return fail(d ?? `save failed: ${bounded((e as Error).message)}`)
+        }
+      },
+    ),
 
     /** Rank stored memories by relevance to a natural-language query. */
     recall: timed(
@@ -692,7 +1295,9 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
         namespace?: string,
         limit: number = 5,
         namespaces?: string[],
+        opts: RecallOptions = {},
       ) => {
+        const includeInactive = opts.includeInactive === true
         try {
           if (namespaces && namespace !== undefined)
             throw new Error('use either namespace or namespaces, not both')
@@ -733,7 +1338,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               }
             }),
           )
-          if (pulled.every(p => p.docs.length === 0)) return ok(`(no memory stored in ${ns} yet)`)
+          // Bookkeeping entries are not memory: a namespace holding nothing but
+          // the access sidecar reads as one that holds nothing.
+          if (pulled.every(p => p.docs.every(d => isSystemKey(d.key))))
+            return ok(`(no memory stored in ${ns} yet)`)
           // The region shown for a hit is cut from what this call pulled,
           // never from the index's copy, so what the caller reads is what the
           // server served this time.
@@ -742,9 +1350,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             const entries = fresh.get(source)
             return entries && Object.hasOwn(entries, key) ? entries[key] : undefined
           }
+          const day = today()
           const {
             results: ranked,
             searched,
+            inactive,
             belowFloor,
             trimmedByLimit,
             reason,
@@ -757,14 +1367,30 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               }),
               query,
               limit,
+              { includeInactive, today: day },
             ),
           )
+          // A superseded, deleted or expired note is not searched unless asked
+          // for, and a miss has to say so: "12 entries searched" with the
+          // thirteenth silently skipped is how an agent concludes a fact it
+          // replaced last week was never recorded at all.
+          const hiddenNote = inactive
+            ? ` (${inactive} superseded, deleted or expired entr${inactive === 1 ? 'y' : 'ies'} ` +
+              'not searched; pass include_inactive to include them)'
+            : ''
           if (ranked.length === 0 && searched === 0) {
-            // Entries exist but none of them is a ranking candidate, which today
-            // means the namespace holds nothing but its MEMORY.md index. "0
-            // entries searched" reads as an empty namespace and is how an agent
-            // concludes there is nothing here, when in fact the one thing here is
-            // the table of contents naming everything that was ever written.
+            // Entries exist but none of them is a ranking candidate: the
+            // namespace holds nothing but its MEMORY.md index, or nothing but
+            // notes that have been replaced. "0 entries searched" reads as an
+            // empty namespace and is how an agent concludes there is nothing
+            // here, when in fact what is here is the table of contents naming
+            // everything that was ever written, or the notes themselves.
+            if (inactive)
+              return ok(
+                `(nothing in ${ns} was searched for "${query}": every note is superseded, ` +
+                  `deleted or expired, which recall does not rank by default${hiddenNote}. ` +
+                  'Call memory_list to see the keys that exist.)',
+              )
             return ok(
               `(nothing in ${ns} was searched for "${query}": the namespace holds only its ` +
                 'MEMORY.md index, which recall does not rank. Call memory_get with key ' +
@@ -796,7 +1422,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
                 `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
                 `${belowFloor} below the relevance floor and withheld. ` +
                 'Call memory_list before concluding the fact is unrecorded; ' +
-                'it may be stored under wording this query did not match.)',
+                `it may be stored under wording this query did not match.)${hiddenNote}`,
             )
           }
           // Regions, not bodies, and the aggregate budget is spent in rank order:
@@ -848,23 +1474,32 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               const pointer =
                 `\n(region only; call memory_get with key "${r.key}"` +
                 `${namespaces ? ` and namespace "${r.namespace}"` : ''} for the full entry)`
+              // The trailer is part of the hit, so it is charged to the per-hit
+              // allowance as well as reserved from the aggregate like the pointer.
+              const trailer = trailerFor(
+                r.key,
+                r.meta,
+                includeInactive && isInactive(r.meta ?? {}, day),
+              )
               const joiner = parts.length ? '\n\n'.length : 0
               const allowed = Math.min(
-                PER_HIT_CHARS,
-                budget - joiner - header.length - pointer.length,
+                PER_HIT_CHARS - trailer.length,
+                budget - joiner - header.length - pointer.length - trailer.length,
               )
               if (allowed < MIN_REGION_CHARS) {
                 omitted++
                 continue
               }
-              const region = regionFor(
-                contentOf(r.key, r.namespace ?? sources[0]) ?? r.content,
-                query,
-                allowed,
-              )
-              const part = header + region.text + (region.partial ? pointer : '')
+              const source = r.namespace ?? sources[0]
+              const region = regionFor(contentOf(r.key, source) ?? r.content, query, allowed)
+              // The region and the trailer are what the model reads, so they are
+              // neutralized here; `memory_get` returns the same entry verbatim,
+              // as data.
+              const part =
+                header + neutralize(region.text + trailer) + (region.partial ? pointer : '')
               budget -= joiner + part.length
               parts.push(part)
+              noteAccess(session.pendingAccess, source, r.key, day)
             }
             const shown = parts.length
             const tail = tailFor(
@@ -873,6 +1508,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             )
             return `${leadFor(shown)}${parts.join('\n\n')}${tail}`
           })
+          for (const source of sources) await flushIfDue(timer, source)
           return ok(formatted)
         } catch (e) {
           if (e instanceof Rendered) return fail(e.message)
@@ -934,6 +1570,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           if (e instanceof OpenRecallProtocolError) return getViaPull(timer, key, ns)
           throw e
         }
+        if (!isHiddenKey(key)) {
+          noteAccess(session.pendingAccess, ns, key, today())
+          await flushIfDue(timer, ns)
+        }
         return ok(`### ${key} (${ns})\n${body}`)
       } catch (e) {
         const d = denial(`Reading "${key}"`, ns, defaultNamespace, 'Nothing was read.', e)
@@ -951,14 +1591,19 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           const lost = await lostEntries(client, ns, version)
           if (lost) return fail(lost)
         }
+        // Bookkeeping entries are skipped: the sidecar names every key that was
+        // ever recalled, so it would match nearly any search for a key.
         const hits = await timer.time('rank', () =>
           Object.entries(entries).filter(
             ([key, content]) =>
-              key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle),
+              !isSystemKey(key) &&
+              (key.toLowerCase().includes(needle) || content.toLowerCase().includes(needle)),
           ),
         )
         if (hits.length === 0) return ok(`no matches for "${query}" in ${ns}`)
-        const body = hits.map(([key, content]) => `- ${key}: ${snippet(content)}`).join('\n')
+        const body = hits
+          .map(([key, content]) => `- ${key}: ${neutralize(snippet(content))}`)
+          .join('\n')
         return ok(`${hits.length} match(es) for "${query}" in ${ns}:\n${body}`)
       } catch (e) {
         const d = denial('Searching memories', ns, defaultNamespace, 'No memories were read.', e)
@@ -966,16 +1611,27 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       }
     }),
 
-    /** List entry keys in a namespace (no content downloaded). */
-    list: timed(async (timer, namespace?: string) => {
+    /**
+     * List entry keys in a namespace (no content downloaded). Bookkeeping
+     * entries under `sys.openrecall/` are left out unless asked for: they are
+     * not notes, and a listing is what an agent reads to decide what exists.
+     */
+    list: timed(async (timer, namespace?: string, opts: ListOptions = {}) => {
       const ns = nsOf(namespace)
       try {
         const hashes = await timer.time('fetch', () => client.hashes(ns, { observe: false }))
-        const keys = Object.keys(hashes).sort()
+        const all = Object.keys(hashes).sort()
+        const keys = opts.includeSystem ? all : all.filter(k => !isSystemKey(k))
+        const hidden = all.length - keys.length
         timer.entries = keys.length
-        if (keys.length === 0) return ok(`(${ns} is empty)`)
+        if (all.length === 0) return ok(`(${ns} is empty)`)
+        const hiddenNote = hidden
+          ? `${hidden} bookkeeping entr${hidden === 1 ? 'y' : 'ies'} under ${SYSTEM_PREFIX} not listed; pass include_system: true to see ${hidden === 1 ? 'it' : 'them'}`
+          : ''
+        if (keys.length === 0) return ok(`(${ns} holds no notes; ${hiddenNote})`)
         return ok(
-          `${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} in ${ns}:\n${keys.map(k => `- ${k}`).join('\n')}`,
+          `${keys.length} entr${keys.length === 1 ? 'y' : 'ies'} in ${ns}:\n${keys.map(k => `- ${k}`).join('\n')}` +
+            (hidden ? `\n(${hiddenNote})` : ''),
         )
       } catch (e) {
         const d = denial('Listing entries', ns, defaultNamespace, 'No entry keys were read.', e)
@@ -983,16 +1639,32 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       }
     }),
 
-    /** Delete one entry. */
-    delete: timed(async (timer, key: string, namespace?: string) => {
+    /**
+     * Delete one entry. The stored note is read first so a locked one is
+     * refused. The deletion goes through the push route, never the bare
+     * delete, so the regenerated index (without the deleted key) and any
+     * pending access stamps land in the same request.
+     */
+    delete: timed(async (timer, key: string, namespace?: string, opts: DeleteOptions = {}) => {
       const ns = nsOf(namespace)
+      if (isSystemKey(key)) return fail(reservedKey(key, 'delete'))
       try {
-        const r = await timer.time('fetch', () => client.delete(ns, key))
-        timer.entries = r.deleted ? 1 : 0
-        return r.deleted
-          ? ok(`deleted "${key}" from ${ns} (v${r.version})`)
-          : ok(`nothing to delete — "${key}" is not in ${ns}`)
+        const existing = await timer.time('fetch', () => readExisting(ns, key, true))
+        const lock = lockedRefusal(existing, key, ns, 'delete')
+        if (lock && !opts.force) return fail(lock)
+        const { result: r, notes } = await pushWithBookkeeping(timer, ns, {}, [key])
+        const refused = r.skipped?.find(s => s.key === key)
+        if (refused) {
+          return fail(
+            `Deleting "${key}" from ${ns} was refused by the server (${bounded(refused.reason, 80)}). "${key}" is still stored.`,
+          )
+        }
+        const deleted = r.deleted.includes(key)
+        timer.entries += deleted ? 1 : 0
+        if (!deleted) return ok(`nothing to delete — "${key}" is not in ${ns}`)
+        return ok([`deleted "${key}" from ${ns} (v${r.version})`, ...notes].join('\n'))
       } catch (e) {
+        if (e instanceof Rendered) return fail(e.message)
         const d = denial(`Deleting "${key}"`, ns, defaultNamespace, `"${key}" is still stored.`, e)
         return fail(d ?? `delete failed: ${bounded((e as Error).message)}`)
       }
