@@ -15,7 +15,9 @@
 
 import { spawnSync } from 'node:child_process'
 import {
+  accessSync,
   chmodSync,
+  constants,
   copyFileSync,
   existsSync,
   mkdirSync,
@@ -25,8 +27,9 @@ import {
   writeFileSync,
 } from 'node:fs'
 import { homedir } from 'node:os'
-import { delimiter, dirname, join } from 'node:path'
+import { delimiter, dirname, isAbsolute, join } from 'node:path'
 import { SKILL_MARKDOWN, SKILL_NAME } from '../mcp/guide.ts'
+import { nodeFloor, version } from '../version.ts'
 import { describeTarget } from './client.ts'
 import { LOCAL_URL, resolveSettings, type Settings } from './settings.ts'
 
@@ -37,29 +40,135 @@ export type Launch = { command: string; args: string[] }
 type Env = Record<string, string | undefined>
 type Json = Record<string, unknown>
 
+// ─── Launcher ────────────────────────────────────────────────────────────
+
+/** A launch plus why it was chosen; `setup` prints the reason in its dry run. */
+export type Launcher = { launch: Launch; reason: string; warnings: string[] }
+
+export type LaunchOptions = {
+  /** `auto` (default), `npx`, or an absolute path to an openrecall executable. */
+  launcher?: string
+  /** Alias for `launcher: 'npx'`. */
+  npx?: boolean
+  /** Where to look for a global install (PATH). Defaults to process.env. */
+  env?: Env
+  // The rest describe the running process and exist so tests can stand in for
+  // a compiled binary, an npx cache or an old Node without being one.
+  script?: string
+  execPath?: string
+  bun?: boolean
+  nodeVersion?: string
+}
+
+/** Every agent start through npx pays this; said once, in `setup`, not per agent. */
+export const PORTABLE_WARNING =
+  'portable launcher: every agent start pays ~1 s of npx resolution and needs network the first time. ' +
+  `Install once (npm i -g ${PACKAGE}) and rerun setup to pin an absolute path; ` +
+  'rerun setup after upgrading, because this pin is version-specific.'
+
+/** An npx/bunx download cache: a path that may be gone tomorrow. */
+const inThrowawayCache = (p: string) => /[\\/](_npx|bunx-[^\\/]*)[\\/]/.test(p)
+
+/** `bun build --compile` mounts its sources on a virtual filesystem. */
+const inCompiledBundle = (p: string) =>
+  p.startsWith('/$bunfs/') || /^[A-Za-z]:[\\/]~BUN[\\/]/.test(p)
+
 /**
- * The command agents should run. From an installed copy or a checkout we pin
- * absolute paths (fast, offline, works in GUI apps with a minimal PATH and in
- * sandboxes without network). From npx/bunx — a throwaway cache — we register
- * the portable `npx -y @twigpine/openrecall mcp` instead.
+ * The command agents should run. Pinning an absolute path is the goal: it
+ * starts in ~50 ms, works offline, in GUI apps with a minimal PATH and in
+ * sandboxes without network. In order:
+ *
+ *  1. `--launcher npx` or `/abs/path`: as asked.
+ *  2. A compiled binary: itself. Its sources live on Bun's virtual filesystem,
+ *     so `realpath` fails for it; before this it fell through to npx, the one
+ *     artifact that should never need it.
+ *  3. The running script, when it is not in an npx/bunx cache: the runtime
+ *     that is running it plus the script (an install or a checkout).
+ *  4. From a cache: a global `openrecall` on PATH, if there is one.
+ *  5. Otherwise the portable `npx -y @twigpine/openrecall@<version> mcp`,
+ *     pinned to this version so an agent never silently picks up another.
  */
-export function launchCommand(
-  opts: { npx?: boolean; script?: string; execPath?: string } = {},
-): Launch {
-  const npx: Launch = { command: 'npx', args: ['-y', PACKAGE, 'mcp'] }
-  const raw = opts.script ?? process.argv[1]
-  if (opts.npx || !raw) return npx
-  let script: string
-  try {
-    script = realpathSync(raw)
-  } catch {
-    return npx
+export function launchCommand(opts: LaunchOptions = {}): Launcher {
+  const env = opts.env ?? process.env
+  const execPath = opts.execPath ?? process.execPath
+  const bun = opts.bun ?? typeof Bun !== 'undefined'
+  const pinned = (launch: Launch, reason: string): Launcher => ({
+    launch,
+    reason: `pinned: ${reason}`,
+    warnings: launch.command === execPath && !bun ? nodeFloorWarnings(opts.nodeVersion) : [],
+  })
+  const npx: Launch = { command: 'npx', args: ['-y', `${PACKAGE}@${version()}`, 'mcp'] }
+
+  const launcher = opts.launcher || (opts.npx ? 'npx' : 'auto')
+  if (launcher === 'npx') return { launch: npx, reason: 'portable: requested', warnings: [] }
+  if (launcher !== 'auto') {
+    if (!isAbsolute(launcher)) {
+      throw new Error(`--launcher must be auto, npx, or an absolute path (got "${launcher}")`)
+    }
+    if (!isExecutableFile(launcher)) {
+      throw new Error(`--launcher: ${launcher} is not an executable file`)
+    }
+    return {
+      launch: { command: launcher, args: ['mcp'] },
+      reason: 'pinned: --launcher',
+      warnings: [],
+    }
   }
-  if (/[\\/](_npx|bunx-[^\\/]*)[\\/]/.test(script)) return npx
-  return { command: opts.execPath ?? process.execPath, args: [script, 'mcp'] }
+
+  const self: Launch = { command: execPath, args: ['mcp'] }
+  const raw = opts.script ?? process.argv[1]
+  if (raw && inCompiledBundle(raw)) return pinned(self, 'standalone binary')
+  let script: string | undefined
+  if (raw) {
+    try {
+      script = realpathSync(raw)
+    } catch {
+      // Only a compiled binary runs a script Bun cannot stat.
+      if (bun) return pinned(self, 'standalone binary')
+    }
+  }
+  if (script && !inThrowawayCache(script)) {
+    return pinned({ command: execPath, args: [script, 'mcp'] }, 'installed script')
+  }
+
+  const installed = findOnPath('openrecall', env, p => !inThrowawayCache(p))
+  if (installed) {
+    return installed.endsWith('.js')
+      ? pinned({ command: execPath, args: [installed, 'mcp'] }, 'global install')
+      : pinned({ command: installed, args: ['mcp'] }, 'global install')
+  }
+  return { launch: npx, reason: 'portable: no install found on PATH', warnings: [] }
 }
 
 export const isPortable = (l: Launch) => l.command === 'npx'
+
+function isExecutableFile(p: string): boolean {
+  try {
+    accessSync(p, constants.X_OK)
+    return statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Pinning the Node that ran `setup` pins its version too. Below the floor the
+ * agent's first start would fail with a syntax error far from here, so say it
+ * now. Only real Node: Bun reports an emulated, older `versions.node`.
+ */
+function nodeFloorWarnings(nodeVersion = process.versions.node): string[] {
+  const floor = nodeFloor()
+  if (!below(nodeVersion, floor)) return []
+  return [`this pins Node ${nodeVersion}, below the floor ${floor}; upgrade Node, then rerun setup`]
+}
+
+function below(a: string, b: string): boolean {
+  const num = (s: string | undefined) => Number.parseInt(s ?? '0', 10) || 0
+  const x = a.split('.')
+  const y = b.split('.')
+  for (let i = 0; i < 3; i++) if (num(x[i]) !== num(y[i])) return num(x[i]) < num(y[i])
+  return false
+}
 
 // ─── Actions ─────────────────────────────────────────────────────────────
 
@@ -118,13 +227,36 @@ function cliAdd(bin: string, remove: string[], addPrefix: string[], l: Launch): 
   }
 }
 
-function onPath(bin: string, env: Env): boolean {
+/**
+ * The first `bin` on env.PATH whose real path `accept`s, resolved through any
+ * symlink (a global npm install is `bin/openrecall -> …/dist/openrecall.js`),
+ * or null. The filter matters: npx puts its own cache's `.bin` first on PATH,
+ * and pinning that would pin a directory that may be gone tomorrow.
+ */
+export function findOnPath(
+  bin: string,
+  env: Env,
+  accept: (resolved: string) => boolean = () => true,
+): string | null {
   const exts = process.platform === 'win32' ? ['', '.cmd', '.exe', '.bat'] : ['']
   for (const dir of (env.PATH ?? '').split(delimiter)) {
-    if (dir && exts.some(ext => existsSync(join(dir, bin + ext)))) return true
+    if (!dir) continue
+    for (const ext of exts) {
+      const candidate = join(dir, bin + ext)
+      if (!existsSync(candidate)) continue
+      let resolved: string
+      try {
+        resolved = realpathSync(candidate)
+      } catch {
+        continue
+      }
+      if (accept(resolved)) return resolved
+    }
   }
-  return false
+  return null
 }
+
+const onPath = (bin: string, env: Env) => findOnPath(bin, env) !== null
 
 const xdgConfig = (ctx: Ctx) => ctx.env.XDG_CONFIG_HOME || join(ctx.home, '.config')
 const sharedSkills = (ctx: Ctx) => join(ctx.home, '.agents', 'skills')
@@ -449,8 +581,12 @@ function perform(a: Action, ctx: Ctx, write: boolean, out: (l: string) => void):
 
 export type SetupOptions = {
   write?: boolean
+  /** `auto` (default), `npx`, or an absolute path; see launchCommand. */
+  launcher?: string
+  /** Alias for `launcher: 'npx'`. */
   npx?: boolean
   env?: Env
+  /** Use this launch as is (tests). */
   launch?: Launch
   out?: (line: string) => void
 }
@@ -461,7 +597,10 @@ export async function runSetup(names: string[], opts: SetupOptions = {}): Promis
   const out = opts.out ?? ((l: string) => console.log(l))
   const home = env.HOME || homedir()
   const settings = resolveSettings(env)
-  const launch = opts.launch ?? launchCommand({ npx: opts.npx })
+  const chosen: Launcher = opts.launch
+    ? { launch: opts.launch, reason: isPortable(opts.launch) ? 'portable' : 'pinned', warnings: [] }
+    : launchCommand({ launcher: opts.launcher, npx: opts.npx, env })
+  const { launch } = chosen
   const ctx: Ctx = { env, home, launch, settings }
 
   if (names.length === 0) {
@@ -487,7 +626,9 @@ export async function runSetup(names: string[], opts: SetupOptions = {}): Promis
   if (selected.length === 0) throw new Error('no supported agents found on this machine')
 
   out(`OpenRecall → ${describeTarget(settings)} · namespace ${settings.namespace}`)
-  out(`MCP command: ${shellQuote([launch.command, ...launch.args])}`)
+  out(`MCP command: ${shellQuote([launch.command, ...launch.args])} (${chosen.reason})`)
+  for (const w of chosen.warnings) out(`! ${w}`)
+  if (isPortable(launch)) out(`! ${PORTABLE_WARNING}`)
   if (!settings.passphrase) out('! no passphrase yet — run `openrecall init` before using memory')
   if (opts.write && settings.url === LOCAL_URL)
     mkdirSync(settings.home, { recursive: true, mode: 0o700 })

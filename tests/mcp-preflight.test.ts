@@ -21,7 +21,7 @@
  */
 
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { OpenRecallClient } from '../client/index.ts'
@@ -33,13 +33,25 @@ const WRONG = 'wrong horse battery staple'
 let server: ReturnType<typeof Bun.serve>
 let url: string
 
+/**
+ * The home every configuration in this file resolves against. `resolveSettings`
+ * falls back to ~/.openrecall/config.json when OPENRECALL_HOME is unset, so
+ * without this the "missing passphrase" cases find the passphrase of whoever
+ * ran `openrecall init` on the machine, and the fixture tests their config
+ * rather than the one it wrote.
+ */
+const HOME = mkdtempSync(join(tmpdir(), 'openrecall-preflight-'))
+
 beforeAll(async () => {
   const { handleRequest } = await import('../src/handler.ts')
   server = Bun.serve({ port: 0, fetch: handleRequest })
   url = `http://localhost:${server.port}`
 })
 
-afterAll(() => server?.stop(true))
+afterAll(() => {
+  server?.stop(true)
+  rmSync(HOME, { recursive: true, force: true })
+})
 
 /**
  * Which diagnostic this text is, by a phrase unique to it. Returns 'other' for
@@ -95,6 +107,7 @@ function stub(status: number, body: unknown) {
 }
 
 const envFor = (over: Record<string, string | undefined>) => ({
+  OPENRECALL_HOME: HOME,
   OPENRECALL_URL: url,
   OPENRECALL_PASSPHRASE: PASSPHRASE,
   OPENRECALL_NAMESPACE: 'user:me',
@@ -327,6 +340,7 @@ describe('mcp startup preflight', () => {
     // wrong when what is wrong is that they never set the variable, and the
     // path in the message is the template text they would then go looking for.
     const r = await preflight({
+      OPENRECALL_HOME: HOME,
       OPENRECALL_URL: url,
       // biome-ignore lint/suspicious/noTemplateCurlyInString: the literal is the fixture.
       OPENRECALL_PASSPHRASE_FILE: '${OPENRECALL_PASSPHRASE_FILE}',
@@ -338,6 +352,7 @@ describe('mcp startup preflight', () => {
     // problem, so this distinguishes the two rather than calling every failure
     // a misexpansion.
     const real = await preflight({
+      OPENRECALL_HOME: HOME,
       OPENRECALL_URL: url,
       OPENRECALL_PASSPHRASE_FILE: '/nope/passphrase',
     })
@@ -357,6 +372,7 @@ describe('mcp startup preflight', () => {
       await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
 
       const r = await preflight({
+        OPENRECALL_HOME: HOME,
         OPENRECALL_URL: url,
         OPENRECALL_NAMESPACE: ns,
         OPENRECALL_PASSPHRASE_FILE: file,
@@ -377,6 +393,7 @@ describe('mcp startup preflight', () => {
     writeFileSync(empty, '   \n')
     try {
       const gone = await preflight({
+        OPENRECALL_HOME: HOME,
         OPENRECALL_URL: url,
         OPENRECALL_PASSPHRASE_FILE: join(dir, 'nope'),
       })
@@ -385,7 +402,11 @@ describe('mcp startup preflight', () => {
       expect(markerOf(goneText)).toBe('passphrase-file')
       expect(goneText).toContain('nope')
 
-      const blank = await preflight({ OPENRECALL_URL: url, OPENRECALL_PASSPHRASE_FILE: empty })
+      const blank = await preflight({
+        OPENRECALL_HOME: HOME,
+        OPENRECALL_URL: url,
+        OPENRECALL_PASSPHRASE_FILE: empty,
+      })
       expect(blank.ready).toBe(false)
       const blankText = blank.ready ? '' : blank.diagnostic
       expect(markerOf(blankText)).toBe('passphrase-file')
@@ -413,6 +434,7 @@ describe('mcp startup preflight', () => {
       const ns = 'user:pf-precedence'
       await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
       const r = await preflight({
+        OPENRECALL_HOME: HOME,
         OPENRECALL_URL: url,
         OPENRECALL_NAMESPACE: ns,
         OPENRECALL_PASSPHRASE: 'the stale export',
@@ -435,6 +457,7 @@ describe('mcp startup preflight', () => {
       const ns = 'user:pf-leak'
       await new OpenRecallClient({ url, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'stored' })
       const r = await preflight({
+        OPENRECALL_HOME: HOME,
         OPENRECALL_URL: url,
         OPENRECALL_NAMESPACE: ns,
         OPENRECALL_PASSPHRASE_FILE: file,
@@ -454,6 +477,37 @@ describe('mcp startup preflight', () => {
     const r = await preflight(envFor({ OPENRECALL_PASSPHRASE: '   ' }))
     expect(r.ready).toBe(false)
     expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('missing-passphrase')
+  })
+
+  test('a passphrase in a config file outside OPENRECALL_HOME is never read', async () => {
+    // The fixture home is empty, so "missing" below can only mean no other
+    // config was consulted: not the one in this second home, and not
+    // ~/.openrecall/config.json on a machine that ran `openrecall init`, which
+    // is where this case used to find a passphrase and report ready instead.
+    expect(existsSync(join(HOME, 'config.json'))).toBe(false)
+    const other = mkdtempSync(join(tmpdir(), 'openrecall-preflight-other-'))
+    try {
+      writeFileSync(
+        join(other, 'config.json'),
+        JSON.stringify({ url, passphrase: 'from-a-config-file-elsewhere' }),
+      )
+      const r = await preflight(envFor({ OPENRECALL_PASSPHRASE: undefined }))
+      expect(r.ready).toBe(false)
+      expect(markerOf(r.ready ? '' : r.diagnostic)).toBe('missing-passphrase')
+
+      // Positive control: the config-file fallback is live, so the refusal
+      // above is isolation at work rather than a fallback nobody implemented.
+      const pointed = await preflight(
+        envFor({
+          OPENRECALL_PASSPHRASE: undefined,
+          OPENRECALL_HOME: other,
+          OPENRECALL_NAMESPACE: 'user:pf-other-home',
+        }),
+      )
+      expect(pointed.ready).toBe(true)
+    } finally {
+      rmSync(other, { recursive: true, force: true })
+    }
   })
 
   test('an unreachable URL is refused as transport, not as a refusal', async () => {
@@ -800,7 +854,7 @@ describe('mcp startup preflight', () => {
 async function launchUntilReady(env: Record<string, string>, timeoutMs = 20000) {
   const run = Bun.spawn(['bun', 'run', 'bin/openrecall.ts', 'mcp'], {
     cwd: new URL('..', import.meta.url).pathname,
-    env: { ...process.env, ...env },
+    env: { ...process.env, OPENRECALL_HOME: HOME, ...env },
     // Kept open on purpose: this is the MCP protocol channel, and a closed
     // stdin would end the transport the test is trying to watch come up.
     stdin: 'pipe',
@@ -884,6 +938,7 @@ describe('mcp stdio launch', () => {
       cwd: new URL('..', import.meta.url).pathname,
       env: {
         ...process.env,
+        OPENRECALL_HOME: HOME,
         OPENRECALL_URL: url,
         OPENRECALL_NAMESPACE: ns,
         OPENRECALL_PASSPHRASE: WRONG,
