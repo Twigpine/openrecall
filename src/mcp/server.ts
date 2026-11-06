@@ -37,7 +37,7 @@ import { makeProjects } from './projects.ts'
 import { makeSession } from './session.ts'
 import { preflight } from './startup.ts'
 import { clearSetupError, getSetupError, recordSetupError, recordToolFailure } from './status.ts'
-import { type MemoryTools, makeTools, type Timings, type ToolResult } from './tools.ts'
+import { type MemoryTools, makeTools, SAVE_MODES, type Timings, type ToolResult } from './tools.ts'
 
 // The health of this server, for embedders and tests that would otherwise have
 // to scrape stderr for it. Re-exported from here because this is the module a
@@ -240,7 +240,7 @@ export function makeServer(binding: ServerBinding): McpServer {
     {
       title: 'Save a memory',
       description:
-        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`, unless it changed since this session last read it: then the save is refused as stale, and you should read the key with memory_get, merge, and save again. The client stamps YAML frontmatter on every save (id, type, created, updated, agent, session); you may set `type` (user, feedback, project, reference), `description`, `tags`, `expires` and `locked`. User notes belong in the shared namespace and project/reference notes in the open project namespace; a save in the wrong place is refused with the right one.',
+        'Persist a durable fact to encrypted memory. Use for stable facts (user preferences, project decisions, conventions) — not transient chatter. Overwrites the entry at `key`, unless it changed since this session last read it: then the save is refused as stale, and you should read the key with memory_get, merge, and save again. A save that looks like an existing entry (a near-duplicate, the same topic, or a possible contradiction) is refused with `needs_decision` and up to five candidates, and nothing is written until you resave with `mode`. The client stamps YAML frontmatter on every save (id, type, created, updated, agent, session); you may set `type` (user, feedback, project, reference), `description`, `tags`, `expires` and `locked`. User notes belong in the shared namespace and project/reference notes in the open project namespace; a save in the wrong place is refused with the right one.',
       inputSchema: {
         key: z
           .string()
@@ -255,10 +255,16 @@ export function makeServer(binding: ServerBinding): McpServer {
           .boolean()
           .optional()
           .describe('Override the namespace routing check, or edit a locked entry.'),
+        mode: z
+          .enum(SAVE_MODES)
+          .optional()
+          .describe(
+            'Required after a needs_decision answer. update: rewrite the existing key; supersede: save this key and mark `supersedes` as replaced; add: save as a distinct fact; noop: keep the existing entry.',
+          ),
       },
     },
-    async ({ key, content, namespace, supersedes, force }) =>
-      run('memory_save', t => t.save(key, content, namespace, { supersedes, force })),
+    async ({ key, content, namespace, supersedes, force, mode }) =>
+      run('memory_save', t => t.save(key, content, namespace, { supersedes, force, mode })),
   )
 
   server.registerTool(
@@ -395,15 +401,16 @@ export function makeServer(binding: ServerBinding): McpServer {
     {
       title: 'Delete a memory',
       description:
-        'Remove one entry from a namespace. A note whose frontmatter says `locked: true` is refused unless `force` is true.',
+        'Remove one entry from a namespace: it is moved to `sys.openrecall/trash/` with `status: deleted`, and `hard: true` erases it instead (required for a key already in the trash). A note whose frontmatter says `locked: true` is refused unless `force` is true.',
       inputSchema: {
         key: z.string().describe('Entry key to delete.'),
         namespace: z.string().optional().describe(`Namespace (default: ${defaultNamespace}).`),
         force: z.boolean().optional().describe('Delete a locked entry.'),
+        hard: z.boolean().optional().describe('Erase instead of moving to sys.openrecall/trash/.'),
       },
     },
-    async ({ key, namespace, force }) =>
-      run('memory_delete', t => t.delete(key, namespace, { force })),
+    async ({ key, namespace, force, hard }) =>
+      run('memory_delete', t => t.delete(key, namespace, { force, hard })),
   )
 
   return server

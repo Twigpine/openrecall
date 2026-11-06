@@ -46,12 +46,23 @@ import {
   writeMarker,
 } from './doctor.ts'
 import {
+  type FmValue,
   FrontmatterError,
   inferType,
   type NoteType,
   parseFrontmatter,
+  serializeFrontmatter,
   stampForSave,
 } from './frontmatter.ts'
+import {
+  type Candidate,
+  findCandidates,
+  type GateNote,
+  type NoteProfile,
+  profileNote,
+  renderCandidate,
+  renderNeedsDecision,
+} from './gate.ts'
 import {
   ACCESSED_KEY,
   INDEX_KEY,
@@ -59,6 +70,8 @@ import {
   isSystemKey,
   LEGACY_INDEX_KEY,
   SYSTEM_PREFIX,
+  TRASH_PREFIX,
+  trashKey,
 } from './keys.ts'
 import {
   generateIndex,
@@ -74,6 +87,7 @@ import {
   type IndexDoc,
   isInactive,
   type NoteMeta,
+  noteMeta,
   RecallIndex,
   stripFrontmatterText,
   tokenize,
@@ -681,15 +695,32 @@ function fnv1a(s: string): string {
  */
 const MAX_INDEXED_NAMESPACES = 16
 
+/**
+ * How a save answers `needs_decision`, or declares on its first call that the
+ * agent has already checked. Absent, the gate runs. The order is the one the
+ * zod enum advertises.
+ */
+export const SAVE_MODES = ['update', 'supersede', 'add', 'noop'] as const
+export type SaveMode = (typeof SAVE_MODES)[number]
+
 export type SaveOptions = {
   /** Key of the older entry this one replaces; stamped into the frontmatter. */
   supersedes?: string
   /** Override the routing check, save over a locked note, or save over an unreadable one. */
   force?: boolean
+  /**
+   * `update`: rewrite the existing `key` (it must exist). `supersede`: save
+   * this key and mark `supersedes` replaced, in one write. `add`: save as a
+   * distinct fact. `noop`: write nothing and name the best candidate. Any of
+   * them skips the gate; `force` does not.
+   */
+  mode?: SaveMode
 }
 export type DeleteOptions = {
   /** Delete a locked note. */
   force?: boolean
+  /** Erase outright instead of moving the note to the trash; required for a trash key. */
+  hard?: boolean
 }
 export type ListOptions = {
   /** Also list the bookkeeping entries under `sys.openrecall/`. */
@@ -782,6 +813,83 @@ function lockedRefusal(
     : `Refused to delete "${key}" from ${ns}: the stored note is locked (locked: true in its frontmatter). Pass force: true if it really should go. "${key}" is still stored.`
 }
 
+/**
+ * What identifies a pulled entry's content across writes: the server's
+ * ciphertext hash when the client carries one, else the timestamp, length
+ * and a digest of the plaintext. Both per-namespace caches (the index notes
+ * and the gate profiles) are keyed on it, so an unchanged note is parsed
+ * once per process and a changed one is re-parsed on the next write.
+ */
+function fingerprintOf(view: PullResult, key: string, content: string): string {
+  const updatedAt = view.updatedAt[key]
+  return view.hashes?.[key] ?? `${updatedAt ?? ''}|${content.length}|${fnv1a(content)}`
+}
+
+/**
+ * A stored note as the gate compares it (`GateNote`: parsed description,
+ * title, type, body) together with the fields that say whether it is still
+ * active (`NoteMeta`). One frontmatter parse serves both; the gate module
+ * parses nothing itself.
+ */
+function gateNoteOf(key: string, content: string): { note: GateNote; meta: NoteMeta } {
+  const fm = parseFrontmatter(content)
+  const str = (name: string): string | undefined => {
+    const v = fm?.fields.get(name)
+    return typeof v === 'string' && v !== '' ? v : undefined
+  }
+  const note: GateNote = {
+    key,
+    description: str('description') ?? '',
+    body: fm ? fm.body : content,
+  }
+  const type = str('type') ?? inferType(key)
+  if (type !== undefined) note.type = type
+  const title = str('name')
+  if (title !== undefined) note.title = title
+  const updated = str('updated')
+  if (updated !== undefined) note.updated = updated
+  const agent = str('agent')
+  if (agent !== undefined) note.agent = agent
+  return { note, meta: fm ? noteMeta(content) : {} }
+}
+
+/** `content` with `fields` set in its frontmatter, the rest of it (body, opaque lines) untouched. */
+function withFields(content: string, fields: Record<string, FmValue>): string {
+  const fm = parseFrontmatter(content) ?? {
+    fields: new Map<string, FmValue>(),
+    opaque: new Map<string, string[]>(),
+    body: content,
+  }
+  const next = new Map(fm.fields)
+  for (const [k, v] of Object.entries(fields)) next.set(k, v)
+  return serializeFrontmatter(next, fm.opaque) + fm.body
+}
+
+/**
+ * The replaced note as it is stored from now on: `status: superseded` and
+ * `superseded_by: <new key>` added, everything else as it was. `updated` is
+ * not touched: it marks the last change to the note's content, and being
+ * replaced is not one.
+ */
+function markSuperseded(content: string, by: string): string {
+  return withFields(content, { status: 'superseded', superseded_by: by })
+}
+
+/** A note as it is parked in the trash: `status: deleted` and the `deleted:` stamp added. */
+function markDeleted(content: string, now: string): string {
+  return withFields(content, { status: 'deleted', deleted: now })
+}
+
+/** The one line a `noop` save answers with: the entry to keep, and how to read it. */
+function noopText(key: string, ns: string, best: Candidate | undefined): string {
+  if (!best)
+    return `noop: nothing to do; no entry in ${ns} looks like "${key}" (nothing was written)`
+  return (
+    `noop: "${key}" was not saved; keeping ${renderCandidate(best, 0).slice(3)}. ` +
+    `Read it with memory_get key "${best.key}". Nothing was written.`
+  )
+}
+
 export type ToolsOptions = {
   /**
    * Where the doctor's run markers live (`<home>/state/doctor.json`, written
@@ -832,6 +940,53 @@ export function makeTools(
   const indexNotes = new Map<string, Map<string, { fingerprint: string; note: IndexNote }>>()
   function indexNotesFor(ns: string) {
     return warm(indexNotes, ns, () => new Map<string, { fingerprint: string; note: IndexNote }>())
+  }
+
+  /**
+   * The save gate's view of each note (`NoteProfile`: tokens, topic terms,
+   * and the MinHash signature once one was needed) with the fields that say
+   * whether the note is active, parsed and tokenized once per ciphertext hash
+   * and kept per namespace like the index notes above, so a gate call over a
+   * 2,000-note namespace tokenizes only what changed since the last write.
+   */
+  type GateEntry = { fingerprint: string; profile: NoteProfile; meta: NoteMeta }
+  const gateProfiles = new Map<string, Map<string, GateEntry>>()
+  function gateProfilesFor(ns: string) {
+    return warm(gateProfiles, ns, () => new Map<string, GateEntry>())
+  }
+
+  /**
+   * The notes a save into `ns` is compared against: every active, non-hidden
+   * note in the pulled view except the target key itself, which is a plain
+   * update and never a candidate. Returns the corpus and the profiles the
+   * gate should reuse for it; entries for keys no longer stored are dropped.
+   */
+  function gateCorpus(
+    ns: string,
+    view: PullResult,
+    target: string,
+    day: string,
+  ): { corpus: GateNote[]; profiles: Map<string, NoteProfile> } {
+    const cache = gateProfilesFor(ns)
+    const live = new Set<string>()
+    const corpus: GateNote[] = []
+    const profiles = new Map<string, NoteProfile>()
+    for (const [key, content] of Object.entries(view.entries)) {
+      if (isHiddenKey(key)) continue
+      live.add(key)
+      const fingerprint = fingerprintOf(view, key, content)
+      let hit = cache.get(key)
+      if (!hit || hit.fingerprint !== fingerprint) {
+        const { note, meta } = gateNoteOf(key, content)
+        hit = { fingerprint, profile: profileNote(note), meta }
+        cache.set(key, hit)
+      }
+      if (key === target || isInactive(hit.meta, day)) continue
+      corpus.push(hit.profile.note)
+      profiles.set(key, hit.profile)
+    }
+    for (const key of cache.keys()) if (!live.has(key)) cache.delete(key)
+    return { corpus, profiles }
   }
 
   /** `map[ns]`, created by `make` when absent, moved to most-recent, oldest dropped past the cap. */
@@ -1041,15 +1196,13 @@ export function makeTools(
         notes.push(indexNoteOf(key, content))
         continue
       }
-      const updatedAt = view.updatedAt[key]
-      const fingerprint =
-        view.hashes?.[key] ?? `${updatedAt ?? ''}|${content.length}|${fnv1a(content)}`
+      const fingerprint = fingerprintOf(view, key, content)
       const hit = cache.get(key)
       if (hit && hit.fingerprint === fingerprint) {
         notes.push(hit.note)
         continue
       }
-      const note = indexNoteOf(key, content, updatedAt)
+      const note = indexNoteOf(key, content, view.updatedAt[key])
       cache.set(key, { fingerprint, note })
       notes.push(note)
     }
@@ -1146,12 +1299,18 @@ export function makeTools(
    * note is never held back by index contention. A 409 naming the caller's
    * own key is the caller's to render. A write of the index itself has
    * nothing to go alone with and surfaces its failure.
+   *
+   * A caller that already pulled the namespace for its own purposes (the
+   * save gate) hands the view in as `given`, and the first attempt builds on
+   * it instead of pulling again; `null` says that pull already failed, so
+   * the entries go alone at once rather than failing the same way twice.
    */
   async function pushWithBookkeeping(
     timer: Timer,
     ns: string,
     entries: Record<string, string>,
     deletions: string[] = [],
+    given?: PullResult | null,
   ): Promise<Bookkept> {
     const push = (e: Record<string, string>, d: string[]) =>
       timer.time('fetch', () => client.push(ns, e, d.length ? { deletions: d } : undefined))
@@ -1162,12 +1321,20 @@ export function makeTools(
     let lastConflict: unknown
     for (let attempt = 0; attempt < 2; attempt++) {
       let view: PullResult
-      try {
-        view = await pullTimed(timer, ns, { observe: [...BOOKKEEPING_KEYS] })
-      } catch (e) {
-        if (writesIndex) throw e
-        alone = INDEX_NOT_REFRESHED
-        break
+      if (attempt === 0 && given !== undefined) {
+        if (given === null) {
+          alone = INDEX_NOT_REFRESHED
+          break
+        }
+        view = given
+      } else {
+        try {
+          view = await pullTimed(timer, ns, { observe: [...BOOKKEEPING_KEYS] })
+        } catch (e) {
+          if (writesIndex) throw e
+          alone = INDEX_NOT_REFRESHED
+          break
+        }
       }
       const extra: Record<string, string> = {}
       let plan: IndexPlan | null = null
@@ -1237,28 +1404,71 @@ export function makeTools(
     await timer.time('fetch', () => flushAccessed(client, ns, pending))
   }
 
+  /**
+   * The namespace view a save compares against and writes its bookkeeping
+   * from, or null when it cannot be read whole (a body that will not decrypt,
+   * say). The gate is then skipped and said so, and the push goes alone, the
+   * same way the index is skipped when its pull fails.
+   */
+  async function pullView(timer: Timer, ns: string): Promise<PullResult | null> {
+    try {
+      return await pullTimed(timer, ns, { observe: [...BOOKKEEPING_KEYS] })
+    } catch {
+      return null
+    }
+  }
+
+  /** The stored note under `key` out of a pulled view, or from an entry read when there is none. */
+  async function storedNote(
+    timer: Timer,
+    ns: string,
+    key: string,
+    view: PullResult | null,
+  ): Promise<string | null> {
+    if (view) return Object.hasOwn(view.entries, key) ? (view.entries[key] as string) : null
+    return timer.time('fetch', () => readExisting(ns, key, true))
+  }
+
+  const GATE_SKIPPED = '(duplicate check skipped: the namespace could not be read whole)'
+
   const tools = {
     /**
      * Persist one durable memory entry (encrypted before upload).
      *
-     * Read, stamp, route, push. The stored note under `key` is read first (one
-     * bounded entry read, not a pull) so the stamp can keep its `id` and
-     * `created`, refuse a locked note, and tell a stale agent-supplied stamp
-     * from one carried over from `memory_get`. The stamp lives inside the
-     * encrypted body, so the server sees nothing new. The push carries the
-     * regenerated `MEMORY.md` in the same request (`pushWithBookkeeping`);
-     * saving `MEMORY.md` itself edits its Pinned section and nothing else.
-     * The first response line keeps its shape; a second line reports replaced
-     * stamps, a third a routing reminder, and any lines about the index follow.
+     * Read, stamp, route, gate, push. The stored note under `key` is read
+     * first (one bounded entry read, not a pull) so the stamp can keep its
+     * `id` and `created`, refuse a locked note, and tell a stale
+     * agent-supplied stamp from one carried over from `memory_get`. The stamp
+     * lives inside the encrypted body, so the server sees nothing new.
+     *
+     * The gate: with no `mode`, the stamped note is compared against every
+     * active note in the namespace (the same pulled view the bookkeeping is
+     * built from, profiles cached per ciphertext hash) and a likely twin,
+     * duplicate, contradiction or same-topic note refuses the save with
+     * `needs_decision` and up to five candidates; nothing is written. The
+     * agent answers by resaving with `mode`: `update` rewrites the existing
+     * key, `supersede` writes this note and marks `supersedes` replaced in
+     * the same request, `add` saves as a distinct fact, `noop` writes nothing.
+     * A `mode` on a first call is honoured as "already checked". Saving over
+     * the same key is an update and that key is never its own candidate;
+     * `force` covers locks and routing only, never the gate.
+     *
+     * The push carries the regenerated `MEMORY.md` in the same request
+     * (`pushWithBookkeeping`); saving `MEMORY.md` itself edits its Pinned
+     * section and nothing else. The first response line keeps its shape; a
+     * second line reports replaced stamps, then a routing reminder, a
+     * supersession note, and any lines about the index.
      */
     save: timed(
       async (timer, key: string, content: string, namespace?: string, opts: SaveOptions = {}) => {
         const ns = nsOf(namespace)
         if (isSystemKey(key)) return fail(reservedKey(key, 'save'))
+        const mode = opts.mode
         try {
-          let toPush = content
+          const entries: Record<string, string> = { [key]: content }
           let corrected: string[] = []
-          let routeNote: string | undefined
+          const extra: string[] = []
+          let view: PullResult | null | undefined
           // The root index is not a note: it is regenerated from the notes on
           // every write, so it carries no stamp and no type to route, and the
           // one part of what the agent sends that survives is its Pinned
@@ -1269,10 +1479,17 @@ export function makeTools(
             )
             const lock = lockedRefusal(existing, key, ns, 'save')
             if (lock && !opts.force) return fail(lock)
+            if (mode === 'update' && existing === null) {
+              return fail(
+                `Nothing to update: there is no entry "${key}" in ${ns}. Resave with the key ` +
+                  'of the entry to rewrite, or with mode: "add" if this is a new fact. Nothing was stored.',
+              )
+            }
+            const now = new Date().toISOString()
             let stamped: ReturnType<typeof stampForSave>
             try {
               stamped = stampForSave(existing, content, {
-                now: new Date().toISOString(),
+                now,
                 agent: session.agentLabel(),
                 session: session.sessionId,
                 key,
@@ -1292,12 +1509,81 @@ export function makeTools(
             }
             const route = routeCheck(stamped.meta.type, key, ns)
             if (route.refusal && !opts.force) return fail(route.refusal)
-            toPush = stamped.content
+            entries[key] = stamped.content
             corrected = stamped.corrected
-            routeNote = route.note
+            if (route.note) extra.push(route.note)
+
+            // A subtree index (`project/MEMORY.md`) is stamped and routed like
+            // a note but is a table of contents, not a fact: nothing to gate.
+            if (!isHiddenKey(key)) {
+              view = await pullView(timer, ns)
+              const day = today()
+              if (mode === undefined || mode === 'noop') {
+                if (view === null) {
+                  if (mode === 'noop') {
+                    return ok(
+                      `noop: "${key}" was not saved and nothing was written; ${ns} could not be ` +
+                        'read whole, so no existing entry was compared.',
+                    )
+                  }
+                  extra.push(GATE_SKIPPED)
+                } else {
+                  const target = gateNoteOf(key, stamped.content).note
+                  const pulled = view
+                  const candidates = await timer.time('rank', () => {
+                    const { corpus, profiles } = gateCorpus(ns, pulled, key, day)
+                    return findCandidates(target, corpus, { profiles })
+                  })
+                  if (mode === 'noop') return ok(neutralize(noopText(key, ns, candidates[0])))
+                  if (candidates.length > 0) {
+                    return fail(neutralize(renderNeedsDecision(key, ns, candidates)))
+                  }
+                }
+              }
+              if (mode === 'supersede') {
+                const old = opts.supersedes ?? stamped.meta.supersedes
+                if (old === undefined) {
+                  return fail(
+                    `Refused to save "${key}" with mode "supersede": pass supersedes: "<old key>" ` +
+                      'naming the entry this one replaces. Nothing was stored.',
+                  )
+                }
+                if (isHiddenKey(old)) {
+                  return fail(
+                    `Refused to supersede "${old}": it is an index or a bookkeeping entry, not a ` +
+                      'note. Nothing was stored.',
+                  )
+                }
+                const oldContent = await storedNote(timer, ns, old, view)
+                if (oldContent === null) {
+                  return fail(
+                    `Refused to supersede "${old}": there is no such entry in ${ns}. Call ` +
+                      'memory_list to see the keys that exist. Nothing was stored.',
+                  )
+                }
+                const oldMeta = noteMeta(oldContent)
+                if (oldMeta.status === 'superseded' || oldMeta.status === 'deleted') {
+                  return fail(
+                    `Refused to supersede "${old}": it is already ${oldMeta.status}` +
+                      `${oldMeta.supersededBy ? ` by "${oldMeta.supersededBy}"` : ''}. ` +
+                      'Supersede the entry that replaced it, or save with mode: "add". Nothing was stored.',
+                  )
+                }
+                if (parseFrontmatter(oldContent)?.fields.get('locked') === true && !opts.force) {
+                  return fail(
+                    `Refused to supersede "${old}": it is locked (locked: true in its frontmatter). ` +
+                      'Pass force: true if it really should be replaced. Nothing was stored.',
+                  )
+                }
+                entries[old] = markSuperseded(oldContent, key)
+                extra.push(
+                  `(marked "${old}" superseded by "${key}"; recall hides it unless include_inactive)`,
+                )
+              }
+            }
           }
-          const { result: r, notes } = await pushWithBookkeeping(timer, ns, { [key]: toPush })
-          timer.entries += 1
+          const { result: r, notes } = await pushWithBookkeeping(timer, ns, entries, [], view)
+          timer.entries += Object.keys(entries).length
           // A 2xx does not mean this key landed: the server refuses oversized and
           // malformed entries per key and reports them here. Match on the key
           // that was sent, since another key's refusal says nothing about this one.
@@ -1306,8 +1592,17 @@ export function makeTools(
           const status = r.uploaded.includes(key) ? 'saved' : 'unchanged'
           const lines = [`${status} "${key}" in ${ns} (v${r.version})`]
           if (corrected.length) lines.push(neutralize(correctedLine(corrected)))
-          if (routeNote) lines.push(routeNote)
-          lines.push(...notes)
+          for (const other of Object.keys(entries)) {
+            if (other === key) continue
+            const refusedOther = r.skipped?.find(s => s.key === other)
+            if (refusedOther) {
+              extra.push(
+                `(the server refused the change to "${other}" (${bounded(refusedOther.reason, 80)}); ` +
+                  'it is still active)',
+              )
+            }
+          }
+          lines.push(...extra, ...notes)
           return ok(lines.join('\n'))
         } catch (e) {
           if (e instanceof Rendered) return fail(e.message)
@@ -1675,20 +1970,45 @@ export function makeTools(
     }),
 
     /**
-     * Delete one entry. The stored note is read first so a locked one is
-     * refused. The deletion goes through the push route, never the bare
-     * delete, so the regenerated index (without the deleted key) and any
-     * pending access stamps land in the same request.
+     * Delete one entry: by default a move to the trash, `hard` an erasure.
+     *
+     * The stored note is read first so a locked one is refused. A soft delete
+     * writes the note under `sys.openrecall/trash/<key>` stamped
+     * `status: deleted` and `deleted: <now>` and deletes the original in the
+     * same request, so nothing an agent removes is gone until someone erases
+     * it on purpose; trash entries are hidden keys, never ranked, listed or
+     * compared. `hard: true` erases the note and its trash copy, and is the
+     * only way to delete a key already in the trash. A key too long to park
+     * is erased with a note saying so. Every deletion goes through the push
+     * route, never the bare delete, so the regenerated index (without the
+     * deleted key) and any pending access stamps land in the same request.
      */
     delete: timed(async (timer, key: string, namespace?: string, opts: DeleteOptions = {}) => {
       const ns = nsOf(namespace)
-      if (isSystemKey(key)) return fail(reservedKey(key, 'delete'))
+      const inTrash = key.startsWith(TRASH_PREFIX)
+      if (isSystemKey(key) && !inTrash) return fail(reservedKey(key, 'delete'))
+      if (inTrash && !opts.hard) {
+        return fail(
+          `Refused to delete "${key}": it is already in the trash. Pass hard: true to erase it. ` +
+            `"${key}" is still stored.`,
+        )
+      }
       try {
         const existing = await timer.time('fetch', () => readExisting(ns, key, true))
         const lock = lockedRefusal(existing, key, ns, 'delete')
         if (lock && !opts.force) return fail(lock)
-        const { result: r, notes } = await pushWithBookkeeping(timer, ns, {}, [key])
-        const refused = r.skipped?.find(s => s.key === key)
+        const parked = inTrash ? null : trashKey(key)
+        const hard = opts.hard === true || existing === null || parked === null
+        const entries: Record<string, string> = {}
+        const deletions = [key]
+        if (hard) {
+          // The trash copy goes with the note: "erase" means nowhere.
+          if (parked !== null) deletions.push(parked)
+        } else {
+          entries[parked as string] = markDeleted(existing as string, new Date().toISOString())
+        }
+        const { result: r, notes } = await pushWithBookkeeping(timer, ns, entries, deletions)
+        const refused = r.skipped?.find(s => s.key === key || (!hard && s.key === parked))
         if (refused) {
           return fail(
             `Deleting "${key}" from ${ns} was refused by the server (${bounded(refused.reason, 80)}). "${key}" is still stored.`,
@@ -1696,8 +2016,30 @@ export function makeTools(
         }
         const deleted = r.deleted.includes(key)
         timer.entries += deleted ? 1 : 0
-        if (!deleted) return ok(`nothing to delete — "${key}" is not in ${ns}`)
-        return ok([`deleted "${key}" from ${ns} (v${r.version})`, ...notes].join('\n'))
+        if (!deleted) {
+          if (parked !== null && r.deleted.includes(parked))
+            return ok(
+              `erased the trash copy of "${key}" from ${ns} (v${r.version}); it was not stored itself`,
+            )
+          return ok(`nothing to delete — "${key}" is not in ${ns}`)
+        }
+        if (!hard) {
+          return ok(
+            [
+              `moved "${key}" to the trash in ${ns} (v${r.version}); memory_delete hard=true erases it`,
+              ...notes,
+            ].join('\n'),
+          )
+        }
+        const lines = [`deleted "${key}" from ${ns} (v${r.version})`]
+        if (!opts.hard && !inTrash) {
+          lines.push(
+            existing === null
+              ? '(its body could not be read, so it was erased rather than moved to the trash)'
+              : '(its key is too long to park under the trash prefix, so it was erased rather than moved)',
+          )
+        }
+        return ok([...lines, ...notes].join('\n'))
       } catch (e) {
         if (e instanceof Rendered) return fail(e.message)
         const d = denial(`Deleting "${key}"`, ns, defaultNamespace, `"${key}" is still stored.`, e)
