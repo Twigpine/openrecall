@@ -8,7 +8,7 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { OpenRecallClient } from '../client/index.ts'
+import { OpenRecallClient, OpenRecallProtocolError } from '../client/index.ts'
 import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
 import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
@@ -1183,5 +1183,65 @@ describe('a refused entry inside a successful push', () => {
     expect(r.text).not.toMatch(/\bunchanged\b/)
     // And the server really is empty, so the refusal is not a mislabelled write.
     expect((await real.list()).text).not.toContain('big.md')
+  })
+})
+
+/**
+ * `memory_get` reads through the single-entry view. The point is the cost
+ * shape: one manifest read plus one blob, so a get no longer pays for every
+ * entry in the namespace. The first test pins that by watching the wire; the
+ * rest pin the refusals the view can express that the full read could not.
+ */
+describe('memory_get reads one entry, not the namespace', () => {
+  test('the only request a get makes is the single-entry view', async () => {
+    await tools.save('one/of-many.md', 'the entry a get asks for')
+    const seen: string[] = []
+    const recording = new OpenRecallClient({
+      url: `http://localhost:${server.port}`,
+      passphrase: 'mcp-pass',
+      fetch: (input, init) => {
+        seen.push(`${(init?.method ?? 'GET').toUpperCase()} ${new URL(input).search}`)
+        return fetch(input, init)
+      },
+    })
+    const r = await makeTools(recording, 'user:me').get('one/of-many.md')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('the entry a get asks for')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toContain('view=entry')
+    expect(seen[0]).toContain('key=one%2Fof-many.md')
+  })
+
+  test('an unreadable body is reported as loss, never as a missing entry', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'gone.md': 'x' }
+    stub.error = httpError(503, 'entry_unreadable')
+    const r = await makeTools(stub, 'user:me').get('gone.md')
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('gone.md')
+    expect(r.text).toContain('do not save over it')
+    expect(r.text).not.toMatch(/no entry|no memory stored/)
+  })
+
+  test('a key the server refuses to look up reads as not found, not as a failure', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'a.md': 'x' }
+    stub.error = httpError(400, 'invalid_key')
+    const r = await makeTools(stub, 'user:me').get('../x')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('no entry')
+    expect(r.text).toContain('memory_list')
+  })
+
+  test('a server without the entry view is read through the full pull instead', async () => {
+    const older = {
+      ...makeStubClient({ 'a.md': 'body from the full view' }),
+      entry: async () => {
+        throw new OpenRecallProtocolError('entry', 'user:me', 'no entry in the response for "a.md"')
+      },
+    }
+    const r = await makeTools(older, 'user:me').get('a.md')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('body from the full view')
   })
 })
