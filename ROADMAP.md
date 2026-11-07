@@ -27,6 +27,11 @@ release, and what comes after. Open an issue or discussion to weigh in.
 - **Local mode.** Memory works with no server: ciphertext lives in
   `~/.openrecall/data`, shared safely by every agent on the machine through a
   cross-process lock.
+- **Memory-directory sync.** `openrecall sync` mirrors a memory directory and
+  a namespace in both directions (newest write per entry wins, guarded
+  `--prune`, `--watch`), for agents that read memory files rather than call
+  MCP tools. The hashes view now carries per-entry write times to make that
+  possible.
 - **Runs without Bun.** The CLI and MCP server ship as a single Node bundle,
   so `npx -y @twigpine/openrecall mcp` works anywhere Node 24+ does. Only
   `openrecall serve` needs Bun.
@@ -62,9 +67,10 @@ Every MCP client works today. These items deepen specific integrations.
   plaintext. A native OpenRecall backend would encrypt in-process and sync the
   memory directory to OpenRecall. This is the deepest integration for our own
   agent, and it belongs in Twigpine/openclaude.
-- **Memory-directory sync.** A background watcher that mirrors Claude Code and
-  OpenClaude memory directories to and from OpenRecall, for agents that read
-  memory files rather than MCP tools.
+- **Memory-directory sync.** Shipped as `openrecall sync` — see the README's
+  [Mirror a memory directory](./README.md#mirror-a-memory-directory). What
+  remains is background/watch integrations per agent host, where a watcher is
+  installed and started for you rather than run by hand.
 
 ## Scale
 

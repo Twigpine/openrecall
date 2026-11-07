@@ -9,6 +9,7 @@
  *   openrecall card <owner> [url]         print the service paste-in card + a new passphrase
  *   openrecall push <dir> [namespace]   encrypt + upload changed .md entries
  *   openrecall pull <dir> [namespace]   download + decrypt into <dir>
+ *   openrecall sync <dir> [namespace]   bidirectional mirror (newest write wins)
  *   openrecall mcp                      run the stdio MCP server (memory tools)
  *   openrecall serve                    run the openrecall server (needs Bun)
  *
@@ -20,8 +21,8 @@
  */
 
 import { spawn } from 'node:child_process'
-import { mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
-import { dirname, join, resolve, sep } from 'node:path'
+import { mkdir, writeFile } from 'node:fs/promises'
+import { dirname, join, resolve } from 'node:path'
 import { flattenServerText } from '../client/index.ts'
 import { generateRetypablePassphrase, renderSetupCard } from '../client/setup.ts'
 import { describeTarget, makeClient } from '../src/cli/client.ts'
@@ -36,6 +37,15 @@ import {
   validateUrl,
   writeConfigFile,
 } from '../src/cli/settings.ts'
+import {
+  formatSyncReport,
+  listMemoryFiles,
+  readMemoryFile,
+  runSync,
+  type SyncReport,
+  type WatchHandle,
+  watchDirectory,
+} from '../src/cli/sync.ts'
 import { validateNamespace } from '../src/namespace.ts'
 import { version } from '../src/version.ts'
 
@@ -62,21 +72,12 @@ function parseArgs(argv: string[]): Args {
   return { positional, flags }
 }
 
-const VALUE_FLAGS = new Set(['url', 'namespace', 'api-key', 'scan'])
+const VALUE_FLAGS = new Set(['url', 'namespace', 'api-key', 'scan', 'prefer', 'interval'])
 
 function flag(args: Args, name: string): string | undefined {
   const v = args.flags[name]
   if (v === true) throw new Error(`--${name} needs a value`)
   return v
-}
-
-async function walkMd(dir: string): Promise<string[]> {
-  const out: string[] = []
-  const entries = await readdir(dir, { recursive: true }).catch(() => [] as string[])
-  for (const rel of entries) {
-    if (rel.endsWith('.md') && rel.split(sep).length <= 3) out.push(rel)
-  }
-  return out
 }
 
 async function cmdInit(args: Args) {
@@ -148,10 +149,34 @@ async function cmdPush(dir: string, namespace?: string) {
   const s = resolveSettings()
   const ns = namespace ?? s.namespace
   const client = await makeClient(s)
-  const files = await walkMd(dir)
+  const listing = await listMemoryFiles(dir)
+  // A missing or unreadable directory lists as empty. Pushing that would
+  // report success while reading nothing, so refuse the incomplete snapshot.
+  if (!listing.complete) {
+    throw new Error(`cannot read ${dir} completely; refusing to push an incomplete snapshot`)
+  }
   const entries: Record<string, string> = {}
-  for (const rel of files) {
-    entries[rel.split(sep).join('/')] = await readFile(join(dir, rel), 'utf8')
+  for (const f of listing.files) {
+    try {
+      entries[f.key] = (await readMemoryFile(dir, f.path)).content
+    } catch (err) {
+      const code = (err as NodeJS.ErrnoException).code
+      // The walker already skipped symlinks; this catches a parent or leaf
+      // replaced between the walk and the read. Refuse rather than upload
+      // content from outside the directory the operator named.
+      if (
+        code === 'ELOOP' ||
+        code === 'ENOENT' ||
+        code === 'ENOTREG' ||
+        code === 'EOUTSIDE' ||
+        code === 'ECHANGED'
+      ) {
+        throw new Error(
+          `${f.path} changed while reading (${code}); refusing to push an inconsistent snapshot`,
+        )
+      }
+      throw err
+    }
   }
   const r = await client.push(ns, entries)
   const skipped = r.skipped ?? []
@@ -184,6 +209,97 @@ async function cmdPull(dir: string, namespace?: string) {
     n++
   }
   console.log(`pulled ${ns} v${r.version}: ${n} files → ${dir}`)
+}
+
+/**
+ * Print a sync report: primary results on stdout, warnings/refusals on stderr
+ * so stdout stays pipeable.
+ */
+function printSyncReport(r: SyncReport, dir: string) {
+  const { out, err } = formatSyncReport(r, dir)
+  for (const line of out) console.log(line)
+  for (const line of err) console.error(line)
+}
+
+/**
+ * `openrecall sync <dir> [namespace]` — mirror a directory and a namespace.
+ *
+ * In watch mode the watcher is installed BEFORE each sync, so an edit made
+ * while that sync is reading files schedules the next run instead of being
+ * lost between the read and the watcher registration.
+ */
+async function cmdSync(dir: string, namespace: string | undefined, args: Args) {
+  const s = resolveSettings()
+  const ns = namespace ?? s.namespace
+
+  const prefer = flag(args, 'prefer')
+  if (prefer !== undefined && prefer !== 'local' && prefer !== 'remote')
+    throw new Error('--prefer must be "local" or "remote"')
+
+  const intervalRaw = flag(args, 'interval')
+  let intervalSec: number | undefined
+  if (intervalRaw !== undefined) {
+    intervalSec = Number(intervalRaw)
+    if (!Number.isFinite(intervalSec) || intervalSec <= 0)
+      throw new Error('--interval must be a positive number of seconds')
+  }
+
+  const client = await makeClient(s)
+  /** Run one sync and set the exit code when it left work unresolved. */
+  const once = async () => {
+    const r = await runSync(dir, client, {
+      namespace: ns,
+      ...(prefer ? { prefer: prefer as 'local' | 'remote' } : {}),
+      prune: args.flags.prune === true,
+      dryRun: args.flags['dry-run'] === true,
+      statePath: join(s.home, 'sync-state.json'),
+    })
+    printSyncReport(r, dir)
+    // Refusals, skipped downloads, undecided conflicts and unapplied remote
+    // deletions are a sync that did not finish; say so through the exit code
+    // rather than a summary line that reads as success.
+    if (
+      r.skipped.length > 0 ||
+      r.unresolved.length > 0 ||
+      r.downloadSkipped.length > 0 ||
+      r.remoteDeleted.length > 0
+    ) {
+      process.exitCode = 1
+    }
+  }
+
+  if (args.flags.watch !== true) {
+    await once()
+    return
+  }
+
+  // Watch mode: always hold a watcher across the sync. If the directory
+  // settles during `once()`, the callback closes this watcher and resolves the
+  // promise, so the loop runs again with content it has not seen yet.
+  //
+  // `--watch` only sees LOCAL filesystem events: a change made on another
+  // machine is invisible until the next local edit. Use `--watch --interval`
+  // when the directory must also poll for remote-only changes; `--interval`
+  // without `--watch` still performs just the single sync above.
+  for (;;) {
+    let handle: WatchHandle | undefined
+    const changed = new Promise<void>(resolve => {
+      handle = watchDirectory(
+        dir,
+        () => {
+          handle?.close()
+          resolve()
+        },
+        intervalSec !== undefined ? { intervalSec } : {},
+      )
+    })
+    try {
+      await once()
+      await changed
+    } finally {
+      handle?.close()
+    }
+  }
 }
 
 /**
@@ -286,6 +402,10 @@ try {
       if (!a) usage()
       await cmdPull(a, b)
       break
+    case 'sync':
+      if (!a) usage()
+      await cmdSync(a, b, args)
+      break
     case 'card':
       if (!a) usage()
       cmdCard(a, b)
@@ -328,6 +448,15 @@ function usage(code = 1): never {
       '  openrecall card <owner> [url]        print the service paste-in card + a new passphrase\n' +
       '  openrecall push <dir> [namespace]    encrypt + upload changed .md entries\n' +
       '  openrecall pull <dir> [namespace]    download + decrypt into <dir>\n' +
+      '  openrecall sync <dir> [namespace]    mirror a memory directory and a namespace\n' +
+      '                                       [--dry-run] [--prefer local|remote] [--prune] [--watch]\n' +
+      '                                       [--interval <sec>]   bidirectional: newest write per\n' +
+      '                                       entry wins; --watch sees local changes only, while\n' +
+      '                                       --watch --interval <sec> also polls for remote ones;\n' +
+      '                                       --interval alone still performs one sync and exits;\n' +
+      '                                       --prefer resolves conflicts and remote deletions;\n' +
+      '                                       --prune deletes remote entries whose local file a\n' +
+      '                                       previous sync of this pair saw unchanged\n' +
       '  openrecall mcp                       run the stdio MCP server (memory tools)\n' +
       '  openrecall serve                     run the openrecall server (needs Bun)',
   )

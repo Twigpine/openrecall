@@ -102,6 +102,30 @@ export type DeleteResult = {
 }
 
 /**
+ * The hashes view in full: per-key checksums, per-key write timestamps, and
+ * the server's advertised capabilities, with no ciphertext bodies.
+ *
+ * This is what a directory sync needs to plan a round trip. Checksums decide
+ * which entries differ; the timestamps decide which side of a two-sided
+ * difference changed last. `entryUpdatedAt` is empty against a server that
+ * predates the field (check `supports` for `'hashes-updated-at'`), and a
+ * caller cannot resolve conflicts by recency there — it must ask its user.
+ */
+export type NamespaceMetadata = {
+  version: number
+  /** entryKey -> sha256:<hex> of the ciphertext the manifest names. */
+  entryChecksums: Record<string, string>
+  /**
+   * entryKey -> ISO 8601 of the entry's last write, as the server's manifest
+   * records it. Absent for a key the server did not report, which is what a
+   * server predating the field looks like.
+   */
+  entryUpdatedAt: Record<string, string | undefined>
+  /** Capabilities the server advertised on the same read. */
+  supports: string[]
+}
+
+/**
  * A body that would not decrypt with this client's key.
  *
  * Without a type for it, a caller sees one Error for a wrong passphrase, a
@@ -404,13 +428,44 @@ export class OpenRecallClient {
   }
 
   /**
+   * The whole hashes view — checksums AND per-entry write timestamps — as one
+   * read, for callers that have to order changes rather than only detect them
+   * (a directory sync deciding which side of a conflict is newer).
+   *
+   * Records what it saw by default, exactly like `hashes`: the checksums are
+   * the manifest's own, so they are an exact base for later writes. A caller
+   * that only wants the map passes `observe: false` and keeps the guarantee
+   * rules described there.
+   */
+  async metadata(namespace: string, opts: { observe?: boolean } = {}): Promise<NamespaceMetadata> {
+    const { version, entryChecksums, entryUpdatedAt, supports } = await this.hashesView(namespace)
+    if (opts.observe !== false) {
+      lruSet(this.observed, namespace, { hashes: { ...entryChecksums }, enumerated: true })
+    }
+    return {
+      version,
+      entryChecksums: { ...entryChecksums },
+      // Keys made explicit rather than missing: a caller comparing
+      // `entryUpdatedAt[key]` across servers needs `undefined`, not an absent
+      // property, to be the honest answer for "this server did not say".
+      entryUpdatedAt: Object.fromEntries(
+        Object.keys(entryChecksums).map(k => [k, entryUpdatedAt[k]]),
+      ),
+      supports,
+    }
+  }
+
+  /**
    * The raw hashes view, without recording what it saw. `push` uses this for
    * its delta computation, which must not count as the caller having read the
    * namespace; see `observed`.
    */
-  private async hashesView(
-    namespace: string,
-  ): Promise<{ version: number; entryChecksums: Record<string, string>; supports: string[] }> {
+  private async hashesView(namespace: string): Promise<{
+    version: number
+    entryChecksums: Record<string, string>
+    entryUpdatedAt: Record<string, string>
+    supports: string[]
+  }> {
     const res = await this.request('hashes', namespace, `${this.endpoint(namespace)}?view=hashes`, {
       headers: this.headers(),
     })
@@ -420,23 +475,38 @@ export class OpenRecallClient {
       // Any other 404 is a wrong URL or something in front of the server, and
       // reporting it as an empty namespace is a denial rendered as success.
       if (err.code !== 'empty') throw err
-      return { version: 0, entryChecksums: {}, supports: [] }
+      return { version: 0, entryChecksums: {}, entryUpdatedAt: {}, supports: [] }
     }
     if (!res.ok) throw httpError(res)
     const data = JSON.parse(res.raw) as {
       version?: number
       entryChecksums?: Record<string, string>
+      entryUpdatedAt?: unknown
       supports?: string[]
     }
+    const entryChecksums = data.entryChecksums ?? {}
+    // Sanitized against the checksum map rather than trusted: a key a hostile
+    // or broken server adds a timestamp for is dropped, because the only keys
+    // a caller can act on are the ones the same response gave a checksum. See
+    // sanitizeUpdatedAt for the value-side rules.
     return {
       version: data.version ?? 0,
-      entryChecksums: data.entryChecksums ?? {},
+      entryChecksums,
+      entryUpdatedAt: sanitizeUpdatedAt(data.entryUpdatedAt, entryChecksums),
       supports: data.supports ?? [],
     }
   }
 
-  /** Pull and decrypt all entries for a namespace. */
-  async pull(namespace: string): Promise<PullResult> {
+  /**
+   * Pull and decrypt all entries for a namespace.
+   *
+   * Records the decrypted keys as this client's write base, exactly like the
+   * caller-requested read it is. A caller that is only fetching bodies for a
+   * plan built from an earlier metadata read passes `observe: false`: the
+   * earlier read must stay the base, or a write that lands between the two
+   * reads would be silently overwritten instead of refused.
+   */
+  async pull(namespace: string, opts: { observe?: boolean } = {}): Promise<PullResult> {
     const res = await this.request('pull', namespace, this.endpoint(namespace), {
       headers: this.headers(),
     })
@@ -447,7 +517,9 @@ export class OpenRecallClient {
       // Enumerated, unlike every other pull: `empty` means no manifest exists,
       // so there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
-      lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      if (opts.observe !== false) {
+        lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      }
       return { namespace, version: 0, entries: {}, updatedAt: {} }
     }
     if (!res.ok) throw httpError(res)
@@ -482,13 +554,31 @@ export class OpenRecallClient {
       }
       seen[entryKey] = ciphertextHash(b64)
     }
-    lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
+    if (opts.observe !== false) {
+      lruSet(this.observed, namespace, { hashes: seen, enumerated: false })
+    }
     return {
       namespace,
       version: data.version,
       entries,
       updatedAt: sanitizeUpdatedAt(data.content?.entryUpdatedAt, entries),
     }
+  }
+
+  /**
+   * The ciphertext hash this client would produce for a plaintext entry — the
+   * value the server's hashes view reports for that key when the entry is
+   * unchanged.
+   *
+   * Deterministic encryption (see client/crypto.ts) is what makes this a
+   * comparison rather than a guess: the same passphrase, key and plaintext
+   * always encrypt to the same bytes, so a caller can learn that a stored
+   * entry matches local content WITHOUT either side transmitting it. A
+   * directory sync uses exactly that to skip unchanged files in both
+   * directions. No request is made; nothing leaves the process.
+   */
+  ciphertextHashOf(namespace: string, entryKey: string, plaintext: string): string {
+    return ciphertextHash(encryptEntry(this.key(namespace), entryKey, plaintext))
   }
 
   /**
