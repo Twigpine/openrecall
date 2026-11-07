@@ -47,7 +47,6 @@ import {
   rename,
   rm,
   stat,
-  utimes,
   writeFile,
 } from 'node:fs/promises'
 import { dirname, join, resolve, sep } from 'node:path'
@@ -143,6 +142,45 @@ function readError(message: string, code: string): NodeJS.ErrnoException {
 }
 
 /**
+ * The device/inode identity of an opened file, compared with `bigint` stats.
+ *
+ * Numeric `dev`/`ino` values can exceed JavaScript's safe integer range on
+ * some filesystems, where two different files could compare equal. Both sides
+ * of every identity check therefore come from `{ bigint: true }` stats. The
+ * mtime used for conflict ordering stays the plain stat's `mtimeMs`: dividing
+ * `mtimeNs` back down loses the last bit of double precision (e.g.
+ * `1794939965106` becomes `1794939965105.9998`), which would make the same
+ * file's timestamp compare unequal to the one `stat()` reports elsewhere.
+ */
+type FileIdentity = { dev: bigint; ino: bigint }
+
+/**
+ * Require `path` to still name the descriptor opened as `opened`, inside
+ * `rootReal`.
+ *
+ * `O_NOFOLLOW` protects only the final component, so a parent directory can be
+ * swapped for a symlink after the open. Re-resolving the whole path closes that
+ * gap: `EOUTSIDE` when it left the mirror, `ECHANGED` when it stayed inside but
+ * now names a different file, `ENOENT` when it vanished. Callers must run this
+ * before reading from or writing to the descriptor.
+ */
+async function verifyOpenedPath(
+  rootReal: string,
+  path: string,
+  opened: FileIdentity,
+): Promise<void> {
+  const resolved = await realpath(path).catch(() => null)
+  if (resolved === null) throw readError(`${path} vanished while opening`, 'ENOENT')
+  if (!isInside(rootReal, resolved))
+    throw readError(`${path} resolves outside ${rootReal}`, 'EOUTSIDE')
+
+  const resolvedInfo = await stat(resolved, { bigint: true }).catch(() => null)
+  if (resolvedInfo === null || resolvedInfo.dev !== opened.dev || resolvedInfo.ino !== opened.ino) {
+    throw readError(`${path} changed while opening`, 'ECHANGED')
+  }
+}
+
+/**
  * Read one memory file without leaving the mirror.
  *
  * The listing rejects symlinks, but a path can be replaced between that
@@ -168,15 +206,10 @@ export async function readMemoryFile(root: string, path: string): Promise<Memory
     const info = await handle.stat()
     if (!info.isFile()) throw readError(`${path} is not a regular file`, 'ENOTREG')
 
-    const resolved = await realpath(path).catch(() => null)
-    if (resolved === null) throw readError(`${path} vanished while opening`, 'ENOENT')
-    if (!isInside(rootReal, resolved))
-      throw readError(`${path} resolves outside ${root}`, 'EOUTSIDE')
-
-    const resolvedInfo = await stat(resolved).catch(() => null)
-    if (resolvedInfo === null || resolvedInfo.dev !== info.dev || resolvedInfo.ino !== info.ino) {
-      throw readError(`${path} changed while opening`, 'ECHANGED')
-    }
+    // Identity uses bigint stats; mtime uses the plain stat above so it matches
+    // the `mtimeMs` every other comparison in this module sees exactly.
+    const identity = await handle.stat({ bigint: true })
+    await verifyOpenedPath(rootReal, path, identity)
 
     return { content: await handle.readFile('utf8'), mtimeMs: info.mtimeMs }
   } finally {
@@ -272,19 +305,47 @@ async function canonicalTarget(
 }
 
 /**
- * Write a downloaded entry without following a symlink at the destination.
+ * Write a downloaded entry only after proving the open descriptor is the file
+ * at `path` inside the mirror.
  *
- * `canonicalTarget` already resolves every parent and rejects a final symlink,
- * but an editor or another process can create one between that check and this
- * write. `O_NOFOLLOW` makes the final open fail instead of writing through it.
+ * `canonicalTarget` resolves every parent and rejects a final symlink, but a
+ * parent can still be replaced between that check and this open. The open
+ * therefore uses `O_NOFOLLOW` but NOT `O_TRUNC`: truncating before verifying
+ * would destroy the destination even when the write is refused. Once the
+ * descriptor is open, `verifyOpenedPath` re-resolves the whole path and
+ * requires the same bigint device/inode inside `root`. Only then is the old
+ * body truncated, and every write after that goes through the descriptor, so
+ * a later path swap cannot redirect or truncate anything else.
+ *
+ * The adopted remote mtime is also applied through the descriptor, not the
+ * path, so it cannot touch a file substituted after the write.
+ *
+ * Failures use the same codes as `readMemoryFile`: `ELOOP`/`ENOTREG`/
+ * `EOUTSIDE` mean the destination is unsafe, while `ECHANGED`/`ENOENT` mean a
+ * concurrent local change won the race.
  */
-async function writeDownloadedFile(path: string, plaintext: string): Promise<void> {
-  const handle = await open(
-    path,
-    constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
-  )
+async function writeDownloadedFile(
+  root: string,
+  path: string,
+  plaintext: string,
+  mtimeMs: number | null,
+): Promise<void> {
+  const rootReal = await realpath(root).catch(() => null)
+  if (rootReal === null) throw readError(`cannot resolve ${root}`, 'ENOENT')
+
+  const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW)
   try {
+    const info = await handle.stat({ bigint: true })
+    if (!info.isFile()) throw readError(`${path} is not a regular file`, 'ENOTREG')
+
+    await verifyOpenedPath(rootReal, path, info)
+
+    await handle.truncate(0)
     await handle.writeFile(plaintext, 'utf8')
+    if (mtimeMs !== null && Number.isFinite(mtimeMs)) {
+      const when = new Date(mtimeMs)
+      await handle.utimes(when, when).catch(() => {})
+    }
   } finally {
     await handle.close()
   }
@@ -758,23 +819,26 @@ export async function runSync(
     }
 
     try {
-      await writeDownloadedFile(dest, plaintext)
+      // Adopting the remote write time happens inside this call, through the
+      // verified descriptor, so the NEXT conflict comparison has real evidence
+      // rather than "whenever this sync downloaded it" — and a path swapped
+      // after the write cannot have its mtime changed by mistake.
+      await writeDownloadedFile(root, dest, plaintext, a.remoteAt)
     } catch (err) {
-      // A symlink created between canonicalTarget and the open. Refuse rather
-      // than follow it; anything else is a real I/O failure.
-      if ((err as NodeJS.ErrnoException).code === 'ELOOP') {
+      const code = (err as NodeJS.ErrnoException).code
+      // A symlink, non-regular file, or redirected parent appeared between
+      // canonicalTarget and the open.
+      if (code === 'ELOOP' || code === 'ENOTREG' || code === 'EOUTSIDE') {
         report.downloadSkipped.push({ key: a.key, reason: 'unsafe_key' })
         continue
       }
+      // The destination changed after the mtime guard: a concurrent local edit
+      // (or removal) must not be overwritten.
+      if (code === 'ECHANGED' || code === 'ENOENT') {
+        report.downloadSkipped.push({ key: a.key, reason: 'local-changed' })
+        continue
+      }
       throw err
-    }
-
-    // Adopt the server's write time so the NEXT conflict comparison has real
-    // evidence rather than "whenever this sync downloaded it", which would
-    // make every downloaded file look locally-newer forever.
-    if (a.remoteAt !== null && Number.isFinite(a.remoteAt)) {
-      const when = new Date(a.remoteAt)
-      await utimes(dest, when, when).catch(() => {})
     }
 
     // Record the hash of what was actually written. A remote writer can replace

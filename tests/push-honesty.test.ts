@@ -28,6 +28,35 @@ import { makeTools } from '../src/mcp/tools.ts'
 
 const ROOT = resolve(import.meta.dir, '..')
 
+/**
+ * Whether this environment can create symlinks at all.
+ *
+ * Windows without Developer Mode, and some restricted sandboxes, refuse with
+ * EPERM/EACCES. Those runs skip the symlink test instead of failing its setup;
+ * any other probe error is a real problem and is rethrown.
+ */
+const canCreateSymlinks = (() => {
+  const probe = mkdtempSync(join(tmpdir(), 'openrecall-symlink-probe-'))
+  try {
+    symlinkSync(join(probe, 'target'), join(probe, 'link'))
+    return true
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (
+      code === 'EPERM' ||
+      code === 'EACCES' ||
+      code === 'ENOSYS' ||
+      code === 'ENOTSUP' ||
+      code === 'EINVAL'
+    ) {
+      return false
+    }
+    throw err
+  } finally {
+    rmSync(probe, { recursive: true, force: true })
+  }
+})()
+
 /** Serve the real handler in-process, exactly like local mode does. */
 const client = () =>
   new OpenRecallClient({
@@ -238,47 +267,53 @@ describe('openrecall push reports rejected entries', () => {
     }
   })
 
-  test('does not upload a symlink to a file outside the directory', () => {
-    const home = mkdtempSync(join(tmpdir(), 'openrecall-push-symlink-'))
-    const dir = join(home, 'memories')
-    const pulled = join(home, 'pulled')
-    const outside = join(home, 'outside.md')
-    const outsideDir = join(home, 'outside-dir')
-    mkdirSync(dir)
-    mkdirSync(outsideDir)
-    writeFileSync(join(dir, 'real.md'), 'inside the mirror')
-    writeFileSync(outside, 'outside secret')
-    writeFileSync(join(outsideDir, 'nested.md'), 'nested outside secret')
-    symlinkSync(outside, join(dir, 'leak.md'))
-    symlinkSync(outsideDir, join(dir, 'linkdir'))
-    const env = { ...process.env } as Record<string, string | undefined>
-    env.OPENRECALL_HOME = home
-    env.OPENRECALL_PASSPHRASE = 'test-passphrase'
-    env.OPENRECALL_SCAN = 'off'
-    env.OPENRECALL_URL = 'local'
-    delete env.OPENRECALL_API_KEY
-    delete env.OPENRECALL_DATA_DIR
-    delete env.OPENRECALL_NAMESPACE
-    delete env.OPENRECALL_PASSPHRASE_FILE
-    try {
-      const push = Bun.spawnSync(['bun', 'run', join(ROOT, 'bin/openrecall.ts'), 'push', dir], {
-        env,
-      })
-      const output = push.stdout.toString() + push.stderr.toString()
-      expect(push.exitCode).toBe(0)
-      expect(output).toContain('1 uploaded')
+  test.skipIf(!canCreateSymlinks)(
+    'does not upload a symlink to a file outside the directory',
+    () => {
+      const home = mkdtempSync(join(tmpdir(), 'openrecall-push-symlink-'))
+      const dir = join(home, 'memories')
+      const pulled = join(home, 'pulled')
+      const outside = join(home, 'outside.md')
+      const outsideDir = join(home, 'outside-dir')
+      mkdirSync(dir)
+      mkdirSync(outsideDir)
+      writeFileSync(join(dir, 'real.md'), 'inside the mirror')
+      writeFileSync(outside, 'outside secret')
+      writeFileSync(join(outsideDir, 'nested.md'), 'nested outside secret')
+      symlinkSync(outside, join(dir, 'leak.md'))
+      symlinkSync(outsideDir, join(dir, 'linkdir'))
+      const env = { ...process.env } as Record<string, string | undefined>
+      env.OPENRECALL_HOME = home
+      env.OPENRECALL_PASSPHRASE = 'test-passphrase'
+      env.OPENRECALL_SCAN = 'off'
+      env.OPENRECALL_URL = 'local'
+      delete env.OPENRECALL_API_KEY
+      delete env.OPENRECALL_DATA_DIR
+      delete env.OPENRECALL_NAMESPACE
+      delete env.OPENRECALL_PASSPHRASE_FILE
+      try {
+        const push = Bun.spawnSync(['bun', 'run', join(ROOT, 'bin/openrecall.ts'), 'push', dir], {
+          env,
+        })
+        const output = push.stdout.toString() + push.stderr.toString()
+        expect(push.exitCode).toBe(0)
+        expect(output).toContain('1 uploaded')
 
-      const pull = Bun.spawnSync(['bun', 'run', join(ROOT, 'bin/openrecall.ts'), 'pull', pulled], {
-        env,
-      })
-      expect(pull.exitCode).toBe(0)
-      expect(readFileSync(join(pulled, 'real.md'), 'utf8')).toBe('inside the mirror')
-      expect(existsSync(join(pulled, 'leak.md'))).toBe(false)
-      expect(existsSync(join(pulled, 'nested.md'))).toBe(false)
-      expect(readFileSync(outside, 'utf8')).toBe('outside secret')
-      expect(readFileSync(join(outsideDir, 'nested.md'), 'utf8')).toBe('nested outside secret')
-    } finally {
-      rmSync(home, { recursive: true, force: true })
-    }
-  })
+        const pull = Bun.spawnSync(
+          ['bun', 'run', join(ROOT, 'bin/openrecall.ts'), 'pull', pulled],
+          {
+            env,
+          },
+        )
+        expect(pull.exitCode).toBe(0)
+        expect(readFileSync(join(pulled, 'real.md'), 'utf8')).toBe('inside the mirror')
+        expect(existsSync(join(pulled, 'leak.md'))).toBe(false)
+        expect(existsSync(join(pulled, 'nested.md'))).toBe(false)
+        expect(readFileSync(outside, 'utf8')).toBe('outside secret')
+        expect(readFileSync(join(outsideDir, 'nested.md'), 'utf8')).toBe('nested outside secret')
+      } finally {
+        rmSync(home, { recursive: true, force: true })
+      }
+    },
+  )
 })

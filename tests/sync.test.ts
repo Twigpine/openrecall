@@ -18,12 +18,14 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  renameSync,
   rmSync,
   statSync,
   symlinkSync,
   utimesSync,
   writeFileSync,
 } from 'node:fs'
+import { open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 import { _reset } from '../src/ratelimit.ts'
@@ -51,6 +53,71 @@ function put(dir: string, key: string, content: string, mtimeMs?: number): strin
 /** Pin an existing file's mtime without changing its bytes. */
 function touch(path: string, mtimeMs?: number): void {
   if (mtimeMs !== undefined) utimesSync(path, new Date(mtimeMs), new Date(mtimeMs))
+}
+
+/**
+ * Whether this environment can create symlinks at all.
+ *
+ * Windows without Developer Mode, and some restricted sandboxes, refuse with
+ * EPERM/EACCES. Symlink-dependent tests skip there instead of failing setup;
+ * any other probe error is a real problem and is rethrown.
+ */
+const canCreateSymlinks = (() => {
+  const probe = tempDir()
+  try {
+    symlinkSync(join(probe, 'target'), join(probe, 'link'))
+    return true
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code
+    if (
+      code === 'EPERM' ||
+      code === 'EACCES' ||
+      code === 'ENOSYS' ||
+      code === 'ENOTSUP' ||
+      code === 'EINVAL'
+    ) {
+      return false
+    }
+    throw err
+  }
+})()
+
+/**
+ * Run `run` with a one-shot hook on the first `FileHandle.stat` after `arm()`.
+ *
+ * The production code opens a descriptor, stats it, and only then re-resolves
+ * the path. This lets a test replace the path exactly inside that window
+ * without a test-only parameter in the production API. The hook is installed on
+ * the handle prototype (Bun does not export the `FileHandle` class) and is
+ * always restored afterwards, even when the test throws.
+ */
+async function withFileStatHook<T>(
+  afterStat: () => void,
+  run: (arm: () => void) => Promise<T>,
+): Promise<T> {
+  const probe = await open(join(tempDir(), 'probe'), 'w')
+  const proto = Object.getPrototypeOf(probe) as {
+    stat: (...args: unknown[]) => Promise<unknown>
+  }
+  await probe.close()
+  const original = proto.stat
+  let armed = false
+  let fired = false
+  proto.stat = async function (this: unknown, ...args: unknown[]) {
+    const result = await original.apply(this, args)
+    if (armed && !fired) {
+      fired = true
+      afterStat()
+    }
+    return result
+  }
+  try {
+    return await run(() => {
+      armed = true
+    })
+  } finally {
+    proto.stat = original
+  }
 }
 
 let runSync: typeof import('../src/cli/sync.ts').runSync
@@ -126,36 +193,65 @@ describe('memory file listing', () => {
     expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
   })
 
-  test('a symlink is not a memory file, even when it points at readable text', async () => {
-    const dir = tempDir()
-    const outside = join(tempDir(), 'outside.md')
-    writeFileSync(outside, 'not part of this mirror')
-    symlinkSync(outside, join(dir, 'leak.md'))
-    put(dir, 'real.md', 'real')
+  test.skipIf(!canCreateSymlinks)(
+    'a symlink is not a memory file, even when it points at readable text',
+    async () => {
+      const dir = tempDir()
+      const outside = join(tempDir(), 'outside.md')
+      writeFileSync(outside, 'not part of this mirror')
+      symlinkSync(outside, join(dir, 'leak.md'))
+      put(dir, 'real.md', 'real')
 
-    expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
-    // A second line of defence: even a direct read refuses the link instead of
-    // following it to the outside file.
-    await expect(readMemoryFile(dir, join(dir, 'leak.md'))).rejects.toThrow()
-    expect(readFileSync(outside, 'utf8')).toBe('not part of this mirror')
-  })
+      expect((await walkMemoryFiles(dir)).map(f => f.key)).toEqual(['real.md'])
+      // A second line of defence: even a direct read refuses the link instead of
+      // following it to the outside file.
+      await expect(readMemoryFile(dir, join(dir, 'leak.md'))).rejects.toThrow()
+      expect(readFileSync(outside, 'utf8')).toBe('not part of this mirror')
+    },
+  )
 
-  test('a symlinked parent directory cannot redirect a read outside the mirror', async () => {
+  test.skipIf(!canCreateSymlinks)(
+    'a symlinked parent directory cannot redirect a read outside the mirror',
+    async () => {
+      const root = tempDir()
+      const outside = tempDir()
+      put(root, 'sub/note.md', 'inside the mirror')
+      put(outside, 'note.md', 'outside secret')
+
+      // Simulate the parent being swapped after the walk: the leaf name is still
+      // ordinary and passed `lstat`, but its directory now points elsewhere.
+      rmSync(join(root, 'sub'), { recursive: true })
+      symlinkSync(outside, join(root, 'sub'))
+
+      const err = (await readMemoryFile(root, join(root, 'sub', 'note.md')).catch(
+        e => e,
+      )) as NodeJS.ErrnoException
+      expect(err.code).toBe('EOUTSIDE')
+      expect(readFileSync(join(outside, 'note.md'), 'utf8')).toBe('outside secret')
+    },
+  )
+
+  test('a file replaced after open is refused as ECHANGED, not read', async () => {
     const root = tempDir()
-    const outside = tempDir()
-    put(root, 'sub/note.md', 'inside the mirror')
-    put(outside, 'note.md', 'outside secret')
+    const path = put(root, 'note.md', 'original bytes')
+    const replacement = put(root, 'replacement.md', 'replacement bytes')
 
-    // Simulate the parent being swapped after the walk: the leaf name is still
-    // ordinary and passed `lstat`, but its directory now points elsewhere.
-    rmSync(join(root, 'sub'), { recursive: true })
-    symlinkSync(outside, join(root, 'sub'))
-
-    const err = (await readMemoryFile(root, join(root, 'sub', 'note.md')).catch(
-      e => e,
+    // Rename lands after the descriptor is opened but before `realpath`
+    // validation. The replacement stays inside the mirror, so only the
+    // device/inode comparison can tell the opened file from the one now named
+    // by the path.
+    const err = (await withFileStatHook(
+      () => renameSync(replacement, path),
+      async arm => {
+        arm()
+        return readMemoryFile(root, path).catch(e => e)
+      },
     )) as NodeJS.ErrnoException
-    expect(err.code).toBe('EOUTSIDE')
-    expect(readFileSync(join(outside, 'note.md'), 'utf8')).toBe('outside secret')
+
+    expect(err.code).toBe('ECHANGED')
+    // The swap really happened: the path now names the replacement, and the
+    // call still rejected instead of returning either body.
+    expect(readFileSync(path, 'utf8')).toBe('replacement bytes')
   })
 
   test('an unreadable or missing directory is empty, not an error', async () => {
@@ -745,43 +841,87 @@ describe('runSync conflict resolution, by baseline and real timestamps', () => {
     expect((await other.pull(ns)).entries['note.md']).toBe('v4 local edit')
   })
 
-  test('a symlink in the mirror is skipped, never uploaded from outside', async () => {
-    const ns = 'user:sync-symlink-upload'
-    const dir = tempDir()
-    const state = join(tempDir(), 'state.json')
-    const outside = join(tempDir(), 'outside.md')
-    writeFileSync(outside, 'outside secret')
-    symlinkSync(outside, join(dir, 'leak.md'))
-    put(dir, 'real.md', 'inside')
+  test.skipIf(!canCreateSymlinks)(
+    'a symlink in the mirror is skipped, never uploaded from outside',
+    async () => {
+      const ns = 'user:sync-symlink-upload'
+      const dir = tempDir()
+      const state = join(tempDir(), 'state.json')
+      const outside = join(tempDir(), 'outside.md')
+      writeFileSync(outside, 'outside secret')
+      symlinkSync(outside, join(dir, 'leak.md'))
+      put(dir, 'real.md', 'inside')
 
-    const client = await realClient()
-    const r = await runSync(dir, client, { namespace: ns, statePath: state })
-    expect(r.uploaded).toEqual([{ key: 'real.md', reason: 'remote-missing' }])
+      const client = await realClient()
+      const r = await runSync(dir, client, { namespace: ns, statePath: state })
+      expect(r.uploaded).toEqual([{ key: 'real.md', reason: 'remote-missing' }])
 
-    const entries = (await (await realClient()).pull(ns)).entries
-    expect(entries).toEqual({ 'real.md': 'inside' })
-    expect(readFileSync(outside, 'utf8')).toBe('outside secret')
-  })
+      const entries = (await (await realClient()).pull(ns)).entries
+      expect(entries).toEqual({ 'real.md': 'inside' })
+      expect(readFileSync(outside, 'utf8')).toBe('outside secret')
+    },
+  )
 
-  test('a downloaded symlink cannot write through to a file outside the mirror', async () => {
-    const ns = 'user:sync-symlink-download'
-    const dir = tempDir()
-    const state = join(tempDir(), 'state.json')
-    const outside = join(tempDir(), 'outside.md')
-    writeFileSync(outside, 'do not touch')
-    touch(outside, Date.parse('2001-01-01T00:00:00.000Z'))
-    const link = join(dir, 'evil.md')
-    symlinkSync(outside, link)
+  test.skipIf(!canCreateSymlinks)(
+    'a downloaded symlink cannot write through to a file outside the mirror',
+    async () => {
+      const ns = 'user:sync-symlink-download'
+      const dir = tempDir()
+      const state = join(tempDir(), 'state.json')
+      const outside = join(tempDir(), 'outside.md')
+      writeFileSync(outside, 'do not touch')
+      touch(outside, Date.parse('2001-01-01T00:00:00.000Z'))
+      const link = join(dir, 'evil.md')
+      symlinkSync(outside, link)
 
-    const other = await realClient()
-    await other.push(ns, { 'evil.md': 'remote content' })
+      const other = await realClient()
+      await other.push(ns, { 'evil.md': 'remote content' })
 
-    const client = await realClient()
-    const r = await runSync(dir, client, { namespace: ns, statePath: state })
-    expect(r.downloadSkipped).toEqual([{ key: 'evil.md', reason: 'unsafe_key' }])
-    expect(readFileSync(outside, 'utf8')).toBe('do not touch')
-    expect(lstatSync(link).isSymbolicLink()).toBe(true)
-  })
+      const client = await realClient()
+      const r = await runSync(dir, client, { namespace: ns, statePath: state })
+      expect(r.downloadSkipped).toEqual([{ key: 'evil.md', reason: 'unsafe_key' }])
+      expect(readFileSync(outside, 'utf8')).toBe('do not touch')
+      expect(lstatSync(link).isSymbolicLink()).toBe(true)
+    },
+  )
+
+  test.skipIf(!canCreateSymlinks)(
+    'a parent directory swapped after the download target is opened cannot redirect the write',
+    async () => {
+      const ns = 'user:sync-download-parent-swap'
+      const dir = tempDir()
+      const state = join(tempDir(), 'state.json')
+      const outside = tempDir()
+      const outsideFile = join(outside, 'note.md')
+      writeFileSync(outsideFile, 'outside sentinel')
+
+      const other = await realClient()
+      await other.push(ns, { 'sub/note.md': 'remote content' })
+
+      const client = await realClient()
+      const r = await withFileStatHook(
+        () => {
+          // The destination is already open inside `dir/sub`. Replace that
+          // parent with a symlink outside before the post-open verification
+          // runs; the descriptor still points at the moved file inside the
+          // mirror, but the path now resolves outside it.
+          renameSync(join(dir, 'sub'), join(dir, 'sub-opened'))
+          symlinkSync(outside, join(dir, 'sub'))
+        },
+        async arm => {
+          arm()
+          return runSync(dir, client, { namespace: ns, statePath: state })
+        },
+      )
+
+      expect(r.downloaded).toEqual([])
+      expect(r.downloadSkipped).toEqual([{ key: 'sub/note.md', reason: 'unsafe_key' }])
+      // Nothing escaped: the outside file is unchanged, and the file that was
+      // actually opened (now under the moved parent) was never written.
+      expect(readFileSync(outsideFile, 'utf8')).toBe('outside sentinel')
+      expect(readFileSync(join(dir, 'sub-opened', 'note.md'), 'utf8')).toBe('')
+    },
+  )
 })
 
 describe('runSync --prune, guarded by pair state', () => {
