@@ -320,6 +320,14 @@ async function canonicalTarget(
  * The adopted remote mtime is also applied through the descriptor, not the
  * path, so it cannot touch a file substituted after the write.
  *
+ * `planned` is the local file state the download decision was made from. An
+ * editor can change the file IN PLACE — same inode, new mtime — after the
+ * pre-write mtime guard and before this open, which the path/inode check
+ * cannot see. A fresh descriptor stat therefore compares against `planned`
+ * before truncating, so that edit is refused instead of silently discarded.
+ * When no local file was planned, any non-empty file now at the path was
+ * created concurrently and wins the same way.
+ *
  * Failures use the same codes as `readMemoryFile`: `ELOOP`/`ENOTREG`/
  * `EOUTSIDE` mean the destination is unsafe, while `ECHANGED`/`ENOENT` mean a
  * concurrent local change won the race.
@@ -329,6 +337,7 @@ async function writeDownloadedFile(
   path: string,
   plaintext: string,
   mtimeMs: number | null,
+  planned: LocalEntry | undefined,
 ): Promise<void> {
   const rootReal = await realpath(root).catch(() => null)
   if (rootReal === null) throw readError(`cannot resolve ${root}`, 'ENOENT')
@@ -339,6 +348,19 @@ async function writeDownloadedFile(
     if (!info.isFile()) throw readError(`${path} is not a regular file`, 'ENOTREG')
 
     await verifyOpenedPath(rootReal, path, info)
+
+    // Re-read the descriptor after the path check. This catches an in-place
+    // edit between the runSync mtime guard and this open: the inode is
+    // unchanged, so only the fresh timestamp (or a non-empty file where none
+    // was planned) proves the snapshot moved underneath the decision.
+    const latest = await handle.stat()
+    if (planned !== undefined) {
+      if (!latest.isFile() || latest.mtimeMs !== planned.mtimeMs) {
+        throw readError(`${path} changed before writing`, 'ECHANGED')
+      }
+    } else if (latest.size !== 0) {
+      throw readError(`${path} was created before writing`, 'ECHANGED')
+    }
 
     await handle.truncate(0)
     await handle.writeFile(plaintext, 'utf8')
@@ -823,7 +845,7 @@ export async function runSync(
       // verified descriptor, so the NEXT conflict comparison has real evidence
       // rather than "whenever this sync downloaded it" — and a path swapped
       // after the write cannot have its mtime changed by mistake.
-      await writeDownloadedFile(root, dest, plaintext, a.remoteAt)
+      await writeDownloadedFile(root, dest, plaintext, a.remoteAt, planned)
     } catch (err) {
       const code = (err as NodeJS.ErrnoException).code
       // A symlink, non-regular file, or redirected parent appeared between

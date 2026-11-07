@@ -28,7 +28,9 @@ import {
 import { open } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
+import { SecretFoundError } from '../client/secretscan.ts'
 import { _reset } from '../src/ratelimit.ts'
+import { FAKE } from './secret-fixtures.ts'
 
 const PASSPHRASE = 'sync test passphrase'
 
@@ -593,6 +595,26 @@ describe('runSync against the real server, store and crypto', () => {
       'projects/openrecall/decisions/2026/deep.md': 'deep note',
     })
   })
+
+  test('a secret-scanner refusal logs no plaintext fragment', async () => {
+    const ns = 'user:sync-secret-refusal'
+    const dir = tempDir()
+    const secret = `token ${FAKE.github}`
+    put(dir, 'leak.md', secret)
+    const client = await realClient()
+
+    const err = (await runSync(dir, client, {
+      namespace: ns,
+      statePath: join(tempDir(), 'state.json'),
+    }).catch(e => e)) as Error
+
+    expect(err).toBeInstanceOf(SecretFoundError)
+    expect(err.message).toContain('leak.md:1')
+    // The CLI prints this message to stderr, so neither the full secret nor
+    // the scanner's redacted match fragment may appear in it.
+    expect(err.message).not.toContain(FAKE.github)
+    expect(err.message).not.toContain('…')
+  })
 })
 
 /** Read a file under a synced directory as UTF-8. */
@@ -779,6 +801,48 @@ describe('runSync conflict resolution, by baseline and real timestamps', () => {
     expect(r.downloadSkipped).toEqual([{ key: 'note.md', reason: 'local-changed' }])
     expect(await readFileUtf8(dir, 'note.md')).toBe('edited during the fetch')
     expect((await (await realClient()).pull(ns)).entries['note.md']).toBe('remote v2')
+  })
+
+  test('an in-place edit between the guard and the write is not truncated', async () => {
+    const ns = 'user:sync-inplace-race'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    const path = put(dir, 'note.md', 'v1')
+    const client = await realClient()
+    await runSync(dir, client, { namespace: ns, statePath: state })
+
+    const other = await realClient()
+    await other.push(ns, { 'note.md': 'remote v2' })
+    // Make the remote side newer so the sync plans a download over this file.
+    touch(path, Date.parse('2001-01-01T00:00:00.000Z'))
+
+    let armHook: () => void = () => {}
+    const delayed = new Proxy(client, {
+      /** Arm the stat hook once the download body has been requested. */
+      get(target, prop) {
+        const value = Reflect.get(target, prop, target)
+        if (prop === 'entry') {
+          return async (...args: unknown[]) => {
+            armHook()
+            return (value as (...a: unknown[]) => Promise<string>).call(target, ...args)
+          }
+        }
+        return typeof value === 'function' ? value.bind(target) : value
+      },
+    }) as InstanceType<typeof OpenRecallClient>
+
+    const r = await withFileStatHook(
+      // Same inode, new mtime: only the fresh descriptor stat can see it.
+      () => writeFileSync(path, 'edited after the identity check'),
+      async arm => {
+        armHook = arm
+        return runSync(dir, delayed, { namespace: ns, statePath: state })
+      },
+    )
+
+    expect(r.downloaded).toEqual([])
+    expect(r.downloadSkipped).toEqual([{ key: 'note.md', reason: 'local-changed' }])
+    expect(await readFileUtf8(dir, 'note.md')).toBe('edited after the identity check')
   })
 
   test('a download records the hash of the body it wrote, not the metadata snapshot', async () => {
