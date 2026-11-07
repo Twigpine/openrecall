@@ -745,6 +745,11 @@ export async function runSync(
   const meta = await client.metadata(ns)
   const remote: Record<string, RemoteEntry> = {}
   for (const [key, hash] of Object.entries(meta.entryChecksums)) {
+    // The local walker only sees `.md` files, so a namespace may also hold
+    // MCP-saved keys like `prefs`. Sync never plans, downloads, or prunes those:
+    // treating a key it cannot see locally as a local deletion would delete a
+    // remote-only entry on the next --prune run.
+    if (!key.endsWith(MEMORY_EXTENSION)) continue
     remote[key] = { hash, updatedAt: meta.entryUpdatedAt[key] }
   }
 
@@ -995,10 +1000,14 @@ export function formatSyncReport(r: SyncReport, dir: string): SyncReportLines {
   if (r.pruned.length) summary.push(`${r.pruned.length} pruned`)
   if (r.removedLocal.length) summary.push(`${r.removedLocal.length} removed locally`)
   out.push(`${r.dryRun ? 'dry run — ' : ''}sync ${r.namespace} ↔ ${dir}: ${summary.join(', ')}`)
-  for (const u of r.uploaded) out.push(`  ↑ ${u.key} (${UPLOAD_REASONS[u.reason] ?? u.reason})`)
-  for (const d of r.downloaded) out.push(`  ↓ ${d.key} (${DOWNLOAD_REASONS[d.reason] ?? d.reason})`)
-  for (const p of r.pruned) out.push(`  ✗ ${p} pruned (deleted from the namespace)`)
-  for (const p of r.removedLocal) out.push(`  ✗ ${p} removed locally (deleted remotely)`)
+  for (const u of r.uploaded)
+    out.push(`  ↑ ${flattenServerText(u.key, 300)} (${UPLOAD_REASONS[u.reason] ?? u.reason})`)
+  for (const d of r.downloaded)
+    out.push(`  ↓ ${flattenServerText(d.key, 300)} (${DOWNLOAD_REASONS[d.reason] ?? d.reason})`)
+  for (const p of r.pruned)
+    out.push(`  ✗ ${flattenServerText(p, 300)} pruned (deleted from the namespace)`)
+  for (const p of r.removedLocal)
+    out.push(`  ✗ ${flattenServerText(p, 300)} removed locally (deleted remotely)`)
 
   for (const key of r.unresolved)
     err.push(

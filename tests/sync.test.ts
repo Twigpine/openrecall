@@ -478,6 +478,25 @@ describe('formatSyncReport', () => {
     expect(err.join('\n')).toContain('bad.md not stored (invalid_key)')
     expect(err.join('\n')).not.toContain('not downloaded')
   })
+
+  test('control characters in keys cannot forge report lines', () => {
+    const evil = 'note.md\n\u001b[2J\u001b[31mforged'
+    const { out } = formatSyncReport(
+      {
+        ...report,
+        uploaded: [{ key: evil, reason: 'remote-missing' }],
+        downloaded: [{ key: evil, reason: 'local-missing' }],
+        pruned: [evil],
+        removedLocal: [evil],
+      },
+      '/tmp/memories',
+    )
+
+    expect(out).toHaveLength(5)
+    expect(out.join('\n')).not.toContain('\u001b')
+    expect(out.join('\n')).toContain('note.md forged')
+    expect(out.some(line => line.trimStart().startsWith('forged'))).toBe(false)
+  })
 })
 
 describe('makeDebouncer', () => {
@@ -1046,6 +1065,31 @@ describe('runSync --prune, guarded by pair state', () => {
     expect(r.downloaded).toEqual([{ key: 'note.md', reason: 'remote-newer' }])
     expect(await readFileUtf8(dir, 'note.md')).toBe('v2 from another agent')
     expect((await other.pull(ns)).entries['note.md']).toBe('v2 from another agent')
+  })
+
+  test('a remote key that is not a .md memory file is never pruned', async () => {
+    const ns = 'user:sync-prune-nonmd'
+    const dir = tempDir()
+    const state = join(tempDir(), 'state.json')
+    put(dir, 'note.md', 'local note')
+    const client = await realClient()
+    const other = await realClient()
+    await other.push(ns, { prefs: 'MCP-saved preference' })
+
+    const first = await runSync(dir, client, { namespace: ns, statePath: state, prune: true })
+    expect(first.downloaded).toEqual([])
+    expect(first.pruned).toEqual([])
+    expect(existsSync(join(dir, 'prefs'))).toBe(false)
+
+    // The walker cannot see `prefs`, so a prune must not read its absence as a
+    // local deletion and remove the MCP-saved entry remotely.
+    const second = await runSync(dir, client, { namespace: ns, statePath: state, prune: true })
+    expect(second.pruned).toEqual([])
+    expect(second.removedLocal).toEqual([])
+    expect((await other.pull(ns)).entries).toMatchObject({
+      prefs: 'MCP-saved preference',
+      'note.md': 'local note',
+    })
   })
 
   test('a missing root with --prune deletes nothing', async () => {
