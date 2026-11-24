@@ -39,6 +39,12 @@ const LOCK_WAIT_MS = 10_000
  */
 const LOCK_STALE_MS = 30_000
 const HEARTBEAT_MS = LOCK_STALE_MS / 3
+/**
+ * A reaper holds its guard for one stat and one remove, so a guard this old
+ * belongs to a process that died in between. Well under LOCK_WAIT_MS, so such
+ * a guard costs waiters a few seconds rather than a timeout.
+ */
+const REAP_GUARD_STALE_MS = 5_000
 
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
@@ -74,11 +80,7 @@ export async function withLockFile<T>(lockPath: string, fn: () => Promise<T>): P
         s => Date.now() - s.mtimeMs,
         () => 0, // released between our open and stat — just retry
       )
-      if (age > LOCK_STALE_MS) {
-        // Recursive so a `.lock` directory left by an older version goes too.
-        await rm(lockPath, { recursive: true, force: true })
-        continue
-      }
+      if (age > LOCK_STALE_MS && (await reapIfStale(lockPath))) continue
       if (Date.now() > deadline) {
         throw new Error(`timed out waiting for the local memory lock (${lockPath})`)
       }
@@ -97,6 +99,50 @@ export async function withLockFile<T>(lockPath: string, fn: () => Promise<T>): P
   } finally {
     clearInterval(heartbeat)
     await release(lockPath, stamp)
+  }
+}
+
+/**
+ * Remove the lock at `lockPath` if it is still stale, and report whether the
+ * caller should try to take it now (true: removed or already gone).
+ *
+ * Judging a lock stale and removing it cannot be one filesystem call, and the
+ * remove goes by path. So two waiters that both judged one crashed lock stale
+ * could each remove "it": the first removes the crashed lock and takes a fresh
+ * one, and the second, still acting on its earlier judgment, removes that fresh
+ * lock and takes another, putting two writers inside. Reapers therefore take
+ * turns through a guard file created with O_EXCL, and the one holding it looks
+ * at the lock again before removing anything. A waiter that finds the guard
+ * taken returns false and waits like any other.
+ *
+ * An older version that reaps without the guard can still race a newer one
+ * this way during an upgrade; two current versions cannot.
+ */
+async function reapIfStale(lockPath: string): Promise<boolean> {
+  const guardPath = `${lockPath}.reap`
+  try {
+    await (await open(guardPath, 'wx')).close()
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
+    const guardAge = await stat(guardPath).then(
+      s => Date.now() - s.mtimeMs,
+      () => 0,
+    )
+    if (guardAge > REAP_GUARD_STALE_MS) await rm(guardPath, { force: true })
+    return false
+  }
+  try {
+    const age = await stat(lockPath).then(
+      s => Date.now() - s.mtimeMs,
+      () => null, // gone already: someone released or reaped it
+    )
+    if (age === null) return true
+    if (age <= LOCK_STALE_MS) return false // taken afresh since we looked
+    // Recursive so a `.lock` directory left by an older version goes too.
+    await rm(lockPath, { recursive: true, force: true })
+    return true
+  } finally {
+    await unlink(guardPath).catch(() => {})
   }
 }
 

@@ -28,6 +28,8 @@ import {
 import { UnreadableManifestError } from '../src/types.ts'
 
 const NOW = '2026-06-24T00:00:00.000Z'
+/** When a racing writer lands: distinct from NOW, so served metadata shows which row it came from. */
+const LATER = '2026-06-25T00:00:00.000Z'
 const b64 = (s: string) => Buffer.from(s).toString('base64')
 
 class Boom extends Error {}
@@ -475,7 +477,7 @@ describe('a lock-free read against a writer replacing an entry', () => {
               const body = b64(`hot ${counts.moves}`)
               writing = true
               try {
-                await upsert(ns, slug, 'local', { entries: { [key]: body } }, NOW)
+                await upsert(ns, slug, 'local', { entries: { [key]: body } }, LATER)
               } finally {
                 writing = false
               }
@@ -505,12 +507,81 @@ describe('a lock-free read against a writer replacing an entry', () => {
     expect(data.content.entryChecksums['hot.md']).toBe(
       sha256Prefixed(new Uint8Array(Buffer.from('hot 1'))),
     )
-    expect(data.content.entryUpdatedAt['hot.md']).toBe(NOW)
+    // The replacement's row, not the one the reader first looked at.
+    expect(data.content.entryUpdatedAt['hot.md']).toBe(LATER)
+    expect(data.content.entryUpdatedAt['a.md']).toBe(NOW)
     expect(Buffer.from(data.content.entries['a.md'] as string, 'base64').toString()).toBe('a1')
     expect(data.version).toBe(2)
     // One re-read of the manifest, and only the moved key read again.
     expect(r.counts.manifestReads).toBe(2)
     expect(r.counts.keyReads).toBe(2)
+  })
+
+  test('a retry that moves to a newer manifest serves that manifest whole, never a mix', async () => {
+    // a.md and gone.md are read under v1. Then one write replaces a.md and
+    // hot.md, deletes gone.md and adds new.md, and reclaims the old blobs, so
+    // hot.md comes back missing and the reader moves to v2. Serving v2 with
+    // a.md's v1 body, gone.md still present and new.md absent would pair a
+    // version with a state that never existed.
+    const ns = 'user:race-mixed'
+    await seed(ns, { 'a.md': b64('a1'), 'gone.md': b64('g1'), 'hot.md': b64('hot 0') })
+    const slug = namespaceSlug(ns)
+    const inner = getStore()
+    const v1 = (await getHashes(ns, slug)).entryChecksums
+    const early = [
+      contentPath(slug, v1['a.md'] as string),
+      contentPath(slug, v1['gone.md'] as string),
+    ]
+    const hotV1 = contentPath(slug, v1['hot.md'] as string)
+    const readEarly: Promise<void>[] = []
+    const done = new Map<string, () => void>()
+    for (const p of early) readEarly.push(new Promise<void>(r => done.set(p, r)))
+    let moved = false
+    setStore({
+      get: async p => {
+        if (done.has(p)) {
+          const bytes = await inner.get(p)
+          done.get(p)?.()
+          return bytes
+        }
+        if (p === hotV1 && !moved) {
+          moved = true
+          await Promise.all(readEarly)
+          await upsert(
+            ns,
+            slug,
+            'local',
+            {
+              entries: { 'a.md': b64('a2'), 'hot.md': b64('hot 1'), 'new.md': b64('n1') },
+              deletions: ['gone.md'],
+            },
+            LATER,
+          )
+        }
+        return inner.get(p)
+      },
+      put: (p, b) => inner.put(p, b),
+      delete: p => inner.delete(p),
+      list: p => inner.list(p),
+      describe: () => `mixed(${inner.describe()})`,
+      erasure: inner.erasure,
+    })
+
+    const data = await getData(ns, slug)
+    expect(moved).toBe(true)
+    expect(data.version).toBe(2)
+    const text = (key: string) => {
+      const v = data.content.entries[key]
+      return v === undefined ? undefined : Buffer.from(v, 'base64').toString()
+    }
+    expect(text('a.md')).toBe('a2')
+    expect(text('hot.md')).toBe('hot 1')
+    expect(text('new.md')).toBe('n1')
+    expect(text('gone.md')).toBeUndefined()
+    expect(Object.keys(data.content.entries).sort()).toEqual(['a.md', 'hot.md', 'new.md'])
+    // Every row served is v2's, so the checksum matches what v2 says.
+    expect(data.content.entryChecksums).toEqual((await getHashes(ns, slug)).entryChecksums)
+    expect(data.content.entryUpdatedAt['a.md']).toBe(LATER)
   })
 
   test('a writer that moves on every look is given up after two more looks, not followed forever', async () => {
