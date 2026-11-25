@@ -26,11 +26,18 @@ import { type FixtureSize, fixture, GENERATOR_VERSION } from '../tests/bench/rec
 import {
   fmt,
   type Metrics,
+  metricChange,
   QUALITY_METRICS,
   renderTable,
   score,
 } from '../tests/bench/recall-metrics.ts'
-import { corpusDigest, run, SYSTEM_NAMES, SYSTEMS } from '../tests/bench/recall-systems.ts'
+import {
+  corpusDigest,
+  questionDigest,
+  run,
+  SYSTEM_NAMES,
+  SYSTEMS,
+} from '../tests/bench/recall-systems.ts'
 
 const BENCH_DIR = join(import.meta.dir, '..', 'tests', 'bench')
 const BASELINE_PATH = join(BENCH_DIR, 'recall-baseline.json')
@@ -41,6 +48,7 @@ type Baseline = {
   seed: number
   size: FixtureSize
   generatorVersion: string
+  questionDigest: string
   corpusDigest: string
   minEffect: number
   questions: number
@@ -133,10 +141,21 @@ console.log(
     .join(', ')})`,
 )
 
-const rows = SYSTEM_NAMES.map(name => {
+// Each pass gets fresh preparation state. Balance execution order and print
+// raw measurements so scheduling effects remain visible.
+const measure = (name: (typeof SYSTEM_NAMES)[number], order: readonly string[]) => {
   const { outputs, msPerQuery } = run(SYSTEMS[name], corpus, questions)
+  console.log(
+    `[timing] order=${order.join(',')} system=${name} ms/query=${msPerQuery.toFixed(3)} (includes preparation)`,
+  )
   return { name, metrics: score(questions, outputs), msPerQuery }
-})
+}
+const rows = SYSTEM_NAMES.map(name => measure(name, SYSTEM_NAMES))
+const reverse = [...SYSTEM_NAMES].reverse()
+for (const row of [...rows].reverse()) {
+  const second = measure(row.name, reverse)
+  row.msPerQuery = (row.msPerQuery + second.msPerQuery) / 2
+}
 console.log(renderTable(rows))
 
 // ---- compare -----------------------------------------------------------------
@@ -147,7 +166,8 @@ if (
   existing.seed === seed &&
   existing.size === size &&
   existing.generatorVersion === GENERATOR_VERSION &&
-  existing.corpusDigest === digest
+  existing.corpusDigest === digest &&
+  existing.questionDigest === questionDigest(questions)
 ) {
   const base = existing.systems.tfidf
   const lines: string[] = []
@@ -159,9 +179,7 @@ if (
       continue
     }
     const delta = now - was
-    const moved = Math.abs(delta) >= existing.minEffect
-    const better = m.better === 'higher' ? delta > 0 : delta < 0
-    const verdict = !moved ? 'unchanged' : better ? 'IMPROVED' : 'REGRESSED'
+    const verdict = metricChange(now, was, existing.minEffect, m.better)
     lines.push(
       `  ${m.label.padEnd(8)} ${fmt(was)} -> ${fmt(now)}  ${delta >= 0 ? '+' : ''}${delta.toFixed(4)}  ${verdict}`,
     )
@@ -170,7 +188,7 @@ if (
   console.log(lines.join('\n'))
 } else if (existing) {
   console.log(
-    '[recall-bench] no comparison: this run differs from the committed baseline in seed, size, generator or corpus',
+    '[recall-bench] no comparison: this run differs from the committed baseline in seed, size, generator, corpus or questions',
   )
 }
 
@@ -204,6 +222,7 @@ if (updateBaseline) {
     size,
     generatorVersion: GENERATOR_VERSION,
     corpusDigest: digest,
+    questionDigest: questionDigest(questions),
     minEffect: existing?.minEffect ?? MIN_EFFECT,
     questions: questions.length,
     answerable: tfidf.answerable,

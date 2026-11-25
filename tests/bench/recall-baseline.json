@@ -2,6 +2,7 @@
   "seed": 1,
   "size": 2000,
   "generatorVersion": "1",
+  "questionDigest": "534a041db308a24b2f324bab25406b3834c44a2da9350db26b0eab268807375b",
   "corpusDigest": "651093605bb96717b66ee4099f93b86d2842fc86cdd64a736e4a738c25c15af3",
   "minEffect": 0.02,
   "questions": 205,

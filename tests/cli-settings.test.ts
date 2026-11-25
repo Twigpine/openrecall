@@ -185,26 +185,53 @@ describe('withLockFile', () => {
     expect(existsSync(`${lock}.reap`)).toBe(false)
   })
 
+  test('a live reaper keeps its guard after a long pause', async () => {
+    const lock = join(tmp(), '.lock')
+    const guard = `${lock}.reap`
+    const old = new Date(Date.now() - 60_000)
+    writeFileSync(lock, '99999 0123456789abcdef\n')
+    writeFileSync(guard, `${process.pid} 0123456789abcdef\n`)
+    for (const path of [lock, guard]) utimesSync(path, old, old)
+    let entered = false
+    const waiting = withLockFile(lock, async () => {
+      entered = true
+    })
+    try {
+      await new Promise(r => setTimeout(r, 150))
+      expect(entered).toBe(false)
+      expect(readFileSync(guard, 'utf8')).toContain(String(process.pid))
+    } finally {
+      rmSync(guard, { force: true })
+      await waiting
+    }
+    expect(entered).toBe(true)
+  })
+
   test('waits for a fresh lock and runs only after it is released', async () => {
     const lock = join(tmp(), '.lock')
-    let release!: () => void
-    const held = withLockFile(lock, () => new Promise<void>(r => (release = r)))
-    // open('wx') creates the file empty and the stamp follows, so wait for the
-    // stamp itself: the file alone can be seen in between.
-    const stampOf = () => (existsSync(lock) ? readFileSync(lock, 'utf8') : '')
-    while (!stampOf()) await new Promise(r => setTimeout(r, 1))
-    expect(stampOf()).toMatch(new RegExp(`^${process.pid} [0-9a-f]{16}\\n$`))
-
-    let ranAt = 0
-    const second = withLockFile(lock, async () => {
-      ranAt = Date.now()
+    const entered = Promise.withResolvers<void>()
+    const release = Promise.withResolvers<void>()
+    const held = withLockFile(lock, async () => {
+      entered.resolve()
+      await release.promise
     })
-    await new Promise(r => setTimeout(r, 150))
-    expect(ranAt).toBe(0) // fresh, so waited on rather than broken
-    const releasedAt = Date.now()
-    release()
-    await Promise.all([held, second])
-    expect(ranAt).toBeGreaterThanOrEqual(releasedAt)
+    await entered.promise
+    let ran = false
+    const second = withLockFile(lock, async () => {
+      ran = true
+    })
+    try {
+      expect(readFileSync(lock, 'utf8')).toMatch(new RegExp(`^${process.pid} [0-9a-f]{16}\\n$`))
+      // Simulate a long scheduler pause. The PID still owns the lock.
+      const old = new Date(Date.now() - 60_000)
+      utimesSync(lock, old, old)
+      await new Promise(r => setTimeout(r, 150))
+      expect(ran).toBe(false)
+    } finally {
+      release.resolve()
+      await Promise.all([held, second])
+    }
+    expect(ran).toBe(true)
     expect(existsSync(lock)).toBe(false)
   })
 

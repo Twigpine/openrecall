@@ -55,6 +55,10 @@ sees them, so measuring costs no context. The stages:
 | `total` | wall time of the whole call |
 | `entries`, `bytes` | entries read or scored, and response bytes fetched |
 
+For a recall across parallel namespaces, `fetch` and `decrypt` report the
+stages of the longest pull. The entry and byte counts include all scopes.
+A single-entry get measures the response bytes and client-side decryption.
+
 With `OPENRECALL_TIMINGS=1` in the MCP server's environment, the same numbers
 are also appended to the tool text as a `[timings …]` trailer, for a human
 reading a transcript, and written as one JSON line on stderr per call, for the
@@ -66,9 +70,8 @@ where all of those are plaintext.
 `openrecall status --timings` runs one cold and eleven warm recalls with a
 generic probe against the pinned namespace and prints a per-stage table with
 the cold value, the warm median and the warm 95th percentile, followed by the
-SLO verdict. The verdict is `PASS` or `FAIL` only when the namespace holds at
-least 2,000 entries; below that it is reported as informational, since a small
-namespace cannot fail a target defined for a full one. The recall text itself
+SLO verdict. The verdict is `PASS` or `FAIL` when every warm sample contains at
+least 2,000 entries. Otherwise it reports the smallest measured workload. The recall text itself
 is never printed.
 
 ## Recall quality harness
@@ -149,7 +152,7 @@ the shorter, older one; both rankers are recency-blind, and the tiebreak on
 
 **The preregistered rule.** `tests/bench/recall-baseline.json` holds the
 numbers the committed ranker produces for the committed seed and corpus
-digest, with `minEffect: 0.02`.
+digest and ordered question digest, with `minEffect: 0.02`.
 
 - A change may claim an improvement only when a metric moves by at least
   `minEffect` in the better direction.
@@ -161,13 +164,15 @@ digest, with `minEffect: 0.02`.
   committed in a reviewed diff next to the change that justifies the new
   numbers. A fixture change bumps `GENERATOR_VERSION` and regenerates both the
   baseline and `recall-questions.jsonl` (`--write-questions`) in the same
-  diff; the test refuses a baseline whose generator version or corpus digest
-  does not match what it generated.
+  diff. CI checks the generator version and both digests.
 
 Per-question weight is about 0.005 on the answerable metrics and 0.04 on the
 unanswerable ones, so `minEffect` is roughly four lexical questions or half an
 unanswerable one. The harness is deterministic, so a number that moved is a
 ranker that moved.
+
+The CLI times each system with independent preparation state in forward and
+reverse order. It prints both raw samples and their mean.
 
 **Budget.** The blocking test runs the 2,000-entry corpus only, scored once at
 collection time: about six seconds on an M4 Pro, nearly all of it the ranker

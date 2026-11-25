@@ -170,3 +170,15 @@ export function renderTable(
     cells.map((c, i) => (i === 0 ? c.padEnd(widths[i]) : c.padStart(widths[i]))).join('  ')
   return [row(header), ...lines.map(row)].join('\n')
 }
+
+/** Compare at twelve decimal places to keep inclusive threshold ties stable. */
+export function metricChange(
+  now: number,
+  was: number,
+  threshold: number,
+  better: 'higher' | 'lower',
+) {
+  const delta = Math.round((now - was) * 1e12)
+  if (Math.abs(delta) < Math.round(threshold * 1e12)) return 'unchanged'
+  return (better === 'higher' ? delta > 0 : delta < 0) ? 'IMPROVED' : 'REGRESSED'
+}

@@ -19,7 +19,13 @@ import {
 } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
-import { type Launch, launchCommand, PORTABLE_WARNING, runSetup } from '../src/cli/setup.ts'
+import {
+  globalLauncher,
+  type Launch,
+  launchCommand,
+  PORTABLE_WARNING,
+  runSetup,
+} from '../src/cli/setup.ts'
 import { SKILL_MARKDOWN } from '../src/mcp/guide.ts'
 import { nodeFloor, version } from '../src/version.ts'
 
@@ -314,6 +320,16 @@ describe('launchCommand', () => {
     const l = launchCommand({ script: cached(), bun: false, nodeVersion: nodeFloor(), env })
     expect(l).toEqual({ launch: NPX, reason: 'portable: no install found on PATH', warnings: [] })
     expect(NPX.args[1]).toMatch(/^@twigpine\/openrecall@\d+\.\d+\.\d+/)
+  })
+
+  test('resolves a Windows npm shim to the installed package script', () => {
+    const shim = join(dir, 'openrecall.cmd')
+    writeFileSync(shim, '@echo off')
+    expect(globalLauncher(shim, 'win32')).toBe(false)
+    const script = join(dir, 'node_modules', '@twigpine', 'openrecall', 'dist', 'openrecall.js')
+    mkdirSync(dirname(script), { recursive: true })
+    writeFileSync(script, '')
+    expect(globalLauncher(shim, 'win32')).toBe(realpathSync(script))
   })
 
   test('--launcher: npx on request, an absolute executable verbatim, anything else refused', () => {

@@ -36,7 +36,7 @@ import { sha256Hex } from '../hash.ts'
 import { namespaceSlug } from '../namespace.ts'
 import { blobPrefix, contentPath } from '../store/blobstore.ts'
 import { FsBlobStore } from '../store/fs.ts'
-import { withLockFile } from './local.ts'
+import { LocalLockTimeout, withLockFile } from './local.ts'
 
 /** Where the mirror lives under an OpenRecall home. */
 export function cacheDir(home: string, serverUrl: string, apiKey?: string): string {
@@ -59,13 +59,17 @@ export class FsMirror implements MirrorStore {
   async withWriteLock(namespace: string, write: () => Promise<void>): Promise<void> {
     if (this.disabled) return
     const dir = join(this.root, 'ns', namespaceSlug(namespace))
+    let entered = false
     try {
       await mkdir(dir, { recursive: true, mode: 0o700 })
+      await withLockFile(join(dir, '.publish.lock'), async () => {
+        entered = true
+        await write()
+      })
     } catch (err) {
-      this.disable(err)
-      return
+      if (!entered && !(err instanceof LocalLockTimeout)) this.disable(err)
+      throw err
     }
-    await withLockFile(join(dir, '.publish.lock'), write)
   }
 
   async readManifest(namespace: string): Promise<MirrorManifest | null> {

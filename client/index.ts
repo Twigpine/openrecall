@@ -93,7 +93,7 @@ export type MirrorManifest = {
  *
  * Content-addressed: a blob is named by its own `sha256:<hex>`, so a blob can
  * never be stale, only unreferenced, and the client verifies the digest on
- * every read before it trusts a body (a mismatch is deleted and refetched).
+ * every read before it trusts a body (a mismatch is refetched).
  * The interface is deliberately small and failure-tolerant in the client: a
  * store that throws or returns null is treated as a miss, never as an error,
  * because a cache that can fail a read is not a cache.
@@ -433,7 +433,7 @@ function lruSet<T>(map: Map<string, T>, key: string, value: T): void {
 const MAX_TIMESTAMP_CHARS = 32
 
 function sanitizeUpdatedAt(raw: unknown, entries: Record<string, string>): Record<string, string> {
-  const out: Record<string, string> = {}
+  const out: Record<string, string> = Object.create(null)
   if (!raw || typeof raw !== 'object') return out
   const src = raw as Record<string, unknown>
   for (const entryKey of Object.keys(entries)) {
@@ -513,7 +513,7 @@ export class OpenRecallClient {
   private readonly cacheEnabled: boolean
   private readonly mirror?: MirrorStore
   /** Pulls made through this client, for the mirror's collection cadence. */
-  private pulls = 0
+  private readonly mirrorPublications = new Map<string, number>()
 
   constructor(opts: OpenRecallClientOptions) {
     this.url = opts.url.replace(/\/$/, '')
@@ -762,9 +762,9 @@ export class OpenRecallClient {
       // Enumerated, unlike the full view: `empty` means no manifest exists, so
       // there is no entry a drifted blob could have hidden. A create after
       // this can therefore assert absence rather than overwrite blindly.
-      lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
-      this.remember(namespace, new Map())
       await this.mirrorWrite(namespace, 0, new Map(), {}, requestedAt)
+      this.remember(namespace, new Map())
+      lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
       return {
         namespace,
         version: 0,
@@ -848,7 +848,11 @@ export class OpenRecallClient {
           }
           stamps.push(fromFrames)
         }
-      } else if (view.supports.includes('entry-view') && need.length <= MAX_SINGLE_READS) {
+      } else if (
+        view.supports.includes('entry-view') &&
+        view.entryUpdatedAt &&
+        need.length <= MAX_SINGLE_READS
+      ) {
         for (const k of need) {
           try {
             const one = await this.entryRaw(namespace, k, clock)
@@ -904,13 +908,6 @@ export class OpenRecallClient {
     const updatedAt: Record<string, string> = {}
     for (const stamp of stamps) Object.assign(updatedAt, sanitizeUpdatedAt(stamp, entries))
 
-    this.remember(namespace, next)
-    // The legacy path records what it decrypted, exactly as the full view
-    // always has; the incremental path records the manifest. See `observed`.
-    lruSet(this.observed, namespace, {
-      hashes: enumerated ? live : { ...hashes },
-      enumerated,
-    })
     // A drifted server blob can be omitted from an online read. Keep the
     // last complete offline snapshot until all rows are readable again.
     if (
@@ -922,6 +919,13 @@ export class OpenRecallClient {
       await this.mirrorWrite(namespace, version, held, updatedAt, requestedAt)
     }
 
+    this.remember(namespace, next)
+    // The legacy path records what it decrypted, exactly as the full view
+    // always has; the incremental path records the manifest. See `observed`.
+    lruSet(this.observed, namespace, {
+      hashes: enumerated ? live : { ...hashes },
+      enumerated,
+    })
     return {
       namespace,
       version,
@@ -1018,8 +1022,9 @@ export class OpenRecallClient {
     expectedVersion?: number,
   ): Promise<Frame[] | null> {
     const out: Frame[] = []
-    for (let i = 0; i < keys.length; i += MAX_ENTRIES_BATCH) {
-      const batch = keys.slice(i, i + MAX_ENTRIES_BATCH)
+    let limit = MAX_ENTRIES_BATCH
+    for (let i = 0; i < keys.length; ) {
+      const batch = keys.slice(i, i + limit)
       const t = performance.now()
       const res = await this.requestBytes(
         'entries',
@@ -1036,6 +1041,18 @@ export class OpenRecallClient {
       if (!res.ok) {
         const err = httpError(res)
         if (res.status === 404 && err.code === 'empty') return null
+        const max = err.details?.max_keys
+        if (
+          res.status === 400 &&
+          err.code === 'bad_request' &&
+          typeof max === 'number' &&
+          Number.isSafeInteger(max) &&
+          max > 0 &&
+          max < batch.length
+        ) {
+          limit = max
+          continue
+        }
         throw err
       }
       if (res.headers.get(FRAMES_HEADER) !== '1') {
@@ -1083,6 +1100,7 @@ export class OpenRecallClient {
         }
         out.push(f)
       }
+      i += batch.length
     }
     return out
   }
@@ -1100,14 +1118,19 @@ export class OpenRecallClient {
   async entries(namespace: string, keys: string[]): Promise<EntriesResult> {
     const clock: Clock = { fetchMs: 0, parseMs: 0, decryptMs: 0, bytes: 0 }
     const frames = await this.fetchFrames(namespace, [...new Set(keys)], clock)
-    const result: EntriesResult = { entries: {}, hashes: {}, updatedAt: {}, statuses: {} }
+    const result: EntriesResult = {
+      entries: Object.create(null),
+      hashes: Object.create(null),
+      updatedAt: Object.create(null),
+      statuses: Object.create(null),
+    }
     if (frames === null) {
       for (const k of keys) result.statuses[k] = 'not_found'
       return result
     }
     const key = this.key(namespace)
-    const stamps: Record<string, unknown> = {}
-    const seen: Record<string, string> = {}
+    const stamps: Record<string, unknown> = Object.create(null)
+    const seen: Record<string, string> = Object.create(null)
     for (const f of frames) {
       const k = f.meta.key
       result.statuses[k] = f.meta.status
@@ -1146,7 +1169,7 @@ export class OpenRecallClient {
     const key = this.key(namespace)
     const cache = this.cacheFor(namespace)
     const held = new Map<string, Held>()
-    const stamps: Record<string, unknown> = {}
+    const stamps: Record<string, unknown> = Object.create(null)
     for (const entryKey of Object.keys(m.entries)) {
       const row = m.entries[entryKey]
       if (!row || typeof row.hash !== 'string') return null
@@ -1233,19 +1256,15 @@ export class OpenRecallClient {
 
   /**
    * A blob from the mirror, verified against its name. A mismatch (a bit
-   * flipped on disk, a partial write that somehow landed) is deleted so the
-   * next pull refetches it, and reported as a miss.
+   * flipped on disk, a partial write that somehow landed) is a miss. The next
+   * online publication replaces the blob under the writer lock.
    */
   private async mirrorRead(namespace: string, hash: string): Promise<Uint8Array | null> {
     const mirror = this.mirror
     if (!mirror) return null
     const bytes = await this.mirrorTry(() => mirror.getBlob(namespace, hash))
     if (!bytes) return null
-    if (ciphertextHashBytes(bytes) !== hash) {
-      await this.mirrorTry(() => mirror.deleteBlob(namespace, hash))
-      return null
-    }
-    return bytes
+    return ciphertextHashBytes(bytes) === hash ? bytes : null
   }
 
   /**
@@ -1272,8 +1291,18 @@ export class OpenRecallClient {
       if (previous && previous.version > version && Date.parse(previous.fetchedAt) >= requestedAt)
         return
       const rows = manifestRows(held, updatedAt)
+      // One directory listing verifies warm plaintext hits without opening every body.
+      const present =
+        previous && [...held.values()].some(h => !h.bytes)
+          ? new Set(await mirror.listBlobs(namespace))
+          : undefined
       await mapLimit([...held], MIRROR_WRITE_CONCURRENCY, async ([key, h]) => {
-        if (previous?.entries[key]?.hash === h.hash && !h.fresh) return
+        if (
+          previous?.entries[key]?.hash === h.hash &&
+          !h.fresh &&
+          (h.bytes || present?.has(h.hash))
+        )
+          return
         const bytes =
           h.bytes ??
           Buffer.from(encryptEntry(this.key(namespace), key, h.plaintext as string), 'base64')
@@ -1289,7 +1318,10 @@ export class OpenRecallClient {
         entries: rows,
       })
       // Custom mirrors without a transaction mechanism can safely keep extra blobs.
-      if (!mirror.withWriteLock || ++this.pulls % MIRROR_GC_EVERY !== 0) return
+      if (!mirror.withWriteLock) return
+      const publications = (this.mirrorPublications.get(namespace) ?? 0) + 1
+      lruSet(this.mirrorPublications, namespace, publications)
+      if (publications !== 1 && publications % MIRROR_GC_EVERY !== 0) return
       const referenced = new Set(Object.values(hashes))
       for (const hash of await mirror.listBlobs(namespace)) {
         if (!referenced.has(hash)) await mirror.deleteBlob(namespace, hash)
@@ -1326,7 +1358,12 @@ export class OpenRecallClient {
    * key's ABSENCE. See `observed`, where the same distinction cost a drifted
    * key every future write.
    */
-  async entry(namespace: string, entryKey: string): Promise<string> {
+  async entry(
+    namespace: string,
+    entryKey: string,
+    onTiming?: (clock: Clock) => void,
+  ): Promise<string> {
+    const started = performance.now()
     const res = await this.request(
       'entry',
       namespace,
@@ -1334,6 +1371,7 @@ export class OpenRecallClient {
       { headers: this.headers() },
     )
     if (!res.ok) throw httpError(res)
+    const parsedAt = performance.now()
     const data = JSON.parse(res.raw) as { entry?: unknown }
     // A 200 whose body is not this view's is a broken or misrouted server, and
     // it must not be handed to decryptEntry: that would raise a
@@ -1345,12 +1383,19 @@ export class OpenRecallClient {
         namespace,
         `no entry in the response for "${entryKey}"`,
       )
+    const decryptAt = performance.now()
     let plaintext: string
     try {
       plaintext = decryptEntry(this.key(namespace), entryKey, data.entry)
     } catch (err) {
       throw new OpenRecallDecryptError(entryKey, namespace, (err as Error).message)
     }
+    onTiming?.({
+      fetchMs: parsedAt - started,
+      parseMs: decryptAt - parsedAt,
+      decryptMs: performance.now() - decryptAt,
+      bytes: Buffer.byteLength(res.raw),
+    })
     this.record(namespace, { [entryKey]: ciphertextHash(data.entry) }, [])
     return plaintext
   }

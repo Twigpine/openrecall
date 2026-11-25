@@ -327,6 +327,7 @@ export async function getEntries(
     }
     if (slot.bytes && previousHash === meta.hash) return
     slot.bytes = await readEntryBytes(store, nsSlug, slot.key, meta.hash)
+    if (slot.bytes && sha256Prefixed(slot.bytes) !== meta.hash) slot.bytes = null
     slot.status = slot.bytes ? 'ok' : 'unreadable'
   }
 

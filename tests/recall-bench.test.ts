@@ -43,12 +43,13 @@ import {
 import {
   fmt,
   type Metrics,
+  metricChange,
   QUALITY_METRICS,
   renderTable,
   type SystemOutput,
   score,
 } from './bench/recall-metrics.ts'
-import { corpusDigest, run, SYSTEM_NAMES, SYSTEMS } from './bench/recall-systems.ts'
+import { corpusDigest, questionDigest, run, SYSTEM_NAMES, SYSTEMS } from './bench/recall-systems.ts'
 import { contentTerms, sharedTerms } from './recall-corpus.ts'
 
 const BENCH_DIR = join(import.meta.dir, 'bench')
@@ -57,6 +58,7 @@ type Baseline = {
   seed: number
   size: 2000 | 10000
   generatorVersion: string
+  questionDigest: string
   corpusDigest: string
   minEffect: number
   questions: number
@@ -80,10 +82,16 @@ const { corpus, questions } = fixture(baseline.seed, 2000)
 const rankedKeys = Object.keys(corpus).filter(k => k !== 'MEMORY.md')
 
 describe('recall bench fixture', () => {
+  test('quality movement includes the exact effect threshold', () => {
+    expect(metricChange(23 / 100, 23 / 92, 0.02, 'higher')).toBe('REGRESSED')
+    expect(metricChange(0.230001, 0.25, 0.02, 'higher')).toBe('unchanged')
+  })
+
   test('the baseline was produced by this generator at this size', () => {
     expect(baseline.size).toBe(2000)
     expect(baseline.generatorVersion).toBe(GENERATOR_VERSION)
     expect(baseline.questions).toBe(questions.length)
+    expect(baseline.questionDigest).toBe(questionDigest(questions))
   })
 
   test('the same seed generates the same corpus and questions twice', () => {
@@ -316,8 +324,7 @@ describe('recall bench (2,000 entries, committed baseline)', () => {
       const was = base[m.key]
       const is = now[m.key]
       if (was === null || is === null) continue
-      const bad =
-        m.better === 'higher' ? is <= was - baseline.minEffect : is >= was + baseline.minEffect
+      const bad = metricChange(is, was, baseline.minEffect, m.better) === 'REGRESSED'
       if (bad)
         regressions.push(`${m.label} ${fmt(is)} vs baseline ${fmt(was)} (${m.better} is better)`)
     }

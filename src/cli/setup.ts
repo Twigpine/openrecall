@@ -131,11 +131,7 @@ export function launchCommand(opts: LaunchOptions = {}): Launcher {
     return pinned({ command: execPath, args: [script, 'mcp'] }, 'installed script')
   }
 
-  const installed = findOnPath(
-    'openrecall',
-    env,
-    p => !inThrowawayCache(p) && (p.endsWith('.js') ? isReadableScript(p) : isExecutableFile(p)),
-  )
+  const installed = findOnPath('openrecall', env, p => globalLauncher(p, process.platform))
   if (installed) {
     return installed.endsWith('.js')
       ? pinned({ command: execPath, args: [installed, 'mcp'] }, 'global install')
@@ -145,6 +141,18 @@ export function launchCommand(opts: LaunchOptions = {}): Launcher {
 }
 
 export const isPortable = (l: Launch) => l.command === 'npx'
+
+/** Windows npm installs use a shim beside the package instead of a symlink. */
+export function globalLauncher(p: string, platform: NodeJS.Platform): string | false {
+  if (inThrowawayCache(p)) return false
+  if (platform === 'win32' && !/\.(?:exe|com|js)$/i.test(p)) {
+    const entry = join(dirname(p), 'node_modules', PACKAGE, 'dist', 'openrecall.js')
+    if (!isReadableScript(entry)) return false
+    p = realpathSync(entry)
+    if (inThrowawayCache(p)) return false
+  }
+  return (p.endsWith('.js') ? isReadableScript(p) : isExecutableFile(p)) && p
+}
 
 function isReadableScript(p: string): boolean {
   try {
@@ -250,7 +258,7 @@ function cliAdd(bin: string, remove: string[], addPrefix: string[], l: Launch): 
 export function findOnPath(
   bin: string,
   env: Env,
-  accept: (resolved: string) => boolean = () => true,
+  accept: (resolved: string) => boolean | string = () => true,
 ): string | null {
   const exts = process.platform === 'win32' ? ['', '.cmd', '.exe', '.bat'] : ['']
   for (const dir of (env.PATH ?? '').split(delimiter)) {
@@ -264,7 +272,8 @@ export function findOnPath(
       } catch {
         continue
       }
-      if (accept(resolved)) return resolved
+      const accepted = accept(resolved)
+      if (accepted) return typeof accepted === 'string' ? accepted : resolved
     }
   }
   return null

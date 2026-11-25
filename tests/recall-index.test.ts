@@ -18,6 +18,7 @@ import {
   RecallIndex,
   rankEntriesDetailed,
   rankMemoriesDetailed,
+  stemTerm,
   tokenize,
 } from '../src/mcp/relevance.ts'
 import { nearCapCorpus } from './recall-corpus.ts'
@@ -118,6 +119,15 @@ describe('incremental parity', () => {
       expect(truth.size).toBeGreaterThan(0)
     })
   }
+
+  test('renaming a stable id reindexes its key even with the same fingerprint', () => {
+    const idx = new RecallIndex()
+    const doc = docOf('lantern.md', 'bright lamp')
+    idx.upsert(doc)
+    expect(idx.upsert({ ...doc, key: 'project/MEMORY.md' })).toBe('updated')
+    expect(idx.doc(doc.id)?.candidate).toBe(false)
+    expect(RecallIndex.rank([idx], 'lantern', 3).results).toHaveLength(0)
+  })
 
   test('sync makes the index hold exactly the given documents and reports the counts', () => {
     const idx = new RecallIndex()
@@ -281,7 +291,12 @@ describe('code identifiers', () => {
     expect(tokenize('release-please')).toEqual(['release-please', 'release', 'please'])
     expect(tokenize('24.22.1')).toEqual(['24.22.1', '24', '22'])
     expect(tokenize('O_EXCL')).toEqual(['o_excl', 'excl'])
-    expect(tokenize('rankEntriesDetailed')).toEqual(['rank', 'entry', 'detail'])
+    expect(tokenize('rankEntriesDetailed')).toEqual([
+      stemTerm('rankentriesdetailed'),
+      'rank',
+      'entry',
+      'detail',
+    ])
     expect(tokenize('pnpm')).toEqual(['pnpm'])
     // A key is split on `/` first, so the compound is one segment.
     expect(tokenize('src/mcp/relevance.ts')).toContain('src/mcp/relevance.ts')
@@ -308,6 +323,13 @@ describe('code identifiers', () => {
     }
   })
 
+  test('whole camel-case names and their parts find the same note', () => {
+    const corpus = { 'note.md': 'OpenRecall stores notes in src/rankEntries.ts' }
+    for (const q of ['openrecall', 'recall', 'src/rankentries.ts', 'entries']) {
+      expect(rankMemoriesDetailed(q, corpus).results[0]?.key).toBe('note.md')
+    }
+  })
+
   test('a note holding the exact identifier beats one holding only its parts', () => {
     const pair = {
       'exact.md': 'The tag is cut by release-please.',
@@ -327,8 +349,8 @@ describe('code identifiers', () => {
     const norm = rankMemoriesDetailed('release-please', only, 3).results[0]?.norm ?? 0
     expect(norm).toBeGreaterThan(0.4)
     // And a compound alone is still a query: its parts are what have to be covered.
-    const r = rankMemoriesDetailed('release-please', only, 3)
-    expect(r.reason).toBeUndefined()
+    const r = rankMemoriesDetailed('a/b', { 'route.md': 'Use a/b here.' }, 3)
+    expect(r.results.map(hit => hit.key)).toEqual(['route.md'])
   })
 })
 

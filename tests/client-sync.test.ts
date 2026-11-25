@@ -83,7 +83,7 @@ type Wire = { method: string; search: string; body: string }
  * a POST is answered 405 when the override does not include the bulk view,
  * exactly as a server predating it answers.
  */
-function proxy(upstream: string, supports: string[] | null = null) {
+function proxy(upstream: string, supports: string[] | null = null, keepDates = false) {
   const wire: Wire[] = []
   const s = Bun.serve({
     port: 0,
@@ -102,7 +102,7 @@ function proxy(upstream: string, supports: string[] | null = null) {
       if (supports !== null && u.searchParams.get('view') === 'hashes' && res.ok) {
         const data = (await res.json()) as Record<string, unknown>
         const { entryUpdatedAt: _dropped, ...rest } = data
-        return Response.json({ ...rest, supports })
+        return Response.json({ ...(keepDates ? data : rest), supports })
       }
       return res
     },
@@ -261,6 +261,65 @@ describe('the incremental pull', () => {
     expect((await offline.pull(ns, { allowStale: true })).entries).toEqual({ 'a.md': 'after' })
   })
 
+  test('a pull records its write base after a concurrent single-entry read during publication', async () => {
+    const ns = 'user:observed-order'
+    const home = temp()
+    const disk = new FsMirror(cacheDir(home, base))
+    const reader = mirrored(base, home, { mirror: disk })
+    const writer = mirrored(base, temp())
+    await writer.push(ns, { 'a.md': 'first' })
+    const entered = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    const write = disk.writeManifest.bind(disk)
+    disk.writeManifest = async (n, m) => {
+      entered.resolve()
+      await resume.promise
+      await write(n, m)
+    }
+    const pending = reader.pull(ns)
+    await entered.promise
+    try {
+      await writer.push(ns, { 'a.md': 'second' })
+      expect(await reader.entry(ns, 'a.md')).toBe('second')
+    } finally {
+      resume.resolve()
+    }
+    expect((await pending).entries['a.md']).toBe('first')
+    await expect(reader.push(ns, { 'a.md': 'edited first' })).rejects.toMatchObject({
+      code: 'stale_base_version',
+    })
+  })
+
+  test('a warm pull repairs missing disk bodies before the next offline restart', async () => {
+    const ns = 'user:warm-repair'
+    const home = temp()
+    const reader = mirrored(base, home)
+    await reader.push(ns, { 'a.md': 'saved' })
+    const result = await reader.pull(ns)
+    rmSync(blobPath(home, ns, result.hashes!['a.md']))
+    await reader.pull(ns)
+    const offline = mirrored(base, home, {
+      fetch: async () => {
+        throw new Error('offline')
+      },
+    })
+    expect((await offline.pull(ns, { allowStale: true })).entries).toEqual({ 'a.md': 'saved' })
+  })
+
+  test('two alternating namespaces both collect obsolete ciphertext', async () => {
+    const home = temp()
+    const reader = mirrored(base, home)
+    const names = ['user:gc-first', 'user:gc-second']
+    const disk = new FsMirror(cacheDir(home, base))
+    for (const ns of names) {
+      await reader.push(ns, { 'a.md': 'first' })
+      await reader.pull(ns)
+      await reader.push(ns, { 'a.md': 'second' })
+    }
+    for (let i = 1; i < 32; i++) for (const ns of names) await reader.pull(ns)
+    for (const ns of names) expect(await disk.listBlobs(ns)).toHaveLength(1)
+  })
+
   test('independent disk mirrors serialize GC and manifest publication', async () => {
     const ns = 'user:sync-gc'
     const home = temp()
@@ -273,7 +332,9 @@ describe('the incremental pull', () => {
     const reached = Promise.withResolvers<void>()
     const resume = Promise.withResolvers<void>()
     const list = first.listBlobs.bind(first)
+    let lockSeen = true
     first.listBlobs = async n => {
+      lockSeen &&= existsSync(join(first.root, 'ns', namespaceSlug(n), '.publish.lock'))
       reached.resolve()
       await resume.promise
       return list(n)
@@ -292,6 +353,7 @@ describe('the incremental pull', () => {
       await entered.promise
       resume.resolve()
       await Promise.all([collecting, publishing])
+      expect(lockSeen).toBe(true)
     } finally {
       resume.resolve()
     }
@@ -616,9 +678,10 @@ describe('the incremental pull', () => {
     const foreign = new OpenRecallClient({ url: base, passphrase: PASSPHRASE })
     await foreign.push(ns, { 'a.md': 'alpha', 'b.md': 'beta', 'c.md': 'gamma' })
 
-    const expectations: [string[], string[], string[]][] = [
+    const expectations: [string[], string[], string[], boolean?][] = [
       // advertised, cold wire, warm wire after one foreign change to b.md
       [[], ['GET ?view=hashes', 'GET '], ['GET ?view=hashes', 'GET ']],
+      [['entry-view'], ['GET ?view=hashes', 'GET '], ['GET ?view=hashes', 'GET ']],
       [
         ['entry-view'],
         [
@@ -628,6 +691,7 @@ describe('the incremental pull', () => {
           'GET ?view=entry&key=c.md',
         ],
         ['GET ?view=hashes', 'GET ?view=entry&key=b.md'],
+        true,
       ],
       [
         ['entry-view', 'entries-view'],
@@ -636,8 +700,8 @@ describe('the incremental pull', () => {
       ],
     ]
     let round = 0
-    for (const [supports, cold, warm] of expectations) {
-      const p = proxy(base, supports)
+    for (const [supports, cold, warm, keepDates] of expectations) {
+      const p = proxy(base, supports, keepDates)
       try {
         const c = new OpenRecallClient({ url: p.url, passphrase: PASSPHRASE, cache: true })
         const first = await c.pull(ns)
@@ -647,11 +711,10 @@ describe('the incremental pull', () => {
         await foreign.push(ns, { 'b.md': `beta ${round}` })
         const n = p.wire.length
         const next = await c.pull(ns)
+        expect(typeof next.updatedAt['b.md']).toBe('string')
         expect(next.entries['b.md']).toBe(`beta ${round}`)
         expect(next.entries['a.md']).toBe('alpha')
         expect(`${supports}: ${p.since(n).join(' | ')}`).toBe(`${supports}: ${warm.join(' | ')}`)
-        // Only the changed entry was decrypted on the warm pull, on every path.
-        expect(next.timings?.decryptMs).toBeGreaterThanOrEqual(0)
       } finally {
         p.stop()
       }
@@ -698,7 +761,7 @@ describe('the incremental pull', () => {
             'a.md': '2026-08-06T00:00:00.000Z',
             'b.md': 12345,
             'nope.md': '2026-08-06T00:00:00.000Z',
-            __proto__: { 'b.md': '2026-01-01T00:00:00.000Z' },
+            ['__proto__']: { 'b.md': '2026-01-01T00:00:00.000Z' },
           },
         })
       },
@@ -718,6 +781,7 @@ describe('the incremental pull', () => {
       // crafted string survives, the number and the unknown key do not.
       const warm = await c.pull(ns)
       expect(warm.updatedAt).toEqual({ 'a.md': '2026-08-06T00:00:00.000Z' })
+      expect(Object.hasOwn(warm.updatedAt, '__proto__')).toBe(false)
     } finally {
       crafted.stop(true)
     }
@@ -725,6 +789,36 @@ describe('the incremental pull', () => {
 })
 
 describe('the bulk entries read', () => {
+  test('bulk reads adapt to the configured limit without skipping keys', async () => {
+    const ns = 'user:small-batches'
+    const keys = ['a.md', 'b.md', 'c.md']
+    const writer = mirrored(base, temp())
+    await writer.push(ns, Object.fromEntries(keys.map(k => [k, k])))
+    const batches: string[][] = []
+    const reader = mirrored(base, temp(), {
+      fetch: async (url, init) => {
+        if (new URL(url).searchParams.get('view') === 'entries') {
+          const batch = JSON.parse(String(init?.body)).keys as string[]
+          batches.push(batch)
+          if (batch.length > 2)
+            return Response.json(
+              {
+                error: {
+                  code: 'bad_request',
+                  message: 'smaller batches',
+                  details: { max_keys: 2 },
+                },
+              },
+              { status: 400 },
+            )
+        }
+        return fetch(url, init)
+      },
+    })
+    expect(Object.keys((await reader.entries(ns, keys)).entries)).toEqual(keys)
+    expect(batches).toEqual([keys, keys.slice(0, 2), keys.slice(2)])
+  })
+
   test('entries() returns one status per key and arms only the keys it read', async () => {
     const ns = 'user:sync-entries'
     const a = new OpenRecallClient({ url: base, passphrase: PASSPHRASE })
@@ -735,6 +829,9 @@ describe('the bulk entries read', () => {
     expect(r.statuses).toEqual({ 'a.md': 'ok', 'nope.md': 'not_found', '../bad': 'invalid_key' })
     expect(r.hashes['a.md']).toBe((await b.hashes(ns))['a.md'] as string)
     expect(typeof r.updatedAt['a.md']).toBe('string')
+    const special = await a.entries(ns, ['a.md', '__proto__'])
+    expect(Object.hasOwn(special.statuses, '__proto__')).toBe(true)
+    expect(special.entries['a.md']).toBe('alpha')
 
     // Armed for a.md, nothing claimed about b.md.
     await b.push(ns, { 'a.md': 'alpha two', 'b.md': 'beta two' })
@@ -884,7 +981,8 @@ describe('the bulk entries read', () => {
 
 describe('the fs mirror and the fs store', () => {
   test('equal-length blobs written with Promise.all all land', async () => {
-    const store = new FsBlobStore(temp(), { private: true })
+    const root = temp()
+    const store = new FsBlobStore(root, { private: true })
     const n = 40
     await Promise.all(
       Array.from({ length: n }, (_, i) =>
@@ -901,7 +999,9 @@ describe('the fs mirror and the fs store', () => {
       expect(new TextDecoder().decode(got as Uint8Array)).toBe(`body-${String(i).padStart(2, '0')}`)
     }
     // No temp file survived, and none is listed.
-    expect(listed.some(p => p.includes('.tmp-'))).toBe(false)
+    expect(readdirSync(join(root, 'ns/x/blobs')).sort()).toEqual(
+      listed.map(p => p.slice('ns/x/blobs/'.length)).sort(),
+    )
   })
 
   test('a mirror that cannot write says so once on stderr and goes quiet', async () => {

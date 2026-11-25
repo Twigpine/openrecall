@@ -45,6 +45,12 @@ export function corpusDigest(corpus: Corpus): string {
   return h.digest('hex')
 }
 
+export function questionDigest(questions: Question[]): string {
+  return createHash('sha256')
+    .update(`${questions.map(q => JSON.stringify(q)).join('\n')}\n`)
+    .digest('hex')
+}
+
 export const SYSTEM_NAMES = ['tfidf', 'substring', 'full'] as const
 export type SystemName = (typeof SYSTEM_NAMES)[number]
 
@@ -116,8 +122,9 @@ export function run(
   corpus: Corpus,
   questions: Question[],
 ): { outputs: SystemOutput[]; msPerQuery: number } {
+  const independent = { ...corpus }
   const started = performance.now()
-  const outputs = questions.map(q => system(q.query, corpus))
+  const outputs = questions.map(q => system(q.query, independent))
   const elapsed = performance.now() - started
   return { outputs, msPerQuery: questions.length === 0 ? 0 : elapsed / questions.length }
 }

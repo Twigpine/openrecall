@@ -253,10 +253,14 @@ describe('the relevance floor', () => {
   // exists to admit for paraphrases, and the floor cannot tell these apart
   // from them; the number is stated rather than hidden.
   test('at most two off-domain probes are answered, each by a sole carrier', () => {
+    const index = new RecallIndex()
+    for (const [key, content] of Object.entries(CORPUS))
+      index.upsert({ id: key, key, content, fingerprint: key })
     const answered = OFF_DOMAIN.filter(q => rankMemories(q, CORPUS).length > 0)
     expect(answered.length).toBeLessThanOrEqual(2)
     for (const q of answered) {
       const d = rankMemoriesDetailed(q, CORPUS, Object.keys(CORPUS).length)
+      expect(RecallIndex.scoreAll([index], q).scored.filter(hit => hit.score > 0)).toHaveLength(1)
       expect(`${q} :: ${d.results.length} returned`).toBe(`${q} :: 1 returned`)
     }
   })

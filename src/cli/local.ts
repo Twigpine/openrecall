@@ -8,7 +8,7 @@
  *
  * Several agents (Claude Code, Zero, OpenClaude, …) each spawn their own MCP
  * process against the same directory, so the server's in-process lock is not
- * enough. Every write takes a cross-process lock (a file created with O_EXCL)
+ * enough. Every write takes a cross-process lock (an atomically linked owner file)
  * so concurrent read-modify-write cycles on a manifest can't lose updates and
  * the reclaim sweep after a write can't delete another writer's blobs before
  * their manifest publishes them.
@@ -23,7 +23,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { mkdir, open, readFile, rm, stat, unlink, utimes } from 'node:fs/promises'
+import { link, mkdir, open, readFile, rm, stat, unlink, utimes } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { FetchLike } from '../../client/index.ts'
 
@@ -31,130 +31,89 @@ import type { FetchLike } from '../../client/index.ts'
 export const LOCAL_ORIGIN = 'http://openrecall.local'
 
 const LOCK_WAIT_MS = 10_000
-/**
- * A lock whose mtime is older than this is from a crashed process. The holder
- * touches the file every LOCK_STALE_MS / 3 while it works, so only a holder
- * whose event loop has been blocked for the whole window can be mistaken for
- * one that died.
- */
 const LOCK_STALE_MS = 30_000
-const HEARTBEAT_MS = LOCK_STALE_MS / 3
-/**
- * A reaper holds its guard for one stat and one remove, so a guard this old
- * belongs to a process that died in between. Well under LOCK_WAIT_MS, so such
- * a guard costs waiters a few seconds rather than a timeout.
- */
 const REAP_GUARD_STALE_MS = 5_000
-
 const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
 
-/**
- * Run `fn` holding the cross-process lock at `lockPath`.
- *
- * Acquire is `open(path, 'wx')` (O_CREAT | O_EXCL): atomic on POSIX and on
- * Windows, under Bun and under Node, with no native addon. The file holds
- * `<pid> <token>` so release can tell its own lock from one another process
- * took after breaking this one as stale, and leaves the latter alone.
- *
- * The path is the same `.lock` an older version took with `mkdir`, on purpose:
- * during an upgrade a mixed pair still contends (mkdir fails EEXIST on a file,
- * 'wx' fails EEXIST on a directory), and a stale directory is broken the same
- * way as a stale file.
- */
-export async function withLockFile<T>(lockPath: string, fn: () => Promise<T>): Promise<T> {
-  const stamp = `${process.pid} ${randomBytes(8).toString('hex')}\n`
+export class LocalLockTimeout extends Error {}
+
+/** A suspended local process still owns its lock. Only ESRCH establishes that it died. */
+async function abandoned(path: string, ageMs: number): Promise<boolean> {
+  const info = await stat(path).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'ENOENT') return null
+    throw err
+  })
+  if (!info || Date.now() - info.mtimeMs <= ageMs) return false
+  const stamp = await readFile(info.isDirectory() ? join(path, 'pid') : path, 'utf8').catch(
+    (err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return info.isDirectory() ? '' : null
+      throw err
+    },
+  )
+  if (stamp === null) return false
+  const pid = Number(/^(\d+)(?:\s|$)/.exec(stamp)?.[1])
+  if (!Number.isSafeInteger(pid) || pid <= 0 || pid > 2147483647) return true
+  try {
+    process.kill(pid, 0)
+    return false
+  } catch (err) {
+    return (err as NodeJS.ErrnoException).code === 'ESRCH'
+  }
+}
+
+/** Publish the complete owner stamp atomically. Readers can never observe a half-written lock. */
+export async function withLockFile<T>(path: string, fn: () => Promise<T>): Promise<T> {
+  const token = randomBytes(8).toString('hex')
+  const stamp = `${process.pid} ${token}\n`
+  const candidate = `${path}.owner-${process.pid}-${token}`
   const deadline = Date.now() + LOCK_WAIT_MS
-  for (;;) {
-    try {
-      const handle = await open(lockPath, 'wx')
+  const take = async <V>(target: string, ageMs: number, run: () => Promise<V>): Promise<V> => {
+    for (;;) {
       try {
-        await handle.writeFile(stamp)
-      } finally {
-        // Closed before anything could unlink it: Windows refuses otherwise.
-        await handle.close()
+        await link(candidate, target)
+        break
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
       }
-      break
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-      const age = await stat(lockPath).then(
-        s => Date.now() - s.mtimeMs,
-        () => 0, // released between our open and stat — just retry
-      )
-      if (age > LOCK_STALE_MS && (await reapIfStale(lockPath))) continue
-      if (Date.now() > deadline) {
-        throw new Error(`timed out waiting for the local memory lock (${lockPath})`)
-      }
-      await sleep(10 + Math.random() * 40)
+      if (Date.now() >= deadline)
+        throw new LocalLockTimeout(`timed out waiting for the local memory lock (${path})`)
+      if (await abandoned(target, ageMs)) {
+        // All reapers of this generation serialize on the same guard. A dead
+        // guard is reclaimed by the same protocol, with its own guard.
+        await take(`${target}.reap`, REAP_GUARD_STALE_MS, async () => {
+          if (await abandoned(target, ageMs)) await rm(target, { recursive: true, force: true })
+        })
+      } else await sleep(10 + Math.random() * 40)
+    }
+    try {
+      return await run()
+    } finally {
+      if ((await readFile(target, 'utf8').catch(() => null)) === stamp) await unlink(target)
     }
   }
-  // Keep the lock young while fn runs, so a slow holder is never broken as
-  // stale by a waiter. unref: a heartbeat must never keep the process alive.
-  const heartbeat = setInterval(() => {
-    const now = new Date()
-    utimes(lockPath, now, now).catch(() => {})
-  }, HEARTBEAT_MS)
-  heartbeat.unref()
+  const handle = await open(candidate, 'wx', 0o600)
   try {
-    return await fn()
+    try {
+      await handle.writeFile(stamp)
+    } finally {
+      await handle.close()
+    }
+    return await take(path, LOCK_STALE_MS, async () => {
+      // Older versions judge by age alone. Keep the same inode fresh for them.
+      const heartbeat = setInterval(() => {
+        const now = new Date()
+        utimes(candidate, now, now).catch(() => {})
+      }, LOCK_STALE_MS / 3)
+      heartbeat.unref()
+      try {
+        return await fn()
+      } finally {
+        clearInterval(heartbeat)
+      }
+    })
   } finally {
-    clearInterval(heartbeat)
-    await release(lockPath, stamp)
+    await unlink(candidate).catch(() => {})
   }
-}
-
-/**
- * Remove the lock at `lockPath` if it is still stale, and report whether the
- * caller should try to take it now (true: removed or already gone).
- *
- * Judging a lock stale and removing it cannot be one filesystem call, and the
- * remove goes by path. So two waiters that both judged one crashed lock stale
- * could each remove "it": the first removes the crashed lock and takes a fresh
- * one, and the second, still acting on its earlier judgment, removes that fresh
- * lock and takes another, putting two writers inside. Reapers therefore take
- * turns through a guard file created with O_EXCL, and the one holding it looks
- * at the lock again before removing anything. A waiter that finds the guard
- * taken returns false and waits like any other.
- *
- * An older version that reaps without the guard can still race a newer one
- * this way during an upgrade; two current versions cannot.
- */
-async function reapIfStale(lockPath: string): Promise<boolean> {
-  const guardPath = `${lockPath}.reap`
-  try {
-    await (await open(guardPath, 'wx')).close()
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err
-    const guardAge = await stat(guardPath).then(
-      s => Date.now() - s.mtimeMs,
-      () => 0,
-    )
-    if (guardAge > REAP_GUARD_STALE_MS) await rm(guardPath, { force: true })
-    return false
-  }
-  try {
-    const age = await stat(lockPath).then(
-      s => Date.now() - s.mtimeMs,
-      () => null, // gone already: someone released or reaped it
-    )
-    if (age === null) return true
-    if (age <= LOCK_STALE_MS) return false // taken afresh since we looked
-    // Recursive so a `.lock` directory left by an older version goes too.
-    await rm(lockPath, { recursive: true, force: true })
-    return true
-  } finally {
-    await unlink(guardPath).catch(() => {})
-  }
-}
-
-/**
- * Unlink the lock only while it still carries our stamp. If a waiter judged it
- * stale, removed it and took its place, the file is theirs now, and deleting
- * it would let a third process in beside them.
- */
-async function release(lockPath: string, stamp: string): Promise<void> {
-  const current = await readFile(lockPath, 'utf8').catch(() => null)
-  if (current !== stamp) return
-  await unlink(lockPath).catch(() => {})
 }
 
 /**

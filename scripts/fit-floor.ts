@@ -98,7 +98,7 @@ if (grid) {
   const fitProbes = [...tuning.filter(p => !p.residual), ...offDomain]
   const rows: string[] = []
   rows.push(
-    `${'TOP'.padStart(5)} ${'GAP'.padStart(5)} ${'CLEAR'.padStart(6)} | ${'fit'.padStart(5)} ${'held'.padStart(5)} | ${'R@1'.padStart(7)} ${'R@5'.padStart(7)} ${'R@10'.padStart(7)} ${'MRR'.padStart(7)} ${'absR'.padStart(7)} ${'absP'.padStart(7)} ${'false'.padStart(7)}`,
+    `${'TOP'.padStart(5)} ${'GAP'.padStart(5)} ${'CLEAR'.padStart(6)} | ${'fit'.padStart(5)} | ${'R@1'.padStart(7)} ${'R@5'.padStart(7)} ${'R@10'.padStart(7)} ${'MRR'.padStart(7)} ${'absR'.padStart(7)} ${'absP'.padStart(7)} ${'false'.padStart(7)}`,
   )
   for (const TOP_FLOOR of [0.06, 0.08, 0.1, 0.12, 0.15, 0.2])
     for (const GAP of [0.2, 0.3, 0.4, 0.6, 1.01])
@@ -109,10 +109,6 @@ if (grid) {
           const m = measure(p.query, p.expect, floors)
           return p.expect === null ? !m.answered : m.answered && m.first === p.expect
         }).length
-        const held = heldOut.filter(p => {
-          const m = measure(p.query, p.expect, floors)
-          return m.answered && m.first === p.expect
-        }).length
         const outputs = lists.map(scored => {
           const kept = applyFloors(scored, floors).slice(0, 10)
           return {
@@ -122,12 +118,10 @@ if (grid) {
         })
         const m = score(questions, outputs)
         rows.push(
-          `${TOP_FLOOR.toFixed(2).padStart(5)} ${GAP.toFixed(2).padStart(5)} ${CLEAR_FLOOR.toFixed(2).padStart(6)} | ${`${fit}/${fitProbes.length}`.padStart(5)} ${`${held}/${heldOut.length}`.padStart(5)} | ${fmt(m.recallAt1).padStart(7)} ${fmt(m.recallAt5).padStart(7)} ${fmt(m.recallAt10).padStart(7)} ${fmt(m.mrr).padStart(7)} ${fmt(m.abstentionRecall).padStart(7)} ${fmt(m.abstentionPrecision).padStart(7)} ${fmt(m.falseAnswerRate).padStart(7)}`,
+          `${TOP_FLOOR.toFixed(2).padStart(5)} ${GAP.toFixed(2).padStart(5)} ${CLEAR_FLOOR.toFixed(2).padStart(6)} | ${`${fit}/${fitProbes.length}`.padStart(5)} | ${fmt(m.recallAt1).padStart(7)} ${fmt(m.recallAt5).padStart(7)} ${fmt(m.recallAt10).padStart(7)} ${fmt(m.mrr).padStart(7)} ${fmt(m.abstentionRecall).padStart(7)} ${fmt(m.abstentionPrecision).padStart(7)} ${fmt(m.falseAnswerRate).padStart(7)}`,
         )
       }
   console.log('\nGRID over TOP_FLOOR x GAP x CLEAR_FLOOR (MEMBER_FLOOR and REL_FLOOR as in FLOORS)')
-  console.log(
-    'fit = tuning pairs answered right + off-domain probes empty; held = held-out top-1 (report only)',
-  )
+  console.log('fit = tuning pairs answered right + off-domain probes empty')
   console.log(rows.join('\n'))
 }

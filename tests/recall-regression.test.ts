@@ -277,6 +277,9 @@ describe('tuning-pair match arity', () => {
       name: '',
       body: 'text',
     })
+    expect(splitFrontmatterText('---\n---\nKestrel checks backups.\n---\nLater.').body).toBe(
+      'Kestrel checks backups.\n---\nLater.',
+    )
     const incomplete = '---\ndescription: only the body'
     expect(splitFrontmatterText(incomplete)).toEqual({
       description: '',
@@ -1981,7 +1984,16 @@ describe('single-origin tool traffic', () => {
       // A second recall is the warm one: cached, so no body read at all.
       recalled = (await tools.recall('quokka ledger records')).text
       searched = (await tools.search('quokka')).text
+      const beforeGet = cap.hrefs.length
       got = (await tools.get('notes/ledger.md')).text
+      expect(
+        cap.hrefs.slice(beforeGet).map(h => Array.from(new URL(h).searchParams.entries())),
+      ).toEqual([
+        [
+          ['view', 'entry'],
+          ['key', 'notes/ledger.md'],
+        ],
+      ])
       listed = (await tools.list()).text
     } finally {
       globalThis.fetch = realFetch

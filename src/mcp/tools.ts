@@ -78,19 +78,28 @@ class Timer {
    * decrypt; a client without that breakdown (a test double) is charged
    * entirely to fetch, from the elapsed time the caller measured around it.
    */
-  failedFetch(elapsedMs: number): void {
-    this.ms.fetch += elapsedMs
+  private longestRead = -1
+
+  read(elapsed: number, timings?: PullResult['timings'], parallel = false): void {
+    this.bytes += timings?.bytes ?? 0
+    // Namespace pulls overlap. Report the stages of the longest read while
+    // counting bytes and entries from every scope.
+    const fetch = timings ? timings.fetchMs + timings.parseMs : elapsed
+    const decrypt = timings?.decryptMs ?? 0
+    if (parallel) {
+      if (elapsed < this.longestRead) return
+      this.longestRead = elapsed
+      this.ms.fetch = fetch
+      this.ms.decrypt = decrypt
+    } else {
+      this.ms.fetch += fetch
+      this.ms.decrypt += decrypt
+    }
   }
 
-  pulled(r: PullResult, elapsedMs: number): void {
+  pulled(r: PullResult, elapsedMs: number, parallel: boolean): void {
     this.entries += Object.keys(r.entries).length
-    if (r.timings) {
-      this.ms.fetch += r.timings.fetchMs + r.timings.parseMs
-      this.ms.decrypt += r.timings.decryptMs
-      this.bytes += r.timings.bytes
-    } else {
-      this.ms.fetch += elapsedMs
-    }
+    this.read(elapsedMs, r.timings, parallel)
   }
 
   done(): Timings {
@@ -642,13 +651,18 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
    * decrypted and one key picked out of it.
    */
   /** `client.pull`, with its stage timings and entry count credited to the timer. */
-  async function pullTimed(timer: Timer, source: string, opts?: PullOptions): Promise<PullResult> {
+  async function pullTimed(
+    timer: Timer,
+    source: string,
+    opts?: PullOptions,
+    parallel = false,
+  ): Promise<PullResult> {
     const started = performance.now()
     const r = await client.pull(source, opts).catch(err => {
-      timer.failedFetch(performance.now() - started)
+      timer.read(performance.now() - started, undefined, parallel)
       throw err
     })
-    timer.pulled(r, performance.now() - started)
+    timer.pulled(r, performance.now() - started, parallel)
     return r
   }
 
@@ -717,7 +731,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           const pulled = await Promise.all(
             sources.map(async source => {
               try {
-                const r = await pullTimed(timer, source, { allowStale: true })
+                const r = await pullTimed(timer, source, { allowStale: true }, sources.length > 1)
                 if (r.served?.source === 'mirror')
                   staleMs = Math.max(staleMs ?? 0, r.served.staleMs)
                 if (Object.keys(r.entries).length === 0 && r.served?.source !== 'mirror') {
@@ -778,7 +792,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             // concludes there is nothing here, when in fact the one thing here is
             // the table of contents naming everything that was ever written.
             return ok(
-              `(nothing in ${ns}${staleNote} was searched for "${query}": the namespace holds only its ` +
+              `(nothing in ${ns}${staleNote} was searched for "${bounded(query)}": the namespace holds only its ` +
                 'MEMORY.md index, which recall does not rank. ' +
                 (pulled.some(p => Object.hasOwn(p.entries, 'MEMORY.md'))
                   ? 'Call memory_get with key "MEMORY.md" to read the index itself.)'
@@ -790,7 +804,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             // would claim the corpus was searched and came back empty. It was
             // not: the query was all function words.
             return ok(
-              `(no searchable words in "${query}": every term is a function word the ranker ` +
+              `(no searchable words in "${bounded(query)}": every term is a function word the ranker ` +
                 `drops, so none of the ${searched} entr${searched === 1 ? 'y' : 'ies'} in ${ns}${staleNote} ` +
                 'was scored. Retry with the distinctive words you expect the entry to contain, ' +
                 'or call memory_list.)',
@@ -806,7 +820,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             // here, and leaking its key or text would spend the caller's context
             // on exactly what the floor exists to keep out.
             return ok(
-              `(nothing in ${ns}${staleNote} looks relevant to "${query}". ` +
+              `(nothing in ${ns}${staleNote} looks relevant to "${bounded(query)}". ` +
                 `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
                 `${belowFloor} below the relevance floor and withheld. ` +
                 'Call memory_list before concluding the fact is unrecorded; ' +
@@ -928,7 +942,15 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
       try {
         let body: string
         try {
-          body = await timer.time('fetch', () => client.entry(ns, key))
+          const started = performance.now()
+          let breakdown: PullResult['timings']
+          try {
+            body = await client.entry(ns, key, timing => {
+              breakdown = timing
+            })
+          } finally {
+            timer.read(performance.now() - started, breakdown)
+          }
           timer.entries = 1
         } catch (e) {
           if (e instanceof OpenRecallHttpError) {

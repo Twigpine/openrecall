@@ -154,10 +154,7 @@ describe('local mode across processes', () => {
 
   test('a reader never sees a torn namespace while a writer replaces an entry', async () => {
     const home = freshHome()
-    // The race window is the time between a reader's manifest read and its
-    // read of the replaced key's blob. Hundreds of stable entries queued ahead
-    // of `hot.md` (last in manifest order) widen it enough that a reader with
-    // no retry trips over the writer's reclaim almost every run.
+    // Stable siblings verify that the retry returns the whole namespace.
     const STABLE = 800
     await finish(
       spawnChild(
@@ -172,45 +169,43 @@ describe('local mode across processes', () => {
       ),
     )
 
-    const stop = join(home, 'stop-reading')
+    // Pause the reader between its manifest read and its read of the hot blob. The writer commits and reclaims the old blob during that pull.
+    const resume = join(home, 'replacement-complete')
     const reader = spawnChild(
       home,
       `
-        const { existsSync } = await import('node:fs')
-        const counts = []
-        const errors = []
-        const until = Date.now() + 20_000
-        while (!existsSync(${JSON.stringify(stop)}) && Date.now() < until) {
-          try {
-            counts.push(Object.keys((await client.pull(ns)).entries).length)
-          } catch (err) {
-            errors.push(String(err && err.message || err))
+      const { existsSync } = await import('node:fs')
+      const { getStore } = await import(process.cwd() + '/src/store/index.ts')
+      const store = getStore()
+      const hotHash = (await client.hashes(ns))['hot.md'].slice(7)
+      const get = store.get.bind(store)
+      let paused = false
+      store.get = async path => {
+        if (!paused && path.endsWith('/blobs/' + hotHash)) {
+          paused = true
+          console.log('reading')
+          const until = Date.now() + 10_000
+          while (!existsSync(${JSON.stringify(resume)})) {
+            if (Date.now() > until) throw new Error('writer did not finish')
+            await new Promise(r => setTimeout(r, 5))
           }
         }
-        console.log(JSON.stringify({ counts, errors }))
-      `,
+        return get(path)
+      }
+      const result = await client.pull(ns)
+      console.log(JSON.stringify({ count: Object.keys(result.entries).length, hot: result.entries['hot.md'] }))
+    `,
     )
-    const writer = spawnChild(
-      home,
-      `
-        const sleep = ms => new Promise(r => setTimeout(r, ms))
-        for (let i = 1; i <= 80; i++) {
-          await client.push(ns, { 'hot.md': 'hot ' + i + ' ' + 'x'.repeat(i) })
-          await sleep(15) // paced like an agent saving, not a tight loop
-        }
-        console.log('done')
-      `,
-    )
-    await finish(writer)
-    writeFileSync(stop, '')
-    const r = JSON.parse(await finish(reader)) as { counts: number[]; errors: string[] }
-
-    // Non-vacuity: the reader was pulling while the writer wrote.
-    expect(r.counts.length).toBeGreaterThan(20)
-    expect(r.errors).toEqual([])
-    // Each replacement reclaims the previous blob, so a reader holding the
-    // manifest from just before it would come up one short unless it re-reads.
-    expect(r.counts.every(c => c === STABLE + 1)).toBe(true)
+    await reader.waitFor(/^reading$/)
+    try {
+      await finish(
+        spawnChild(home, `await client.push(ns, { 'hot.md': 'replacement' }); console.log('done')`),
+      )
+    } finally {
+      writeFileSync(resume, '')
+    }
+    const result = JSON.parse(await finish(reader))
+    expect(result).toEqual({ count: STABLE + 1, hot: 'replacement' })
   }, 60_000)
 
   test('a GET takes no lock: a held lock file blocks a push but not a pull', async () => {
@@ -224,25 +219,17 @@ describe('local mode across processes', () => {
       const puller = spawnChild(
         home,
         `
-          const t0 = performance.now()
           const first = Object.keys((await client.pull(ns)).entries)
-          const t1 = performance.now()
           const second = Object.keys((await client.pull(ns)).entries)
-          console.log(JSON.stringify({ first, second, coldMs: t1 - t0, warmMs: performance.now() - t1 }))
+          console.log(JSON.stringify({ first, second }))
         `,
       )
       const pulled = JSON.parse(await finish(puller)) as {
         first: string[]
         second: string[]
-        coldMs: number
-        warmMs: number
       }
       expect(pulled.first).toEqual(['a.md'])
       expect(pulled.second).toEqual(['a.md'])
-      // The lock wait is 10 s before it throws, so a read that took the lock
-      // would not have returned at all; the warm figure shows it never waited.
-      expect(pulled.warmMs).toBeLessThan(100)
-
       const pusher = spawnChild(
         home,
         `

@@ -153,7 +153,7 @@ async function cmdStatus(timings: boolean) {
   const hashes = await client.hashes(s.namespace)
   const n = Object.keys(hashes).length
   console.log(`\nok — ${n} ${n === 1 ? 'entry' : 'entries'} in ${s.namespace}`)
-  if (timings) await printTimings(client, s.namespace, n)
+  if (timings) await printTimings(client, s.namespace)
 }
 
 /**
@@ -170,7 +170,7 @@ const SLO = { entries: 2000, p50Ms: 50, p95Ms: 200 }
  * generic on purpose, so the numbers describe the namespace and not one lucky
  * query.
  */
-async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: string, n: number) {
+async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: string) {
   const { makeTools } = await import('../src/mcp/tools.ts')
   const tools = makeTools(client, ns)
   const probe = 'project conventions and user preferences'
@@ -202,6 +202,7 @@ async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: 
   const totals = sorted('total')
   const p50 = median(totals)
   const p95Total = p95(totals)
+  const n = Math.min(...warm.map(t => t.entries))
   if (n >= SLO.entries) {
     const pass = p50 <= SLO.p50Ms && p95Total <= SLO.p95Ms
     console.log(

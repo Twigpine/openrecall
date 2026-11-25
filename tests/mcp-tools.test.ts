@@ -1194,7 +1194,10 @@ describe('a refused entry inside a successful push', () => {
  */
 describe('memory_get reads one entry, not the namespace', () => {
   test('the only request a get makes is the single-entry view', async () => {
-    await tools.save('one/of-many.md', 'the entry a get asks for')
+    const namespace = 'user:me/single-entry-wire'
+    expect(
+      (await tools.save('one/of-many.md', 'the entry a get asks for', namespace)).isError,
+    ).toBeUndefined()
     const seen: string[] = []
     const recording = new OpenRecallClient({
       url: `http://localhost:${server.port}`,
@@ -1204,7 +1207,7 @@ describe('memory_get reads one entry, not the namespace', () => {
         return fetch(input, init)
       },
     })
-    const r = await makeTools(recording, 'user:me').get('one/of-many.md')
+    const r = await makeTools(recording, namespace).get('one/of-many.md')
     expect(r.isError).toBeUndefined()
     expect(r.text).toContain('the entry a get asks for')
     expect(seen).toHaveLength(1)
@@ -1280,7 +1283,33 @@ describe('every tool result carries stage timings', () => {
     expect(recall?.entries).toBeGreaterThanOrEqual(1)
     expect(recall?.bytes).toBeGreaterThan(0)
     expect(checks[1]?.[1].timings?.entries).toBe(1)
+    expect(checks[1]?.[1].timings?.bytes).toBeGreaterThan(0)
     expect(checks[2]?.[1].timings?.entries).toBeGreaterThanOrEqual(1)
+  })
+
+  test('parallel scopes report elapsed fetch time and count both responses', async () => {
+    const stub = makeStubClient({ 'read.md': 'hello' })
+    const pull = stub.pull.bind(stub)
+    const barrier = Promise.withResolvers<void>()
+    let started = 0
+    stub.pull = async ns => {
+      if (++started === 2) barrier.resolve()
+      await barrier.promise
+      await Bun.sleep(20)
+      return { ...(await pull(ns)), timings: { fetchMs: 15, decryptMs: 2, parseMs: 1, bytes: 40 } }
+    }
+    const r = await makeTools(stub, 'user:me').recall('hello', undefined, 5, [
+      'user:one',
+      'user:two',
+    ])
+    expect(r.timings).toMatchObject({ fetch: 16, decrypt: 2, entries: 2, bytes: 80 })
+  })
+
+  test('a long no-hit query fits in the recall response budget', async () => {
+    const tool = makeTools(makeStubClient({ 'a.md': 'apple' }), 'user:me')
+    for (const query of ['unknown '.repeat(900), 'the '.repeat(1800)]) {
+      expect((await tool.recall(query)).text.length).toBeLessThanOrEqual(4000)
+    }
   })
 
   test('a refusal is timed too', async () => {

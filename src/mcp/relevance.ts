@@ -177,7 +177,7 @@ export function stemTerm(term: string): string {
 const JOINER = /[._:/-]/
 
 /** Every word run of a lowercased string, compounds kept whole. */
-const RUNS = /[a-z0-9]+(?:[._:/-][a-z0-9]+)*/g
+const RUNS = /[a-z0-9]+(?:[._:/-][a-z0-9]+)*/gi
 
 /** A lowercase letter followed by an uppercase one: the seam inside camelCase. */
 const CAMEL = /([a-z])([A-Z])/g
@@ -207,16 +207,23 @@ export function isCompound(token: string): boolean {
  */
 function tokenizeInto(s: string, out: string[], keep: (word: string) => boolean): number {
   let words = 0
-  for (const run of s.replace(CAMEL, '$1 $2').toLowerCase().match(RUNS) ?? []) {
-    if (JOINER.test(run)) {
-      out.push(run)
-      for (const part of run.split(JOINER)) {
-        if (!keep(part)) continue
-        out.push(stemTerm(part))
+  for (const original of s.match(RUNS) ?? []) {
+    const lower = original.toLowerCase()
+    if (!JOINER.test(lower) && !/[a-z][A-Z]/.test(original)) {
+      if (keep(lower)) {
+        out.push(stemTerm(lower))
         words++
       }
-    } else if (keep(run)) {
-      out.push(stemTerm(run))
+      continue
+    }
+    const parts = original
+      .replace(CAMEL, '$1 $2')
+      .toLowerCase()
+      .split(/[ ._:/-]/)
+    if (parts.length > 1) out.push(JOINER.test(lower) ? lower : stemTerm(lower))
+    for (const part of parts) {
+      if (!keep(part)) continue
+      out.push(stemTerm(part))
       words++
     }
   }
@@ -275,7 +282,7 @@ export function tokenizeAll(s: string): string[] {
  * regions. One definition, so what the ranker calls the body is what the
  * caller is shown.
  */
-const FRONTMATTER = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+const FRONTMATTER = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)??---[ \t]*(?:\r?\n|$)/
 export function splitFrontmatterText(content: string) {
   const block = FRONTMATTER.exec(content)
   const metadata = block?.[1] ?? ''
@@ -603,7 +610,12 @@ export class RecallIndex {
    */
   upsert(doc: IndexDoc): 'added' | 'updated' | 'unchanged' {
     const existing = this.docs.get(doc.id)
-    if (existing && doc.fingerprint !== '' && existing.fingerprint === doc.fingerprint) {
+    if (
+      existing &&
+      existing.key === doc.key &&
+      doc.fingerprint !== '' &&
+      existing.fingerprint === doc.fingerprint
+    ) {
       existing.content = doc.content
       existing.updatedAt = doc.updatedAt
       existing.namespace = doc.namespace

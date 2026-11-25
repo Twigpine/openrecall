@@ -54,6 +54,55 @@ describe('openrecall status --timings', () => {
     expect(r.out).not.toContain('project conventions and user preferences')
   })
 
+  test('SLO eligibility uses the sampled workload when the namespace shrinks after status', async () => {
+    let reads = 0
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        reads++
+        if (reads === 1)
+          return Response.json({
+            version: 1,
+            supports: [],
+            entryChecksums: Object.fromEntries(
+              Array.from({ length: 2000 }, (_, i) => [`n${i}.md`, 'old']),
+            ),
+          })
+        return Response.json(
+          { error: { code: 'empty', message: 'empty namespace' } },
+          { status: 404 },
+        )
+      },
+    })
+    try {
+      const proc = Bun.spawn(
+        ['bun', 'run', join(ROOT, 'bin/openrecall.ts'), 'status', '--timings'],
+        {
+          env: {
+            PATH: process.env.PATH ?? '',
+            HOME: home,
+            OPENRECALL_HOME: home,
+            OPENRECALL_URL: server.url.href,
+            OPENRECALL_CACHE: 'off',
+            OPENRECALL_PASSPHRASE: 'status-pass',
+          },
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      )
+      const [code, out, err] = await Promise.all([
+        proc.exited,
+        new Response(proc.stdout).text(),
+        new Response(proc.stderr).text(),
+      ])
+      expect(code, err).toBe(0)
+      expect(out).toContain('2000 entries')
+      expect(out).toContain('SLO informational (0 entries')
+    } finally {
+      server.stop(true)
+    }
+  })
+
   test('plain status prints no timings', () => {
     const r = cli(['status'])
     expect(r.code).toBe(0)

@@ -58,6 +58,19 @@ async function seed(ns: string, entries: Record<string, string>) {
 const b64 = (s: string) => Buffer.from(s).toString('base64')
 
 describe('entries view: the frames answer', () => {
+  test('a damaged content-addressed body affects only its own frame', async () => {
+    const ns = 'user:frame-damage'
+    await seed(ns, { 'first.md': b64('first'), 'second.md': b64('second') })
+    await getStore().put(
+      contentPath(namespaceSlug(ns), ciphertextHash(b64('first'))),
+      Buffer.from('other'),
+    )
+    const response = await post(ns, { keys: ['first.md', 'second.md'] })
+    const { frames } = decodeFrames(new Uint8Array(await response.arrayBuffer()))
+    expect(frames.map(f => f.meta.status)).toEqual(['unreadable', 'ok'])
+    expect(Buffer.from(frames[1].bytes).toString()).toBe('second')
+  })
+
   test('returns the requested bodies raw, with the hash and timestamp the manifest holds', async () => {
     const ns = 'user:entries-happy'
     const key = deriveKey('test-pass', ns)
