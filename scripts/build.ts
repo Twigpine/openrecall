@@ -83,5 +83,5 @@ if (import.meta.main) {
     stderr: 'inherit',
   })
   if (tsc.exitCode !== 0) process.exit(tsc.exitCode)
-  console.log('built dist/client/{index,crypto,secretscan}.{js,d.ts}')
+  console.log('built dist/client/{index,crypto,frames,secretscan}.{js,d.ts}')
 }
