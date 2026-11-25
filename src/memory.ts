@@ -618,6 +618,7 @@ async function reclaim(
     const live = new Set<string>()
     for (const meta of Object.values(m.entries)) live.add(contentPath(nsSlug, meta.hash))
     if (sweep) {
+      const blobs = new Set(await store.list(blobPrefix(nsSlug)))
       const legacyPrefix = entryPath(nsSlug, '')
       const legacyPaths = await store.list(legacyPrefix)
       if (legacyPaths.length) {
@@ -629,12 +630,12 @@ async function reclaim(
         )
         for (const path of legacyPaths) {
           const hash = legacyHashes.get(path)
-          const replacement = hash && (await store.get(contentPath(nsSlug, hash)))
-          if (!hash || (replacement && sha256Prefixed(replacement) === hash))
-            await store.delete(path)
+          // Content paths are derived from the bytes at commit. Reuse the blob
+          // listing so untouched legacy namespaces require no per-key downloads.
+          if (!hash || blobs.has(contentPath(nsSlug, hash))) await store.delete(path)
         }
       }
-      for (const path of await store.list(blobPrefix(nsSlug))) {
+      for (const path of blobs) {
         if (!live.has(path)) await store.delete(path)
       }
     } else {

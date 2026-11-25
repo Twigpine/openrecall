@@ -1132,12 +1132,17 @@ export class OpenRecallClient {
    * it records is not enumerated: the manifest on disk is this client's
    * memory of the server, not the server.
    */
-  private async pullFromMirror(namespace: string, clock: Clock): Promise<PullResult | null> {
+  private async pullFromMirror(
+    namespace: string,
+    clock: Clock,
+    previous?: MirrorManifest,
+  ): Promise<PullResult | null> {
     const mirror = this.mirror
     if (!mirror) return null
     const t = performance.now()
     const m = await this.mirrorTry(() => mirror.readManifest(namespace))
     if (!m || m.namespace !== namespace || !m.entries || typeof m.entries !== 'object') return null
+    if (previous && m.version === previous.version && m.checksum === previous.checksum) return null
     const key = this.key(namespace)
     const cache = this.cacheFor(namespace)
     const held = new Map<string, Held>()
@@ -1152,7 +1157,11 @@ export class OpenRecallClient {
         continue
       }
       const bytes = await this.mirrorRead(namespace, row.hash)
-      if (!bytes) return null
+      if (!bytes) {
+        clock.fetchMs += performance.now() - t
+        // A concurrent publication can collect a blob from the snapshot this reader selected.
+        return previous ? null : this.pullFromMirror(namespace, clock, m)
+      }
       held.set(entryKey, { hash: row.hash, size: bytes.byteLength, bytes })
     }
     clock.fetchMs += performance.now() - t

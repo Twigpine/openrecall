@@ -247,7 +247,10 @@ describe('reclaim cadence', () => {
     c.failNextDelete = true
     await put(ns, { entries: { 'updated.md': b64('new') }, deletions: ['deleted.md'] })
     expect(await real.get(legacy('updated.md'))).not.toBeNull()
+    c.reset()
     await put(ns, { entries: { 'other.md': b64('unrelated') } })
+    // One manifest read. A legacy namespace must not download each live body to sweep.
+    expect(c.calls.get).toBe(1)
     expect(await real.get(legacy('updated.md'))).toBeNull()
     expect(await real.get(legacy('deleted.md'))).toBeNull()
     expect(await real.get(legacy('legacy.md'))).not.toBeNull()

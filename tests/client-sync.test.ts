@@ -487,6 +487,33 @@ describe('the incremental pull', () => {
     expect(error.status).toBe(403)
   })
 
+  test('offline recall retries a snapshot replaced while its blobs are being read', async () => {
+    const ns = 'user:offline-refresh-race'
+    const home = temp()
+    const writer = mirrored(base, home)
+    await writer.push(ns, { 'a.md': 'first' })
+    const old = await writer.pull(ns)
+    const disk = new FsMirror(cacheDir(home, base))
+    const read = disk.getBlob.bind(disk)
+    disk.getBlob = async (namespace, hash) => {
+      if (hash === old.hashes?.['a.md']) {
+        await writer.push(ns, { 'a.md': 'second' })
+        await writer.pull(ns)
+        await disk.deleteBlob(namespace, hash)
+      }
+      return read(namespace, hash)
+    }
+    const offline = mirrored(base, home, {
+      mirror: disk,
+      fetch: async () => {
+        throw new Error('offline')
+      },
+    })
+    const latest = await offline.pull(ns, { allowStale: true })
+    expect(latest.entries).toEqual({ 'a.md': 'second' })
+    expect(latest.served?.source).toBe('mirror')
+  })
+
   test('offline recall refuses an incomplete mirror and repairs it on reconnect', async () => {
     const ns = 'user:sync-incomplete'
     const home = temp()
