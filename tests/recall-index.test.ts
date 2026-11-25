@@ -330,6 +330,14 @@ describe('code identifiers', () => {
     }
   })
 
+  test('lowercase component names find camel-case identifiers inside a path', () => {
+    const path = 'src/readCache/getX.ts'
+    const corpus = { 'note.md': path }
+    for (const query of ['getx', 'readcache', path.toLowerCase(), 'cache']) {
+      expect(rankMemoriesDetailed(query, corpus).results[0]?.key).toBe('note.md')
+    }
+  })
+
   test('a note holding the exact identifier beats one holding only its parts', () => {
     const pair = {
       'exact.md': 'The tag is cut by release-please.',

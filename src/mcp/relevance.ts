@@ -180,7 +180,7 @@ const JOINER = /[._:/-]/
 const RUNS = /[a-z0-9]+(?:[._:/-][a-z0-9]+)*/gi
 
 /** A lowercase letter followed by an uppercase one: the seam inside camelCase. */
-const CAMEL = /([a-z])([A-Z])/g
+const CAMEL = /(?<=[a-z])(?=[A-Z])/
 
 /**
  * Whether a token is a compound identifier, kept verbatim and never stemmed or
@@ -209,22 +209,26 @@ function tokenizeInto(s: string, out: string[], keep: (word: string) => boolean)
   let words = 0
   for (const original of s.match(RUNS) ?? []) {
     const lower = original.toLowerCase()
-    if (!JOINER.test(lower) && !/[a-z][A-Z]/.test(original)) {
+    const compound = JOINER.test(lower)
+    if (!compound && !CAMEL.test(original)) {
       if (keep(lower)) {
         out.push(stemTerm(lower))
         words++
       }
       continue
     }
-    const parts = original
-      .replace(CAMEL, '$1 $2')
-      .toLowerCase()
-      .split(/[ ._:/-]/)
-    if (parts.length > 1) out.push(JOINER.test(lower) ? lower : stemTerm(lower))
-    for (const part of parts) {
-      if (!keep(part)) continue
-      out.push(stemTerm(part))
-      words++
+    if (compound) out.push(lower)
+    for (const component of original.split(JOINER)) {
+      const parts = component.split(CAMEL)
+      // Keep getX searchable as getx even inside src/getX.ts. Only the
+      // word parts below count toward the field length.
+      if (parts.length > 1) out.push(stemTerm(component.toLowerCase()))
+      for (const part of parts) {
+        const word = part.toLowerCase()
+        if (!keep(word)) continue
+        out.push(stemTerm(word))
+        words++
+      }
     }
   }
   return words
