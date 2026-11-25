@@ -8,14 +8,8 @@
  * example Claude Code's auto-memory `metadata:` nested map) survives a
  * round-trip untouched instead of being dropped or flattened.
  *
- * The block is `---\n…\n---\n` at offset 0, closing at the first later line that
- * is exactly `---` (trailing blanks allowed), which is the same shape
- * `src/mcp/tools.ts` strips before it splits a body into regions and the shape
- * `src/mcp/relevance.ts` reads `description:` out of. A body that starts with
- * `---` and never closes has no frontmatter. The one place this parser is more
- * generous than the tools.ts regex is an empty block (`---\n---\n`), which the
- * regex rejects and this module accepts, so that its own serializer output
- * always parses.
+ * Parsing and recall share the delimiter rules in frontmatter-block.ts.
+ * Only the header is split into lines. The body is retained byte-for-byte.
  *
  * Accepted line forms (anything else is opaque, see below):
  *   key: scalar            key: "quoted"  /  key: 'quoted'   (\" and '' escapes)
@@ -32,12 +26,8 @@
  * lines before the first key), in source order within each run. The serializer
  * re-emits each run immediately after its anchor key, so the lines travel with
  * the key they followed even though known keys are re-ordered; runs whose
- * anchor key is gone are emitted last. One exception keeps the ranker honest:
- * `id`, `type` and `description` are always the first three lines with nothing
- * between them, and the runs anchored to them (plus the top run) come right
- * after. `relevance.ts` matches `description:` with an unanchored,
- * case-insensitive regex over the whole block, so `description:` must be the
- * first line that can contain that substring and must appear exactly once.
+ * anchor key is gone are emitted last. For compatibility with existing notes,
+ * the header keys id, type and description stay together at the front.
  *
  * Serializer key order: id, type, description, name, tags, created, updated,
  * agent, session, supersedes, superseded_by, expires, locked, status, deleted,
@@ -73,6 +63,10 @@
 
 import { randomBytes } from 'node:crypto'
 import { InvalidNameError, validateEntryKey } from '../namespace.ts'
+
+import { matchFrontmatter } from './frontmatter-block.ts'
+
+export { stripFrontmatter } from './frontmatter-block.ts'
 
 export type FmValue = string | boolean | string[]
 
@@ -147,7 +141,6 @@ const KEY_RE = /^[A-Za-z_][\w-]*$/
 const KEY_LINE_RE = /^([A-Za-z_][\w-]*):(?:[ \t]+(.*))?$/
 const LIST_ITEM_RE = /^[ \t]*-[ \t]+(.*)$/
 const INDENTED_RE = /^[ \t]+\S/
-const DELIM_RE = /^---[ \t]*$/
 const TAG_RE = /^[a-z0-9][a-z0-9-]*$/
 const DATE_RE = /^(\d{4})-(\d{2})-(\d{2})$/
 const MAX_TAGS = 8
@@ -161,23 +154,10 @@ const MAX_TAGS = 8
  * (no opening `---` line, or an opening line that never closes).
  */
 export function parseFrontmatter(content: string): Frontmatter | null {
-  const open = /^---[ \t]*\r?\n/.exec(content)
-  if (!open) return null
-  const after = content.slice(open[0].length)
-  const rawLines = after.split('\n')
-  let close = -1
-  for (let i = 0; i < rawLines.length; i++) {
-    if (DELIM_RE.test(stripCr(rawLines[i]))) {
-      close = i
-      break
-    }
-  }
-  if (close < 0) return null
-  const lines = rawLines.slice(0, close).map(stripCr)
-  // Byte offset of the first body character: the closing line plus its newline.
-  let consumed = open[0].length
-  for (let i = 0; i <= close; i++) consumed += rawLines[i].length + 1
-  const body = consumed > content.length ? '' : content.slice(consumed)
+  const block = matchFrontmatter(content)
+  if (!block) return null
+  const lines = block[1] === undefined ? [] : block[1].split(/\r?\n/)
+  const body = content.slice(block[0].length)
 
   const fields = new Map<string, FmValue>()
   const opaque = new Map<string, string[]>()
@@ -199,64 +179,50 @@ export function parseFrontmatter(content: string): Frontmatter | null {
     }
     const key = m[1]
     const rawValue = m[2] === undefined ? '' : m[2].trimEnd()
-    // Look ahead: continuation lines decide whether this is a flat entry.
-    let j = i + 1
-    while (j < lines.length && INDENTED_RE.test(lines[j])) j++
-    const hasContinuation = j > i + 1
-    let value: FmValue | undefined
-    if (rawValue === '') {
-      // `key:` alone: an empty scalar, a block list, or a nested map (opaque).
-      let k = i + 1
-      if (k >= lines.length || !isBlockLine(lines[k])) {
-        value = ''
-        j = k
-      } else {
-        const items: string[] = []
-        let listOk = true
-        while (k < lines.length && isBlockLine(lines[k])) {
-          const item = LIST_ITEM_RE.exec(lines[k])
-          const parsed = item ? parseScalar(item[1].trimEnd()) : undefined
-          if (parsed === undefined) {
-            listOk = false
-            break
-          }
-          items.push(String(parsed))
-          k++
-        }
-        if (listOk) value = items
-        while (k < lines.length && isBlockLine(lines[k])) k++
-        j = k
+    // A blank or comment may separate a YAML key from its nested value, or
+    // interrupt a list. Preserve that whole entry when it exceeds our subset.
+    let end = i + 1
+    let gap = false
+    let interrupted = false
+    for (let next = end; next < lines.length; next++) {
+      const continuation = lines[next]
+      if (/^[ \t]*(?:#.*)?$/.test(continuation)) {
+        gap = true
+        continue
       }
-    } else if (hasContinuation) {
-      value = undefined // multi-line scalar or block scalar: opaque
-    } else {
+      if (!isBlockLine(continuation)) break
+      end = next + 1
+      if (gap) interrupted = true
+    }
+
+    let value: FmValue | undefined
+    if (end === i + 1) {
       value = parseValue(rawValue)
+    } else if (rawValue === '' && !interrupted) {
+      const items: string[] = []
+      for (let k = i + 1; k < end; k++) {
+        const item = LIST_ITEM_RE.exec(lines[k])
+        const parsed = item && parseScalar(item[1].trimEnd())
+        if (parsed == null) break
+        items.push(String(parsed))
+      }
+      if (items.length === end - i - 1) value = items
     }
     if (value === undefined) {
-      for (let k = i; k < j; k++) keep(lines[k])
-      i = j
+      for (let k = i; k < end; k++) keep(lines[k])
+      i = end
       continue
     }
     if (!fields.has(key)) fields.set(key, value)
     anchor = key
-    i = j
+    i = end
   }
   return { fields, opaque, body }
-}
-
-/** The note without its frontmatter block; the whole note when it has none. */
-export function stripFrontmatter(content: string): string {
-  const fm = parseFrontmatter(content)
-  return fm ? fm.body : content
 }
 
 /** A continuation line under a bare `key:`: indented, or a column-0 `- item`. */
 function isBlockLine(line: string): boolean {
   return INDENTED_RE.test(line) || /^-[ \t]/.test(line)
-}
-
-function stripCr(line: string): string {
-  return line.endsWith('\r') ? line.slice(0, -1) : line
 }
 
 /** A value after `key: `. Undefined means "not in the subset, keep opaque". */
@@ -362,7 +328,7 @@ export function serializeFrontmatter(
   const emitRun = (anchor: string) => {
     const run = runs.get(anchor)
     if (run) {
-      out.push(...run)
+      for (const line of run) out.push(line)
       emitted.add(anchor)
     }
   }
@@ -386,7 +352,8 @@ export function serializeFrontmatter(
     emitRun(key)
   }
   for (const anchor of runs.keys()) if (!emitted.has(anchor)) emitRun(anchor)
-  out.push(...tail, '---')
+  for (const line of tail) out.push(line)
+  out.push('---')
   return `${out.join('\n')}\n`
 }
 

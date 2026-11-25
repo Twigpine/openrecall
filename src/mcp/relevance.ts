@@ -24,6 +24,10 @@
  * back empty rather than with whatever scored highest among the noise.
  */
 
+import { matchFrontmatter } from './frontmatter-block.ts'
+
+export { stripFrontmatter as stripFrontmatterText } from './frontmatter-block.ts'
+
 export type MemoryEntry = {
   key: string
   content: string
@@ -286,20 +290,14 @@ export function tokenizeAll(s: string): string[] {
  * regions. One definition, so what the ranker calls the body is what the
  * caller is shown.
  */
-const FRONTMATTER = /^---[ \t]*\r?\n(?:([\s\S]*?)\r?\n)??---[ \t]*(?:\r?\n|$)/
 export function splitFrontmatterText(content: string) {
-  const block = FRONTMATTER.exec(content)
+  const block = matchFrontmatter(content)
   const metadata = block?.[1] ?? ''
   return {
     body: block ? content.slice(block[0].length) : content,
     name: /^name:[ \t]*(.+)/im.exec(metadata)?.[1] ?? '',
     description: /^description:[ \t]*(.+)/im.exec(metadata)?.[1] ?? '',
   }
-}
-
-export function stripFrontmatterText(content: string): string {
-  const block = FRONTMATTER.exec(content)
-  return block ? content.slice(block[0].length) : content
 }
 
 /**

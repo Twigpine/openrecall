@@ -4,13 +4,9 @@
  * A memory note is data the agent wrote in an earlier session, but once it is
  * pasted into a tool result it is read like any other text, so a note that
  * contains `<system-reminder>` or a bidi override can imitate the host's own
- * markup or hide what it says. Claude Code 2.1.284 added exactly this guard for
- * its own `MEMORY.md` and recalled notes ("invisible characters and tags that
- * imitate Claude Code's own markup are neutralized ... before they reach
- * Claude"), and this module is the OpenRecall port of it, applied by the tool
- * layer to recall regions, search snippets, index lines, doctor output and
- * save-gate candidate text. `memory_get` stays verbatim: its contract is
- * byte-for-byte data.
+ * markup or hide what it says. This formatter is intended for derived recall
+ * regions and snippets. Callers returning the stored body verbatim should
+ * retain the original string.
  *
  * Two rules, in this order (so a tag split by an invisible character is still
  * caught by the second):

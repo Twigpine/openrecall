@@ -20,6 +20,7 @@ import {
   TYPES,
   ulid,
 } from '../src/mcp/frontmatter.ts'
+import { splitFrontmatterText } from '../src/mcp/relevance.ts'
 import { CORPUS } from './recall-corpus.ts'
 
 const ctx: StampContext = {
@@ -208,6 +209,18 @@ describe('parseFrontmatter', () => {
     ).toBe(true)
     const again = parseFrontmatter(content)!
     expect(again.opaque.get('description')).toEqual(['metadata:', '  type: project'])
+  })
+
+  test('stamping retains nested metadata and lists interrupted by comments', () => {
+    const metadata =
+      'metadata:\n\n  # local convention\n  team: support\nlabels:\n  - first\n# keep this explanation\n  - second'
+    const note = `---\nname: existing\n${metadata}\n---\nbody`
+    const stamped = stampForSave(null, note, ctx)
+    expect(stamped.content).toContain(`${metadata}\n`)
+    const parsed = parseFrontmatter(stamped.content)!
+    expect(parsed.fields.has('metadata')).toBe(false)
+    expect(parsed.fields.has('labels')).toBe(false)
+    expect(parsed.body).toBe('body')
   })
 
   test('a duplicate accepted key keeps the first value and drops the rest', () => {
@@ -580,9 +593,7 @@ describe('stampForSave', () => {
     const hits = lines.filter(l => /description:/i.test(l))
     expect(lines.filter(l => l.startsWith('description:'))).toHaveLength(1)
     expect(hits[0]).toBe('description: the real one')
-    // Exactly what relevance.ts's unanchored regex sees.
-    const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)!
-    expect(/description:\s*(.+)/i.exec(m[1])![1]).toBe('the real one')
+    expect(splitFrontmatterText(content).description).toBe('the real one')
     // And the stamped header never interleaves anything between id, type and
     // description, so a leading opaque comment cannot get in front either.
     const commented = stampForSave(
@@ -612,21 +623,16 @@ describe('stampForSave', () => {
 })
 
 describe('stripFrontmatter', () => {
-  /** Copy of the regex `regionFor` strips with in src/mcp/tools.ts. */
-  function toolsStrip(content: string): string {
-    const m = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(content)
-    return m ? content.slice(m[0].length) : content
-  }
-
-  test('agrees with the tools.ts regex on every corpus entry', () => {
+  test('agrees with the recall ranker on every corpus entry', () => {
     for (const [key, content] of Object.entries(CORPUS)) {
-      expect(stripFrontmatter(content)).toBe(toolsStrip(content))
+      expect(stripFrontmatter(content)).toBe(splitFrontmatterText(content).body)
       if (key !== 'MEMORY.md') expect(stripFrontmatter(content)).not.toBe(content)
     }
   })
 
-  test('agrees on the edge shapes the regex covers', () => {
+  test('agrees on empty, incomplete and CRLF headers', () => {
     for (const c of [
+      '---\n---\nfirst body line\n---\ndivider',
       '---\nx: 1\n---\nbody',
       '---\nx: 1\n---',
       '---\t\r\nx: 1\r\n--- \r\nbody\r\n',
@@ -635,7 +641,7 @@ describe('stripFrontmatter', () => {
       '---\n\n---\nbody',
       '',
     ]) {
-      expect(stripFrontmatter(c)).toBe(toolsStrip(c))
+      expect(stripFrontmatter(c)).toBe(splitFrontmatterText(c).body)
     }
   })
 })
