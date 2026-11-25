@@ -62,8 +62,13 @@ export class FsBlobStore implements BlobStore {
     const dest = this.full(path)
     await mkdir(dirname(dest), { recursive: true, mode: this.dirMode })
     const tmp = join(dirname(dest), `.tmp-${process.pid}-${tempCounter++}`)
-    await writeFile(tmp, bytes, { mode: this.fileMode })
-    await rename(tmp, dest)
+    try {
+      await writeFile(tmp, bytes, { mode: this.fileMode })
+      await rename(tmp, dest)
+    } catch (err) {
+      await rm(tmp, { force: true }).catch(() => {})
+      throw err
+    }
   }
 
   async delete(path: string): Promise<void> {

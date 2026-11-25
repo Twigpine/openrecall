@@ -317,7 +317,7 @@ describe('recall bench (2,000 entries, committed baseline)', () => {
       const is = now[m.key]
       if (was === null || is === null) continue
       const bad =
-        m.better === 'higher' ? is < was - baseline.minEffect : is > was + baseline.minEffect
+        m.better === 'higher' ? is <= was - baseline.minEffect : is >= was + baseline.minEffect
       if (bad)
         regressions.push(`${m.label} ${fmt(is)} vs baseline ${fmt(was)} (${m.better} is better)`)
     }

@@ -114,7 +114,18 @@ export function setTimingSink(next: TimingSink): void {
 }
 
 export function logTiming(fields: Omit<TimingLine, 'timestamp'>): void {
-  const line: TimingLine = { timestamp: new Date().toISOString(), ...fields }
+  const { tool, fetchMs, decryptMs, rankMs, formatMs, totalMs, entries, bytes } = fields
+  const line: TimingLine = {
+    timestamp: new Date().toISOString(),
+    tool,
+    fetchMs,
+    decryptMs,
+    rankMs,
+    formatMs,
+    totalMs,
+    entries,
+    bytes,
+  }
   if (timingSink) {
     timingSink(line)
     return

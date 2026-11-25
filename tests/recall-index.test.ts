@@ -142,14 +142,16 @@ describe('fingerprints', () => {
     expect(idx.upsert(docOf('a.md', content))).toBe('added')
     const before = idx.doc('a.md')
     expect(before).toBeDefined()
+    const tf = before?.tf
+    const len = before?.len
     // Same fingerprint, different content object: nothing is re-read. The
     // carried fields are refreshed, the statistics are not touched.
     expect(idx.upsert({ ...docOf('a.md', content), content: `${content}`, updatedAt: 'now' })).toBe(
       'unchanged',
     )
     const after = idx.doc('a.md')
-    expect(after?.tf).toBe(before?.tf as Map<string, number | number[]>)
-    expect(after?.len).toBe(before?.len as number[])
+    expect(after?.tf).toBe(tf as Map<string, number | number[]>)
+    expect(after?.len).toBe(len as number[])
     expect(after?.updatedAt).toBe('now')
   })
 

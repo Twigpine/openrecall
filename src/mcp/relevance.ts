@@ -275,25 +275,20 @@ export function tokenizeAll(s: string): string[] {
  * regions. One definition, so what the ranker calls the body is what the
  * caller is shown.
  */
+const FRONTMATTER = /^---[ \t]*\r?\n([\s\S]*?)\r?\n---[ \t]*(?:\r?\n|$)/
+export function splitFrontmatterText(content: string) {
+  const block = FRONTMATTER.exec(content)
+  const metadata = block?.[1] ?? ''
+  return {
+    body: block ? content.slice(block[0].length) : content,
+    name: /^name:[ \t]*(.+)/im.exec(metadata)?.[1] ?? '',
+    description: /^description:[ \t]*(.+)/im.exec(metadata)?.[1] ?? '',
+  }
+}
+
 export function stripFrontmatterText(content: string): string {
-  const m = /^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*(?:\r?\n|$)/.exec(content)
-  return m ? content.slice(m[0].length) : content
-}
-
-/** Pull the `description:` value out of YAML-ish frontmatter, if present. */
-function frontmatterDescription(content: string): string {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  if (!m) return ''
-  const d = /description:\s*(.+)/i.exec(m[1])
-  return d ? d[1] : ''
-}
-
-/** Pull the `name:` value out of YAML-ish frontmatter, if present. */
-function frontmatterName(content: string): string {
-  const m = /^---\r?\n([\s\S]*?)\r?\n---/.exec(content)
-  if (!m) return ''
-  const n = /(?:^|\n)name:[ \t]*(.+)/i.exec(m[1])
-  return n ? n[1] : ''
+  const block = FRONTMATTER.exec(content)
+  return block ? content.slice(block[0].length) : content
 }
 
 /**
@@ -353,7 +348,7 @@ type Doc = {
 
 /** The five token lists of a note and the word count of each. */
 function fieldsOf(key: string, content: string): { tokens: string[]; words: number }[] {
-  const body = stripFrontmatterText(content)
+  const { body, name, description } = splitFrontmatterText(content)
   const headings: string[] = []
   for (const line of body.split('\n')) if (/^#{1,6}\s/.test(line)) headings.push(line)
   const out: { tokens: string[]; words: number }[] = []
@@ -362,14 +357,15 @@ function fieldsOf(key: string, content: string): { tokens: string[]; words: numb
     const words = tokenizeInto(text, tokens, topical)
     out.push({ tokens, words })
   }
-  // Keys are split on `/` first so a compound is one path segment
-  // (`deploy.md`), never the whole path.
+  // Count words by segment, then index the full path as an exact compound.
   const keyTokens: string[] = []
   let keyWords = 0
   for (const segment of key.split('/')) keyWords += tokenizeInto(segment, keyTokens, topical)
+  if (key.includes('/'))
+    for (const token of tokenize(key)) if (token.includes('/')) keyTokens.push(token)
   out.push({ tokens: keyTokens, words: keyWords })
-  field(frontmatterName(content))
-  field(frontmatterDescription(content))
+  field(name)
+  field(description)
   field(headings.join('\n'))
   field(body)
   return out

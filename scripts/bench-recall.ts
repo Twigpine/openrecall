@@ -71,7 +71,8 @@ let writeQuestions = false
 
 const argv = process.argv.slice(2)
 for (let i = 0; i < argv.length; i++) {
-  const [flag, inline] = argv[i].split('=', 2)
+  const [flag, ...tail] = argv[i].split('=')
+  const inline = tail.length ? tail.join('=') : undefined
   const value = () => {
     const v = inline ?? argv[++i]
     if (v === undefined) usage(`${flag} needs a value`)
@@ -85,8 +86,10 @@ for (let i = 0; i < argv.length; i++) {
       break
     }
     case '--seed': {
-      const n = Number(value())
-      if (!Number.isInteger(n) || n < 0) usage('--seed must be a non-negative integer')
+      const raw = value()
+      const n = Number(raw)
+      if (!/^\d+$/.test(raw) || !Number.isSafeInteger(n))
+        usage('--seed must be a non-negative integer')
       seed = n
       break
     }

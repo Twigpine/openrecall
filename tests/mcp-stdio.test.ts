@@ -70,7 +70,7 @@ async function stderrLine(
   pred: (line: string) => boolean,
 ): Promise<string | undefined> {
   for (let i = 0; i < 40; i++) {
-    const hit = lines.join('').split('\n').find(pred)
+    const hit = lines.join('').split('\n').slice(0, -1).find(pred)
     if (hit) return hit
     await new Promise(r => setTimeout(r, 50))
   }

@@ -124,15 +124,15 @@ function mirrored(
     url,
     passphrase: PASSPHRASE,
     cache: true,
-    mirror: new FsMirror(cacheDir(home)),
+    mirror: new FsMirror(cacheDir(home, base)),
     ...extra,
   })
 }
 
 const blobPath = (home: string, ns: string, hash: string) =>
-  join(cacheDir(home), contentPath(namespaceSlug(ns), hash))
+  join(cacheDir(home, base), contentPath(namespaceSlug(ns), hash))
 const manifestPath = (home: string, ns: string) =>
-  join(cacheDir(home), 'ns', namespaceSlug(ns), 'mirror.json')
+  join(cacheDir(home, base), 'ns', namespaceSlug(ns), 'mirror.json')
 
 describe('the incremental pull', () => {
   for (const bulk of [true, false]) {
@@ -216,6 +216,112 @@ describe('the incremental pull', () => {
     expect(cached.entries).toEqual(before.entries)
     const fresh = await mirrored(base, home).pull(ns)
     expect(fresh.entries).toEqual({ 'a.md': 'after', 'new.md': 'new' })
+  })
+
+  test('a body-request disconnect uses the last complete mirror only when requested', async () => {
+    const ns = 'user:sync-body-outage'
+    const home = temp()
+    const writer = mirrored(base, home)
+    await writer.push(ns, { 'a.md': 'before' })
+    await writer.pull(ns)
+    await writer.push(ns, { 'a.md': 'after' })
+    const remote = mirrored(base, home, {
+      fetch: async (url, init) => {
+        if (new URL(url).searchParams.get('view') === 'entries') throw new Error('network lost')
+        return fetch(url, init)
+      },
+    })
+    await expect(remote.pull(ns)).rejects.toThrow('network lost')
+    const offline = await remote.pull(ns, { allowStale: true })
+    expect(offline.entries).toEqual({ 'a.md': 'before' })
+    expect(offline.served?.source).toBe('mirror')
+  })
+
+  test('a failed mirror publication is repaired from warm plaintext on the next pull', async () => {
+    const ns = 'user:sync-mirror-retry'
+    const home = temp()
+    const disk = new FsMirror(cacheDir(home, base))
+    const writer = mirrored(base, home, { mirror: disk })
+    await writer.push(ns, { 'a.md': 'before' })
+    await writer.pull(ns)
+    await writer.push(ns, { 'a.md': 'after' })
+    const put = disk.putBlob.bind(disk)
+    disk.putBlob = async () => {
+      throw new Error('disk busy')
+    }
+    expect((await writer.pull(ns)).entries).toEqual({ 'a.md': 'after' })
+    expect((await disk.readManifest(ns))?.version).toBe(1)
+    disk.putBlob = put
+    await writer.pull(ns)
+    const offline = mirrored(base, home, {
+      fetch: async () => {
+        throw new Error('offline')
+      },
+    })
+    expect((await offline.pull(ns, { allowStale: true })).entries).toEqual({ 'a.md': 'after' })
+  })
+
+  test('independent disk mirrors serialize GC and manifest publication', async () => {
+    const ns = 'user:sync-gc'
+    const home = temp()
+    const first = new FsMirror(cacheDir(home, base))
+    const second = new FsMirror(cacheDir(home, base))
+    const a = mirrored(base, home, { mirror: first })
+    const b = mirrored(base, home, { mirror: second })
+    await a.push(ns, { 'a.md': 'before' })
+    for (let i = 0; i < 31; i++) await a.pull(ns)
+    const reached = Promise.withResolvers<void>()
+    const resume = Promise.withResolvers<void>()
+    const list = first.listBlobs.bind(first)
+    first.listBlobs = async n => {
+      reached.resolve()
+      await resume.promise
+      return list(n)
+    }
+    const collecting = a.pull(ns)
+    await reached.promise
+    try {
+      await b.push(ns, { 'b.md': 'after' })
+      const entered = Promise.withResolvers<void>()
+      const lock = second.withWriteLock.bind(second)
+      second.withWriteLock = async (n, write) => {
+        entered.resolve()
+        return lock(n, write)
+      }
+      const publishing = b.pull(ns)
+      await entered.promise
+      resume.resolve()
+      await Promise.all([collecting, publishing])
+    } finally {
+      resume.resolve()
+    }
+    const offline = mirrored(base, home, {
+      fetch: async () => {
+        throw new Error('offline')
+      },
+    })
+    expect((await offline.pull(ns, { allowStale: true })).entries).toEqual({
+      'a.md': 'before',
+      'b.md': 'after',
+    })
+  })
+
+  test('a warm cache binds ciphertext to its entry key', async () => {
+    const ns = 'user:sync-key-binding'
+    const writer = mirrored(base, temp())
+    await writer.push(ns, { 'a.md': 'alpha' })
+    const first = await writer.pull(ns)
+    const store = getStore()
+    const blob = await store.get(contentPath(namespaceSlug(ns), first.hashes?.['a.md'] as string))
+    const { upsert } = await import('../src/memory.ts')
+    await upsert(
+      ns,
+      namespaceSlug(ns),
+      'local',
+      { entries: { 'b.md': Buffer.from(blob as Uint8Array).toString('base64') } },
+      new Date().toISOString(),
+    )
+    await expect(writer.pull(ns)).rejects.toBeInstanceOf(OpenRecallDecryptError)
   })
 
   test('a second pull after a foreign write fetches exactly the changed keys', async () => {
@@ -355,6 +461,49 @@ describe('the incremental pull', () => {
     expect(got.text).not.toContain('alpha')
   })
 
+  test('a malformed live manifest or an unreadable refusal cannot trigger offline recall', async () => {
+    const ns = 'user:sync-manifest-shape'
+    const home = temp()
+    const writer = mirrored(base, home)
+    await writer.push(ns, { 'a.md': 'alpha' })
+    await writer.pull(ns)
+    for (const body of ['{', 'null', '{}', '{"version":1,"entryChecksums":[]}']) {
+      const c = mirrored(base, home, { fetch: async () => new Response(body) })
+      await expect(c.pull(ns, { allowStale: true })).rejects.toBeInstanceOf(OpenRecallProtocolError)
+    }
+    const refused = mirrored(base, home, {
+      fetch: async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new DOMException('body timed out', 'TimeoutError'))
+            },
+          }),
+          { status: 403 },
+        ),
+    })
+    const error = await refused.pull(ns, { allowStale: true }).catch(e => e)
+    expect(error).toBeInstanceOf(OpenRecallHttpError)
+    expect(error.status).toBe(403)
+  })
+
+  test('offline recall refuses an incomplete mirror and repairs it on reconnect', async () => {
+    const ns = 'user:sync-incomplete'
+    const home = temp()
+    const writer = mirrored(base, home)
+    await writer.push(ns, { 'a.md': 'alpha', 'b.md': 'beta' })
+    const first = await writer.pull(ns)
+    rmSync(blobPath(home, ns, first.hashes?.['b.md'] as string))
+    const offline = mirrored(base, home, {
+      fetch: async () => {
+        throw new TypeError('offline')
+      },
+    })
+    await expect(offline.pull(ns, { allowStale: true })).rejects.toThrow('offline')
+    await mirrored(base, home).pull(ns)
+    expect((await offline.pull(ns, { allowStale: true })).entries).toEqual(first.entries)
+  })
+
   test('a 401 is never served from the mirror', async () => {
     const ns = 'user:sync-refused'
     const home = temp()
@@ -386,7 +535,7 @@ describe('the incremental pull', () => {
       })
       const c = mirrored(base, home)
       const r = await c.pull(ns)
-      const root = cacheDir(home)
+      const root = cacheDir(home, base)
       const nsDir = join(root, 'ns', namespaceSlug(ns))
       for (const dir of [root, join(root, 'ns'), nsDir, join(nsDir, 'blobs')]) {
         expect(`${dir}: ${(statSync(dir).mode & 0o777).toString(8)}`).toBe(`${dir}: 700`)
@@ -568,6 +717,33 @@ describe('the bulk entries read', () => {
     expect((await b.pull(ns)).entries['b.md']).toBe('from-a')
   })
 
+  test('bulk reads require one response for every requested slot, including repeated keys', async () => {
+    const ns = 'user:batch-slots'
+    let labels = ['a.md']
+    const c = new OpenRecallClient({
+      url: base,
+      passphrase: PASSPHRASE,
+      fetch: async () => {
+        const frames = labels.map(key => ({
+          meta: { key, hash: null, size: 0, updatedAt: null, status: 'not_found' as const },
+          bytes: new Uint8Array(),
+        }))
+        const body = encodeFrames(
+          { namespace: ns, version: 1, lastModified: 'x', erasure: 'erases', count: frames.length },
+          frames,
+        )
+        return new Response(body as unknown as BodyInit, {
+          headers: { 'x-openrecall-frames': '1' },
+        })
+      },
+    })
+    await expect(c.entries(ns, ['a.md', 'b.md'])).rejects.toBeInstanceOf(OpenRecallProtocolError)
+    labels = ['a.md', 'a.md']
+    await expect(c.entries(ns, ['a.md', 'b.md'])).rejects.toBeInstanceOf(OpenRecallProtocolError)
+    labels = ['a.md']
+    expect((await c.entries(ns, ['a.md', 'a.md'])).statuses).toEqual({ 'a.md': 'not_found' })
+  })
+
   test('a batch labeled for a different namespace is rejected before using its entries', async () => {
     const response = (namespace: string) =>
       encodeFrames({ namespace, version: 1, lastModified: 'x', erasure: 'erases', count: 1 }, [
@@ -706,7 +882,7 @@ describe('the fs mirror and the fs store', () => {
     await new OpenRecallClient({ url: base, passphrase: PASSPHRASE }).push(ns, { 'a.md': 'alpha' })
     const home = temp()
     // The cache root is a file, so every directory creation under it fails.
-    writeFileSync(cacheDir(home), 'not a directory')
+    writeFileSync(join(home, 'cache'), 'not a directory')
     const lines: string[] = []
     const realError = console.error
     console.error = (...args: unknown[]) => lines.push(args.map(String).join(' '))
@@ -747,7 +923,7 @@ describe('makeClient wiring', () => {
     )) as unknown as Internals
     expect(remote.cacheEnabled).toBe(true)
     expect(remote.mirror).toBeInstanceOf(FsMirror)
-    expect((remote.mirror as FsMirror).root).toBe(cacheDir(home))
+    expect((remote.mirror as FsMirror).root).toBe(cacheDir(home, base))
 
     const off = (await makeClient(
       resolveSettings(env(home, { OPENRECALL_URL: base, OPENRECALL_CACHE: 'off' })),
@@ -756,6 +932,30 @@ describe('makeClient wiring', () => {
     expect(off.mirror).toBeUndefined()
     expect(resolveSettings(env(home, { OPENRECALL_CACHE: 'off' })).cache).toBe(false)
     expect(resolveSettings(env(home)).cache).toBe(true)
+  })
+
+  test('switching API keys uses a separate offline cache on the same endpoint', async () => {
+    const home = temp()
+    const clientFor = async (apiKey: string) =>
+      (await makeClient(
+        resolveSettings(env(home, { OPENRECALL_URL: base, OPENRECALL_API_KEY: apiKey })),
+      )) as unknown as Internals
+    const first = (await clientFor('first-account')).mirror as FsMirror
+    const other = (await clientFor('second-account')).mirror as FsMirror
+    expect(first.root).not.toBe(other.root)
+    expect(first.root).toBe(((await clientFor('first-account')).mirror as FsMirror).root)
+  })
+
+  test('offline memory is scoped to the configured remote endpoint', async () => {
+    const home = temp()
+    const ns = 'user:sync-origin'
+    const first = await makeClient(resolveSettings(env(home, { OPENRECALL_URL: base })))
+    await first.push(ns, { 'note.md': 'belongs to the first server' })
+    await first.pull(ns)
+    const other = proxy(base)
+    const second = await makeClient(resolveSettings(env(home, { OPENRECALL_URL: other.url })))
+    other.stop()
+    await expect(second.pull(ns, { allowStale: true })).rejects.toThrow()
   })
 
   test('local mode reads the bulk view in-process, binary body and all, without the lock', async () => {

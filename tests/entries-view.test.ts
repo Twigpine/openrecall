@@ -171,6 +171,12 @@ describe('entries view: refusals and per-entry statuses', () => {
     expect(((await res.json()) as { error: { code: string } }).error.code).toBe('empty')
   })
 
+  test('a duplicate key is refused before reading the namespace', async () => {
+    const res = await post('user:entries-duplicates', { keys: ['a.md', 'a.md'] })
+    expect(res.status).toBe(400)
+    expect((await res.json()).error.code).toBe('bad_request')
+  })
+
   test('absence, drift and a bad key are statuses on their own frames', async () => {
     const ns = 'user:entries-statuses'
     const nsSlug = namespaceSlug(ns)

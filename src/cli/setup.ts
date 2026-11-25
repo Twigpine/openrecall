@@ -131,7 +131,11 @@ export function launchCommand(opts: LaunchOptions = {}): Launcher {
     return pinned({ command: execPath, args: [script, 'mcp'] }, 'installed script')
   }
 
-  const installed = findOnPath('openrecall', env, p => !inThrowawayCache(p))
+  const installed = findOnPath(
+    'openrecall',
+    env,
+    p => !inThrowawayCache(p) && (p.endsWith('.js') ? isReadableScript(p) : isExecutableFile(p)),
+  )
   if (installed) {
     return installed.endsWith('.js')
       ? pinned({ command: execPath, args: [installed, 'mcp'] }, 'global install')
@@ -142,7 +146,17 @@ export function launchCommand(opts: LaunchOptions = {}): Launcher {
 
 export const isPortable = (l: Launch) => l.command === 'npx'
 
+function isReadableScript(p: string): boolean {
+  try {
+    accessSync(p, constants.R_OK)
+    return statSync(p).isFile()
+  } catch {
+    return false
+  }
+}
+
 function isExecutableFile(p: string): boolean {
+  if (process.platform === 'win32' && !/\.(exe|com)$/i.test(p)) return false
   try {
     accessSync(p, constants.X_OK)
     return statSync(p).isFile()

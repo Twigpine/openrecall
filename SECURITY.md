@@ -42,7 +42,8 @@ The passphrase lives in `~/.openrecall/config.json` (created owner-only, 0600)
 or the environment, and is read only by the local CLI / MCP server process.
 Agent configs written by `openrecall setup` never contain it.
 
-In remote mode the client also keeps a cache under `~/.openrecall/cache`: the
+In remote mode the client also keeps a cache under `~/.openrecall/cache`. Each
+remote endpoint selects its own directory. Within it are the
 ciphertext blobs it has already fetched, named by their own hash, plus one
 `mirror.json` per namespace holding entry keys, ciphertext hashes, sizes and
 timestamps. That is exactly the metadata the server sees and nothing more:
@@ -83,8 +84,8 @@ We're especially interested in reports that break these properties:
   removed on the write that deletes or replaces it (both shipped drivers,
   `fs` and `s3`, report `erasure: 'erases'`). If that removal fails, or a
   crashed write left a blob no entry names, a sweep of the namespace's blob
-  prefix collects it at the latest within 32 further writes to that namespace
-  or at the first write after the next process start.
+  prefix is attempted within 32 further writes to that namespace or on its
+  first write after restart. Removal depends on successful storage operations.
 - **Metadata is visible to the host** (namespace ids, entry keys, sizes,
   timestamps) — see scope above. A future tier may hash entry keys.
 - **Single-instance hosted beta.** The hosted deployment runs one instance on

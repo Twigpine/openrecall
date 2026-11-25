@@ -154,7 +154,7 @@ export function encodeFrames(header: FramesHeader, frames: Frame[]): Uint8Array 
  * as anything but a string, a number or null.
  */
 export function decodeFrames(buf: Uint8Array): { header: FramesHeader; frames: Frame[] } {
-  const dec = new TextDecoder()
+  const dec = new TextDecoder('utf-8', { fatal: true })
   let at = 0
   const take = (what: string): Uint8Array => {
     if (at + 4 > buf.length) throw new FrameFormatError(`truncated before the length of ${what}`)

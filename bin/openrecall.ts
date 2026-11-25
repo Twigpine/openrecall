@@ -135,7 +135,7 @@ async function cmdStatus(timings: boolean) {
   // Remote mode only: local mode has no mirror, its data dir already is one.
   if (s.url !== LOCAL_URL && s.cache) {
     const { describeMirror } = await import('../src/cli/mirror.ts')
-    const m = await describeMirror(s.home, s.namespace)
+    const m = await describeMirror(s.home, s.url, s.namespace, s.apiKey)
     if (m)
       console.log(
         `cache      ${m.path} (${m.entries} ${m.entries === 1 ? 'entry' : 'entries'}, ${Math.round(m.bytes / 1024)} KB of ciphertext)`,
@@ -176,6 +176,7 @@ async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: 
   const probe = 'project conventions and user preferences'
   const sample = async () => {
     const r = await tools.recall(probe)
+    if (r.isError) throw new Error('recall failed during the timing probe')
     if (!r.timings) throw new Error('recall returned no timings')
     return r.timings
   }
@@ -185,10 +186,12 @@ async function printTimings(client: Awaited<ReturnType<typeof makeClient>>, ns: 
   const stages = ['fetch', 'decrypt', 'rank', 'format', 'total'] as const
   const sorted = (stage: (typeof stages)[number]) => warm.map(t => t[stage]).sort((a, b) => a - b)
   const median = (xs: number[]) => xs[Math.floor(xs.length / 2)] as number
-  // With eleven samples the 95th percentile is the second largest.
-  const p95 = (xs: number[]) => xs[Math.floor(0.95 * (xs.length - 1))] as number
+  // Nearest-rank percentile, matching the release benchmark.
+  const p95 = (xs: number[]) => xs[Math.ceil(0.95 * xs.length) - 1] as number
   const fmt = (ms: number) => `${ms.toFixed(1).padStart(8)} ms`
-  console.log(`\nrecall timings over ${cold.entries} entries, ${cold.bytes} bytes fetched per call`)
+  console.log(
+    `\nrecall timings over ${cold.entries} entries, ${cold.bytes} bytes fetched on the cold call`,
+  )
   console.log(
     `${'stage'.padEnd(8)}${'cold'.padStart(11)}${'warm p50'.padStart(11)}${'warm p95'.padStart(11)}`,
   )

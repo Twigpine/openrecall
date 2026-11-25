@@ -374,6 +374,9 @@ async function respond(req: Request, ctx: RequestContext): Promise<Response> {
           max_keys: max,
         })
       }
+      if (new Set(keys).size !== keys.length) {
+        return apiError('bad_request', 'the bulk view requires distinct entry keys', 400)
+      }
       const found = await getEntries(namespace, nsSlug, keys)
       if (found.status === 'no_namespace') {
         return apiError('empty', 'no memory for this namespace yet', 404)

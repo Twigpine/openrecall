@@ -42,7 +42,7 @@ export async function makeClient(
     ...(opts?.timeoutMs ? { timeoutMs: opts.timeoutMs } : {}),
     fetch: local ? await localFetch(s.dataDir) : undefined,
     cache: s.cache,
-    mirror: !local && s.cache ? new FsMirror(cacheDir(s.home)) : undefined,
+    mirror: !local && s.cache ? new FsMirror(cacheDir(s.home, s.url, s.apiKey)) : undefined,
   })
 }
 

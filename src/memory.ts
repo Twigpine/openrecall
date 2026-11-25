@@ -154,7 +154,9 @@ async function readEntryBytes(
     // path, the same way a missing blob does: one unreadable entry must not take
     // the whole read down with it.
   }
-  return bytes ?? (await store.get(entryPath(nsSlug, sha256Hex(key)))) ?? null
+  if (bytes) return bytes
+  const legacy = await store.get(entryPath(nsSlug, sha256Hex(key))).catch(() => null)
+  return legacy && sha256Prefixed(legacy) === hash ? legacy : null
 }
 
 /** Full view: fetch every ciphertext entry blob. */
@@ -615,6 +617,22 @@ async function reclaim(
     const live = new Set<string>()
     for (const meta of Object.values(m.entries)) live.add(contentPath(nsSlug, meta.hash))
     if (sweep) {
+      const legacyPrefix = entryPath(nsSlug, '')
+      const legacyPaths = await store.list(legacyPrefix)
+      if (legacyPaths.length) {
+        const legacyHashes = new Map(
+          Object.entries(m.entries).map(([key, meta]) => [
+            entryPath(nsSlug, sha256Hex(key)),
+            meta.hash,
+          ]),
+        )
+        for (const path of legacyPaths) {
+          const hash = legacyHashes.get(path)
+          const replacement = hash && (await store.get(contentPath(nsSlug, hash)))
+          if (!hash || (replacement && sha256Prefixed(replacement) === hash))
+            await store.delete(path)
+        }
+      }
       for (const path of await store.list(blobPrefix(nsSlug))) {
         if (!live.has(path)) await store.delete(path)
       }
@@ -630,11 +648,9 @@ async function reclaim(
       }
       for (const path of superseded) await store.delete(path)
     }
-    // Entries written before content addressing sit at a key-derived path the
-    // sweep above does not cover, and only a key the pre-write manifest knew
-    // can have one.
+    // Between sweeps remove the touched keys’ legacy copies immediately.
     for (const key of touched) {
-      if (prev[key] !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
+      if (!sweep && prev[key] !== undefined) await store.delete(entryPath(nsSlug, sha256Hex(key)))
     }
     counter.set(nsSlug, sweep ? 1 : (since ?? 0) + 1)
   } catch (err) {

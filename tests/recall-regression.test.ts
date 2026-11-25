@@ -41,7 +41,6 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -57,7 +56,7 @@ import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { ciphertextHash, OpenRecallClient } from '../client/index.ts'
 import { encodeFrames } from '../src/frames.ts'
-import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
+import { rankMemories, splitFrontmatterText, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import {
   BASELINE_RANK_MS,
@@ -235,33 +234,9 @@ describe('tuning-pair match arity', () => {
     ],
   }
 
-  /**
-   * The ranker's own frontmatter extraction, lifted out of its source. Same
-   * reason the stoplist is parsed rather than imported: `frontmatterDescription`
-   * is not exported from src/mcp/relevance.ts and this unit may not change
-   * src/. A second hand-written copy here would drift from the ranker exactly
-   * the way the corpus module's private stemmer did, and would then measure a
-   * description the ranker never saw.
-   */
-  const FM_SOURCE = /function frontmatterDescription\([\s\S]*?\n}/.exec(
-    readFileSync(join(REPO_ROOT, 'src/mcp/relevance.ts'), 'utf8'),
-  )
-  // Each branch starts with a distinct token: escape, character class, or other.
-  const FM_LITERAL_RE = /\/((?:\\.|\[[^\]]*\]|[^/\\[\n])+)\/([gimsuy]*)/g
-  const FM_LITERALS = [...(FM_SOURCE?.[0] ?? '').matchAll(FM_LITERAL_RE)].map(
-    m => new RegExp(m[1], m[2]),
-  )
-
-  const descriptionOf = (content: string): string => {
-    const block = FM_LITERALS[0].exec(content)
-    if (!block) return ''
-    const d = FM_LITERALS[1].exec(block[1])
-    return d ? d[1] : ''
-  }
-
   /** The three fields the ranker scores separately, as the ranker splits them. */
   const fieldsOf = (key: string) => ({
-    description: contentTerms(descriptionOf(CORPUS[key]), stemTerm),
+    description: contentTerms(splitFrontmatterText(CORPUS[key]).description, stemTerm),
     key: contentTerms(key, stemTerm),
     body: contentTerms(CORPUS[key], stemTerm),
   })
@@ -295,38 +270,19 @@ describe('tuning-pair match arity', () => {
     }
   }
 
-  test('the ranker frontmatter extraction was found and does extract a description', () => {
-    // Fail loudly rather than vacuously: an unparseable extraction must not read
-    // as "no entry has a description", which would make every placement `body`.
-    expect(`frontmatter extraction found:${FM_SOURCE !== null}`).toBe(
-      'frontmatter extraction found:true',
-    )
-    expect(FM_LITERALS.length).toBe(2)
-    expect(descriptionOf(CORPUS['project/deploy.md'])).toContain('deploy')
-    expect(descriptionOf('no frontmatter here')).toBe('')
-  })
-
-  test('frontmatter literal extraction preserves escapes, character classes and flags', () => {
-    const source = String.raw`const a = /a\/b/i; const b = /[/]/g; const c = /\[\]/m`
-    expect([...source.matchAll(FM_LITERAL_RE)].map(m => [m[1], m[2]])).toEqual([
-      [String.raw`a\/b`, 'i'],
-      ['[/]', 'g'],
-      [String.raw`\[\]`, 'm'],
-    ])
-  })
-
-  test('frontmatter literal extraction rejects repeated bracket classes promptly', () => {
-    // Exercise V8 too: Bun caps backtracking, but Node can hang on this input.
-    // A subprocess deadline stops a regressed matcher from hanging the suite.
-    const source = `/${'[]'.repeat(128)}`
-    const probe = spawnSync(
-      'node',
-      ['--eval', `console.log([...${JSON.stringify(source)}.matchAll(${FM_LITERAL_RE})].length)`],
-      { encoding: 'utf8', timeout: 2_000, killSignal: 'SIGKILL' },
-    )
-    expect(probe.error).toBeUndefined()
-    expect(probe.status).toBe(0)
-    expect(probe.stdout.trim()).toBe('0')
+  test('description and body share frontmatter boundaries', () => {
+    expect(splitFrontmatterText(CORPUS['project/deploy.md']).description).toContain('deploy')
+    expect(splitFrontmatterText('--- \r\ndescription: read cache\r\n---\t\r\ntext')).toEqual({
+      description: 'read cache',
+      name: '',
+      body: 'text',
+    })
+    const incomplete = '---\ndescription: only the body'
+    expect(splitFrontmatterText(incomplete)).toEqual({
+      description: '',
+      name: '',
+      body: incomplete,
+    })
   })
 
   test('each expected entry carries its query terms in the pinned fields', () => {

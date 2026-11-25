@@ -29,15 +29,19 @@
  * store on this machine, and a second copy of it buys nothing.
  */
 
+import { mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { MirrorManifest, MirrorStore } from '../../client/index.ts'
+import { sha256Hex } from '../hash.ts'
 import { namespaceSlug } from '../namespace.ts'
 import { blobPrefix, contentPath } from '../store/blobstore.ts'
 import { FsBlobStore } from '../store/fs.ts'
+import { withLockFile } from './local.ts'
 
 /** Where the mirror lives under an OpenRecall home. */
-export function cacheDir(home: string): string {
-  return join(home, 'cache')
+export function cacheDir(home: string, serverUrl: string, apiKey?: string): string {
+  const endpoint = new URL(serverUrl).href.replace(/\/$/, '')
+  return join(home, 'cache', sha256Hex(JSON.stringify([endpoint, apiKey ?? null])))
 }
 
 function manifestPath(nsSlug: string): string {
@@ -50,6 +54,18 @@ export class FsMirror implements MirrorStore {
 
   constructor(readonly root: string) {
     this.store = new FsBlobStore(root, { private: true })
+  }
+
+  async withWriteLock(namespace: string, write: () => Promise<void>): Promise<void> {
+    if (this.disabled) return
+    const dir = join(this.root, 'ns', namespaceSlug(namespace))
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 })
+    } catch (err) {
+      this.disable(err)
+      return
+    }
+    await withLockFile(join(dir, '.publish.lock'), write)
   }
 
   async readManifest(namespace: string): Promise<MirrorManifest | null> {
@@ -100,14 +116,18 @@ export class FsMirror implements MirrorStore {
     try {
       await this.store.put(path, bytes)
     } catch (err) {
-      this.disabled = true
-      // The class and the code only. The message would carry the path, and
-      // the path carries a namespace slug, which stderr need not learn.
-      const e = err as NodeJS.ErrnoException
-      console.error(
-        `[openrecall] the local cache at ${this.root} could not be written (${e.code ?? e.constructor?.name ?? 'error'}); continuing without it for this process`,
-      )
+      this.disable(err)
+      throw err
     }
+  }
+
+  private disable(err: unknown): void {
+    if (this.disabled) return
+    this.disabled = true
+    const e = err as NodeJS.ErrnoException
+    console.error(
+      `[openrecall] the local cache at ${this.root} could not be written (${e.code ?? 'error'}); continuing without it for this process`,
+    )
   }
 }
 
@@ -130,15 +150,17 @@ function isManifestFor(v: unknown, namespace: string): v is MirrorManifest {
  */
 export async function describeMirror(
   home: string,
+  serverUrl: string,
   namespace: string,
+  apiKey?: string,
 ): Promise<{ path: string; entries: number; bytes: number } | null> {
-  const mirror = new FsMirror(cacheDir(home))
+  const mirror = new FsMirror(cacheDir(home, serverUrl, apiKey))
   const m = await mirror.readManifest(namespace)
   if (!m) return null
   let bytes = 0
-  for (const row of Object.values(m.entries)) bytes += typeof row.size === 'number' ? row.size : 0
+  for (const row of Object.values(m.entries)) bytes += typeof row?.size === 'number' ? row.size : 0
   return {
-    path: join(cacheDir(home), 'ns', namespaceSlug(namespace)),
+    path: join(cacheDir(home, serverUrl, apiKey), 'ns', namespaceSlug(namespace)),
     entries: Object.keys(m.entries).length,
     bytes,
   }

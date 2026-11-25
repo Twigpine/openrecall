@@ -96,8 +96,10 @@ function spawnChild(home: string, script: string, env: Record<string, string> = 
         const hit = seen.find(l => re.test(l))
         if (hit !== undefined) return hit
         if (ended) throw new Error(`child exited without printing ${re}: ${await stderr}`)
-        if (Date.now() > until)
-          throw new Error(`timed out waiting for ${re}; stderr: ${await stderr}`)
+        if (Date.now() > until) {
+          proc.kill()
+          throw new Error(`timed out waiting for ${re}`)
+        }
         await new Promise(r => setTimeout(r, 10))
       }
     },

@@ -12,12 +12,19 @@
  */
 
 import { afterEach, describe, expect, test } from 'bun:test'
-import { sha256Prefixed } from '../src/hash.ts'
+import { sha256Hex, sha256Prefixed } from '../src/hash.ts'
 import { type OperationalEvent, setEventSink } from '../src/log.ts'
 import { getData, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
-import { blobPrefix, contentPath, getStore, resetStore, setStore } from '../src/store/index.ts'
+import {
+  blobPrefix,
+  contentPath,
+  entryPath,
+  getStore,
+  resetStore,
+  setStore,
+} from '../src/store/index.ts'
 
 const NOW = '2026-06-24T00:00:00.000Z'
 const b64 = (s: string) => Buffer.from(s).toString('base64')
@@ -69,7 +76,7 @@ function counting(inner: BlobStore) {
       return inner.delete(p)
     },
     list: p => {
-      c.calls.list++
+      if (p.endsWith('/blobs/')) c.calls.list++
       return inner.list(p)
     },
     describe: () => `counting(${inner.describe()})`,
@@ -219,6 +226,32 @@ describe('reclaim cadence', () => {
     await put(ns, { entries: { 'a.md': b64('v4') } })
     expect(c.calls.list).toBe(0)
     expect(events.length).toBe(1)
+  })
+
+  test('a recovery sweep removes obsolete legacy files and keeps the only live copy', async () => {
+    const ns = 'user:cadence-legacy-retry'
+    const slug = namespaceSlug(ns)
+    const { real, c } = fresh()
+    await put(ns, {
+      entries: { 'updated.md': b64('old'), 'legacy.md': b64('keep'), 'deleted.md': b64('gone') },
+    })
+    const legacy = (key: string) => entryPath(slug, sha256Hex(key))
+    for (const [key, body] of [
+      ['updated.md', 'old'],
+      ['legacy.md', 'keep'],
+      ['deleted.md', 'gone'],
+    ] as const) {
+      await real.put(legacy(key), Buffer.from(body))
+      await real.delete(blobOf(slug, body))
+    }
+    c.failNextDelete = true
+    await put(ns, { entries: { 'updated.md': b64('new') }, deletions: ['deleted.md'] })
+    expect(await real.get(legacy('updated.md'))).not.toBeNull()
+    await put(ns, { entries: { 'other.md': b64('unrelated') } })
+    expect(await real.get(legacy('updated.md'))).toBeNull()
+    expect(await real.get(legacy('deleted.md'))).toBeNull()
+    expect(await real.get(legacy('legacy.md'))).not.toBeNull()
+    expect((await getData(ns, slug)).content.entries['legacy.md']).toBe(b64('keep'))
   })
 
   test('a commit that throws makes the next successful write sweep', async () => {

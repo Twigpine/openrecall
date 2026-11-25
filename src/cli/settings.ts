@@ -195,12 +195,15 @@ export function resolveSettings(env: Env = process.env): Settings {
 }
 
 /**
- * `off`, `false` and `0` in the environment turn the cache off; any other
- * value leaves the file's say, and the file's `false` is the only other off.
+ * Explicit environment switches override the file. An invalid switch must
+ * surface at startup because it decides whether a disk mirror is written.
  */
 function cacheEnabled(envValue: string | undefined, fileValue: boolean | undefined): boolean {
-  if (envValue !== undefined) return !['off', 'false', '0', 'no'].includes(envValue.toLowerCase())
-  return fileValue !== false
+  if (envValue === undefined) return fileValue !== false
+  const value = envValue.toLowerCase()
+  if (['off', 'false', '0', 'no'].includes(value)) return false
+  if (['on', 'true', '1', 'yes'].includes(value)) return true
+  throw new Error('OPENRECALL_CACHE must be on or off (also accepts true/false, yes/no, 1/0)')
 }
 
 /**

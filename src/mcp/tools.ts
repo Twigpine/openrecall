@@ -78,6 +78,10 @@ class Timer {
    * decrypt; a client without that breakdown (a test double) is charged
    * entirely to fetch, from the elapsed time the caller measured around it.
    */
+  failedFetch(elapsedMs: number): void {
+    this.ms.fetch += elapsedMs
+  }
+
   pulled(r: PullResult, elapsedMs: number): void {
     this.entries += Object.keys(r.entries).length
     if (r.timings) {
@@ -640,7 +644,10 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
   /** `client.pull`, with its stage timings and entry count credited to the timer. */
   async function pullTimed(timer: Timer, source: string, opts?: PullOptions): Promise<PullResult> {
     const started = performance.now()
-    const r = await client.pull(source, opts)
+    const r = await client.pull(source, opts).catch(err => {
+      timer.failedFetch(performance.now() - started)
+      throw err
+    })
     timer.pulled(r, performance.now() - started)
     return r
   }
@@ -733,7 +740,12 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
               }
             }),
           )
-          if (pulled.every(p => p.docs.length === 0)) return ok(`(no memory stored in ${ns} yet)`)
+          const staleNote =
+            staleMs === null
+              ? ''
+              : ` (served from the local cache, ${Math.round(staleMs / 1000)}s stale: the server could not be reached)`
+          if (pulled.every(p => p.docs.length === 0))
+            return ok(`(no memory stored in ${ns}${staleNote} yet)`)
           // The region shown for a hit is cut from what this call pulled,
           // never from the index's copy, so what the caller reads is what the
           // server served this time.
@@ -766,9 +778,11 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             // concludes there is nothing here, when in fact the one thing here is
             // the table of contents naming everything that was ever written.
             return ok(
-              `(nothing in ${ns} was searched for "${query}": the namespace holds only its ` +
-                'MEMORY.md index, which recall does not rank. Call memory_get with key ' +
-                '"MEMORY.md" to read the index itself.)',
+              `(nothing in ${ns}${staleNote} was searched for "${query}": the namespace holds only its ` +
+                'MEMORY.md index, which recall does not rank. ' +
+                (pulled.some(p => Object.hasOwn(p.entries, 'MEMORY.md'))
+                  ? 'Call memory_get with key "MEMORY.md" to read the index itself.)'
+                  : 'Call memory_list to find the index key.)'),
             )
           }
           if (ranked.length === 0 && reason === 'no-content-terms') {
@@ -777,7 +791,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             // not: the query was all function words.
             return ok(
               `(no searchable words in "${query}": every term is a function word the ranker ` +
-                `drops, so none of the ${searched} entr${searched === 1 ? 'y' : 'ies'} in ${ns} ` +
+                `drops, so none of the ${searched} entr${searched === 1 ? 'y' : 'ies'} in ${ns}${staleNote} ` +
                 'was scored. Retry with the distinctive words you expect the entry to contain, ' +
                 'or call memory_list.)',
             )
@@ -792,7 +806,7 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             // here, and leaking its key or text would spend the caller's context
             // on exactly what the floor exists to keep out.
             return ok(
-              `(nothing in ${ns} looks relevant to "${query}". ` +
+              `(nothing in ${ns}${staleNote} looks relevant to "${query}". ` +
                 `${searched} entr${searched === 1 ? 'y' : 'ies'} searched, ` +
                 `${belowFloor} below the relevance floor and withheld. ` +
                 'Call memory_list before concluding the fact is unrecorded; ' +
@@ -813,10 +827,6 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
           // the tail is present and its count is as wide as it can get) because
           // both lengths depend on numbers that are only known once the loop that
           // spends the budget has finished.
-          const staleNote =
-            staleMs === null
-              ? ''
-              : ` (served from the local cache, ${Math.round(staleMs / 1000)}s stale: the server could not be reached)`
           const leadFor = (n: number) =>
             `${n} relevant memor${n === 1 ? 'y' : 'ies'} from ${ns}${staleNote}:\n\n`
           // Two different reasons a relevant entry is missing, and both have to be
@@ -926,12 +936,15 @@ export function makeTools(client: MemoryClient, defaultNamespace: string) {
             if (e.status === 404 && e.code === 'empty') return ok(`(no memory stored in ${ns} yet)`)
             // `entry_not_found`, or a key the server will not even look up
             // (`invalid_key`): either way there is no such entry to return.
-            if (e.status === 404 || e.status === 400)
+            if (
+              (e.status === 404 && e.code === 'entry_not_found') ||
+              (e.status === 400 && e.code === 'invalid_key')
+            )
               return ok(`(no entry "${key}" in ${ns}, call memory_list to see the keys that exist)`)
             if (e.status === 503 && e.code === 'entry_unreadable')
               return fail(unreadableEntry(key, ns))
           }
-          if (e instanceof OpenRecallProtocolError) return getViaPull(timer, key, ns)
+          if (e instanceof OpenRecallProtocolError) return await getViaPull(timer, key, ns)
           throw e
         }
         return ok(`### ${key} (${ns})\n${body}`)
