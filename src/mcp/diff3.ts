@@ -235,7 +235,7 @@ export function merge3(base: string, ours: string, theirs: string): MergeResult 
   const eol = crlf ? '\r\n' : '\n'
   const trailing = o.trailingNewline !== b.trailingNewline ? o.trailingNewline : t.trailingNewline
   const join = (lines: string[], nl: boolean) =>
-    lines.length === 0 && !nl ? '' : lines.join(eol) + (nl ? eol : '')
+    lines.length === 0 ? '' : lines.join(eol) + (nl ? eol : '')
 
   const tooBig = Math.max(b.lines.length, o.lines.length, t.lines.length) > MAX_MERGE_LINES
   if (tooBig) {

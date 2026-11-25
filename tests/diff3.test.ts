@@ -358,6 +358,15 @@ describe('merge3', () => {
     expect(merge3('\n', '\n', '\n')).toEqual({ ok: true, text: '\n', theirsLines: 0 })
   })
 
+  test('deleting the last line wins over a trailing newline on the deleted line', () => {
+    for (const newline of ['\n', '\r\n']) {
+      const terminated = `one${newline}`
+      expect(merge3('one', '', terminated)).toMatchObject({ ok: true, text: '' })
+      expect(merge3('one', terminated, '')).toMatchObject({ ok: true, text: '' })
+      expect(merge3('', '', newline)).toMatchObject({ ok: true, text: newline })
+    }
+  })
+
   test('does not stitch unrelated edits across a blank line that Myers aligned', () => {
     // Both sides rewrite a paragraph around the same blank line; the blank is
     // the only "unchanged" line between them, so adjacency makes it a

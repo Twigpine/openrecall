@@ -223,6 +223,44 @@ describe('parseFrontmatter', () => {
     expect(parsed.body).toBe('body')
   })
 
+  test('multiline quoted and flow values stay intact when they contain apparent keys', () => {
+    for (const entry of [
+      'custom: "first\ndescription: embedded\nlast"',
+      "custom: 'it''s open\nlocked: true\ndone'",
+      'custom: [{label: "brackets ] }"}, # ]\ndescription: embedded\n]',
+      'custom: {labels: [one, two],\nlocked: true\n}',
+    ]) {
+      const note = `---\n${entry}\nname: visible\n---\nbody`
+      const parsed = parseFrontmatter(note)!
+      expect([...parsed.fields]).toEqual([['name', 'visible']])
+      expect(serializeFrontmatter(parsed.fields, parsed.opaque)).toContain(`\n${entry}\n`)
+      expect(stampForSave(null, note, ctx).content).toContain(`\n${entry}\n`)
+    }
+  })
+
+  test('stamping interprets commented reserved fields once and preserves note identity', () => {
+    const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    const note = `---\nid: ${id} # imported\ntype: reference # kind\nlocked: true # pinned\ndescription: "a # in quotes" # context\ntags: [a, b] # group\n---\nbody`
+    const first = stampForSave(note, note, ctx)
+    expect(first.meta).toMatchObject({
+      id,
+      type: 'reference',
+      locked: true,
+      description: 'a # in quotes',
+      tags: ['a', 'b'],
+    })
+    expect(first.content.match(/^id:/gm)).toHaveLength(1)
+    expect(stampForSave(first.content, first.content, ctx).content).toBe(first.content)
+    for (const entry of [
+      'type: invalid # kind',
+      'locked: yes # pinned',
+      'type: {nested: project}',
+      'id: [\nlegacy\n]',
+    ]) {
+      expect(() => stampForSave(null, `---\n${entry}\n---\nbody`, ctx)).toThrow(FrontmatterError)
+    }
+  })
+
   test('a duplicate accepted key keeps the first value and drops the rest', () => {
     const fm = parseFrontmatter('---\ndescription: first\ndescription: second\n---\n')!
     expect(fm.fields.get('description')).toBe('first')

@@ -15,8 +15,9 @@
  *   key: scalar            key: "quoted"  /  key: 'quoted'   (\" and '' escapes)
  *   key: [a, b]            key: true | false                 key:   (empty scalar)
  *   key:                   followed by `  - item` lines (indented or not)
- * Keys match /^[A-Za-z_][\w-]*$/. A plain scalar that contains ` #` is opaque,
- * because YAML would treat the rest as a comment and this parser would not.
+ * Keys match /^[A-Za-z_][\w-]*$/. Unknown fields with inline comments are
+ * opaque. Known fields accept trailing comments and retain them on their own
+ * line. Stamping refuses a known field whose value is outside the subset.
  * `|`/`>` block scalars, anchors, tags, flow maps, nested maps and multi-line
  * scalars are all opaque. A duplicate accepted key keeps its first value and
  * drops the rest, which is what `relevance.ts`'s first-match regex sees anyway.
@@ -154,6 +155,10 @@ const MAX_TAGS = 8
  * (no opening `---` line, or an opening line that never closes).
  */
 export function parseFrontmatter(content: string): Frontmatter | null {
+  return parseHeader(content, false)
+}
+
+function parseHeader(content: string, forStamp: boolean): Frontmatter | null {
   const block = matchFrontmatter(content)
   if (!block) return null
   const lines = block[1] === undefined ? [] : block[1].split(/\r?\n/)
@@ -178,10 +183,14 @@ export function parseFrontmatter(content: string): Frontmatter | null {
       continue
     }
     const key = m[1]
-    const rawValue = m[2] === undefined ? '' : m[2].trimEnd()
+    const raw = m[2]?.trimEnd() ?? ''
+    const reserved = (KNOWN_ORDER as readonly string[]).includes(key)
+    const span = valueSpan(lines, i, raw)
+    const comment = reserved && span.comment >= 0 ? raw.slice(span.comment) : ''
+    const rawValue = comment ? raw.slice(0, span.comment).trimEnd() : raw
     // A blank or comment may separate a YAML key from its nested value, or
     // interrupt a list. Preserve that whole entry when it exceeds our subset.
-    let end = i + 1
+    let end = span.end
     let gap = false
     let interrupted = false
     for (let next = end; next < lines.length; next++) {
@@ -209,15 +218,69 @@ export function parseFrontmatter(content: string): Frontmatter | null {
       if (items.length === end - i - 1) value = items
     }
     if (value === undefined) {
+      if (reserved && forStamp) {
+        throw new FrontmatterError(`unsupported frontmatter value for ${key}`, key)
+      }
       for (let k = i; k < end; k++) keep(lines[k])
       i = end
       continue
     }
     if (!fields.has(key)) fields.set(key, value)
     anchor = key
+    if (comment) keep(comment)
     i = end
   }
   return { fields, opaque, body }
+}
+
+/**
+ * Find the end of a quoted scalar or flow collection before looking for
+ * another key. This only recognizes boundaries. Multiline values stay opaque.
+ * A missing terminator keeps the rest of the header with its opening line.
+ */
+function valueSpan(lines: string[], start: number, raw: string): { end: number; comment: number } {
+  const structured = /^["'[{]/.test(raw)
+  if (!structured) {
+    const match = /(?:^|[ \t])(#)/.exec(raw)
+    return { end: start + 1, comment: match ? match.index + match[0].length - 1 : -1 }
+  }
+  const closers: string[] = []
+  let quote = ''
+  let tokenStart = true
+  for (let row = start; row < lines.length; row++) {
+    const line = row === start ? raw : lines[row]
+    for (let pos = 0; pos < line.length; pos++) {
+      const ch = line[pos]
+      if (quote) {
+        if (quote === '"' && ch === '\\') pos++
+        else if (ch === quote) {
+          if (quote === "'" && line[pos + 1] === "'") pos++
+          else quote = ''
+        }
+      } else if (tokenStart && (ch === '"' || ch === "'")) {
+        quote = ch
+        tokenStart = false
+      } else if (ch === '[' || ch === '{') {
+        closers.push(ch === '[' ? ']' : '}')
+        tokenStart = true
+      } else if (ch === closers.at(-1)) {
+        closers.pop()
+        tokenStart = false
+      } else if (ch === '#' && (pos === 0 || /[ \t]/.test(line[pos - 1]))) {
+        break
+      } else if (ch === ',' || ch === ':') {
+        tokenStart = true
+      } else if (ch !== ' ' && ch !== '\t') {
+        tokenStart = false
+      }
+      if (!quote && closers.length === 0) {
+        const tail = line.slice(pos + 1)
+        const comment = row === start && /^[ \t]+#/.test(tail) ? pos + 1 + tail.indexOf('#') : -1
+        return { end: row + 1, comment }
+      }
+    }
+  }
+  return { end: lines.length, comment: -1 }
 }
 
 /** A continuation line under a bare `key:`: indented, or a column-0 `- item`. */
@@ -448,12 +511,12 @@ export function stampForSave(
 ): { content: string; corrected: string[]; meta: Stamped } {
   const nowMs = Date.parse(ctx.now)
   if (Number.isNaN(nowMs)) throw new FrontmatterError(`now must be an ISO timestamp`, 'updated')
-  const inc = parseFrontmatter(incoming) ?? {
+  const inc = parseHeader(incoming, true) ?? {
     fields: new Map<string, FmValue>(),
     opaque: new Map<string, string[]>(),
     body: incoming,
   }
-  const prior = existing === null ? null : (parseFrontmatter(existing)?.fields ?? null)
+  const prior = existing === null ? null : (parseHeader(existing, true)?.fields ?? null)
   const fields = new Map(inc.fields)
   const corrected: string[] = []
   const stamp = (key: string, value: FmValue) => {
