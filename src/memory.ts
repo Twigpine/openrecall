@@ -225,6 +225,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
     lastModified: m.lastModified,
     checksum: namespaceChecksum(entryChecksums),
     erasure: store.erasure,
+    entryCount: Object.keys(m.entries).length,
     content: { entries, entryChecksums, entryUpdatedAt },
   }
 }

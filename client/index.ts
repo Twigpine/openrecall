@@ -812,6 +812,7 @@ export class OpenRecallClient {
 
     let enumerated = !legacy
     let version = view.version
+    let fullEntryCount: number | undefined
     if (need.length > 0) {
       let useFullView = false
       if (view.supports.includes('entries-view')) {
@@ -879,6 +880,7 @@ export class OpenRecallClient {
       if (useFullView) {
         const full = await this.pullFull(namespace, cache, held, live, clock)
         version = full.version
+        fullEntryCount = full.entryCount
         stamps.length = 0
         stamps.push(full.stamps)
         enumerated = false
@@ -913,8 +915,9 @@ export class OpenRecallClient {
     // last complete offline snapshot until all rows are readable again.
     if (
       this.mirror &&
-      version === view.version &&
-      held.size === Object.keys(view.entryChecksums).length
+      held.size ===
+        (fullEntryCount ??
+          (version === view.version ? Object.keys(view.entryChecksums).length : undefined))
     ) {
       await this.mirrorWrite(namespace, version, held, updatedAt, requestedAt)
     }
@@ -941,7 +944,7 @@ export class OpenRecallClient {
     held: Map<string, Held>,
     live: Record<string, string>,
     clock: Clock,
-  ): Promise<{ version: number; stamps: Record<string, unknown> }> {
+  ): Promise<{ version: number; entryCount?: number; stamps: Record<string, unknown> }> {
     const t = performance.now()
     const res = await this.request('pull', namespace, this.endpoint(namespace), {
       headers: this.headers(),
@@ -954,12 +957,13 @@ export class OpenRecallClient {
       if (err.code !== 'empty') throw err
       for (const k of Object.keys(live)) delete live[k]
       held.clear()
-      return { version: 0, stamps: {} }
+      return { version: 0, entryCount: 0, stamps: {} }
     }
     if (!res.ok) throw httpError(res)
     const parseStarted = performance.now()
     const data = JSON.parse(res.raw) as {
       version: number
+      entryCount?: number
       content?: { entries?: Record<string, string>; entryUpdatedAt?: unknown }
     }
     clock.parseMs += performance.now() - parseStarted
@@ -993,6 +997,7 @@ export class OpenRecallClient {
     const stamps = data.content?.entryUpdatedAt
     return {
       version: data.version,
+      entryCount: data.entryCount,
       stamps: stamps && typeof stamps === 'object' ? (stamps as Record<string, unknown>) : {},
     }
   }

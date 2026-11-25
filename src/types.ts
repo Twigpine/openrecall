@@ -36,6 +36,8 @@ export function emptyManifest(): Manifest {
 
 /** Full GET response. */
 export type MemoryData = {
+  /** Number of manifest rows, including entries whose blobs could not be read. */
+  entryCount: number
   /** Whether this deployment's store actually erases on delete. */
   erasure: Erasure
   namespace: string
