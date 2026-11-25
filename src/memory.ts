@@ -315,12 +315,14 @@ export async function getEntries(
     // Own property only, as getEntry: `constructor` must miss, not resolve to
     // something off the prototype and fail as an unreadable body.
     const meta = Object.hasOwn(m.entries, slot.key) ? m.entries[slot.key] : undefined
+    const previousHash = slot.meta?.hash
     slot.meta = meta
     if (!meta) {
       slot.status = 'not_found'
       slot.bytes = null
       return
     }
+    if (slot.bytes && previousHash === meta.hash) return
     slot.bytes = await readEntryBytes(store, nsSlug, slot.key, meta.hash)
     slot.status = slot.bytes ? 'ok' : 'unreadable'
   }
@@ -340,13 +342,13 @@ export async function getEntries(
   // read can move a key and reclaim its old blob, so look again under the
   // manifest that write published before calling the key unreadable. Bounded,
   // so a writer that never pauses cannot starve this read.
-  let missing = lookups.filter(s => s.status === 'unreadable')
-  for (let pass = 0; pass < 2 && missing.length > 0; pass++) {
+  for (let pass = 0; pass < 2 && lookups.some(s => s.status === 'unreadable'); pass++) {
     const latest = await readManifest(nsSlug)
     if (latest.version === m.version) break
     m = latest
-    await mapLimit(missing, READ_CONCURRENCY, read)
-    missing = missing.filter(s => s.status === 'unreadable')
+    // The header now names the new manifest. Reconcile even previously found
+    // and absent keys. A matching hash lets read() reuse the bytes.
+    await mapLimit(lookups, READ_CONCURRENCY, read)
   }
 
   const frames: Frame[] = slots.map(slot => ({

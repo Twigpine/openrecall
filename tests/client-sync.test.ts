@@ -135,6 +135,89 @@ const manifestPath = (home: string, ns: string) =>
   join(cacheDir(home), 'ns', namespaceSlug(ns), 'mirror.json')
 
 describe('the incremental pull', () => {
+  for (const bulk of [true, false]) {
+    test(`a racing ${bulk ? 'bulk' : 'single-entry'} response installs one complete snapshot`, async () => {
+      const ns = bulk ? 'user:batch-snapshot' : 'user:single-snapshot'
+      const writer = new OpenRecallClient({ url: base, passphrase: PASSPHRASE })
+      await writer.push(ns, { 'stable.md': 'first', 'gone.md': 'old' })
+      const home = temp()
+      let move = false
+      let offline = false
+      const reader = mirrored(base, home, {
+        fetch: async (url, init) => {
+          if (offline) throw new TypeError('fetch failed')
+          const view = new URL(url).searchParams.get('view')
+          if (move && view === (bulk ? 'entries' : 'entry')) {
+            move = false
+            await writer.push(
+              ns,
+              { 'stable.md': 'updated', 'hot.md': 'third', 'new.md': 'new' },
+              {
+                deletions: ['gone.md'],
+              },
+            )
+          }
+          const res = await fetch(url, init)
+          if (!bulk && view === 'hashes') {
+            return Response.json({
+              ...(await res.json()),
+              supports: ['entry-view', 'base-precondition'],
+            })
+          }
+          return res
+        },
+      })
+      await reader.pull(ns)
+      await writer.push(ns, { 'hot.md': 'second' })
+      move = true
+      const expected = { 'stable.md': 'updated', 'hot.md': 'third', 'new.md': 'new' }
+      const latest = await reader.pull(ns)
+      expect(move).toBe(false)
+      expect(latest.version).toBe(3)
+      expect(latest.entries).toEqual(expected)
+      offline = true
+      const cached = await reader.pull(ns, { allowStale: true })
+      expect(cached.version).toBe(3)
+      expect(cached.entries).toEqual(expected)
+      await writer.push(ns, { 'hot.md': 'fourth' })
+      offline = false
+      const reconnected = await reader.pull(ns)
+      expect(reconnected.served?.source).toBe('server')
+      expect(reconnected.entries).toEqual({ ...expected, 'hot.md': 'fourth' })
+    })
+  }
+
+  test('an interrupted refresh leaves the last complete mirror available offline', async () => {
+    const ns = 'user:sync-interrupted'
+    const writer = new OpenRecallClient({ url: base, passphrase: PASSPHRASE })
+    await writer.push(ns, { 'a.md': 'before', 'b.md': 'also before' })
+    const home = temp()
+    const before = await mirrored(base, home).pull(ns)
+    await writer.push(ns, { 'a.md': 'after', 'new.md': 'new' }, { deletions: ['b.md'] })
+    const interrupted = mirrored(base, home, {
+      fetch: async (url, init) =>
+        new URL(url).searchParams.get('view') === 'entries'
+          ? Response.json(
+              { error: { code: 'unavailable', message: 'unavailable' } },
+              { status: 503 },
+            )
+          : fetch(url, init),
+    })
+    await expect(interrupted.pull(ns, { allowStale: true })).rejects.toBeInstanceOf(
+      OpenRecallHttpError,
+    )
+    const offline = mirrored(base, home, {
+      fetch: async () => {
+        throw new TypeError('offline')
+      },
+    })
+    const cached = await offline.pull(ns, { allowStale: true })
+    expect(cached.version).toBe(before.version)
+    expect(cached.entries).toEqual(before.entries)
+    const fresh = await mirrored(base, home).pull(ns)
+    expect(fresh.entries).toEqual({ 'a.md': 'after', 'new.md': 'new' })
+  })
+
   test('a second pull after a foreign write fetches exactly the changed keys', async () => {
     const ns = 'user:sync-delta'
     const home = temp()
@@ -483,6 +566,30 @@ describe('the bulk entries read', () => {
     expect((err as OpenRecallHttpError).code).toBe('stale_base_version')
     await a.push(ns, { 'b.md': 'from-a' })
     expect((await b.pull(ns)).entries['b.md']).toBe('from-a')
+  })
+
+  test('a batch labeled for a different namespace is rejected before using its entries', async () => {
+    const response = (namespace: string) =>
+      encodeFrames({ namespace, version: 1, lastModified: 'x', erasure: 'erases', count: 1 }, [
+        {
+          meta: { key: 'a.md', hash: null, size: 0, updatedAt: null, status: 'not_found' },
+          bytes: new Uint8Array(),
+        },
+      ])
+    let label = 'user:other'
+    const c = new OpenRecallClient({
+      url: base,
+      passphrase: PASSPHRASE,
+      fetch: async () =>
+        new Response(response(label) as unknown as BodyInit, {
+          headers: { 'x-openrecall-frames': '1' },
+        }),
+    })
+    await expect(c.entries('user:expected', ['a.md'])).rejects.toBeInstanceOf(
+      OpenRecallProtocolError,
+    )
+    label = 'user:expected'
+    expect((await c.entries(label, ['a.md'])).statuses).toEqual({ 'a.md': 'not_found' })
   })
 
   test('a body that does not hash to its name, or a truncated frame, is a protocol error', async () => {

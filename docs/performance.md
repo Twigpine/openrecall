@@ -16,12 +16,29 @@ read once), in local mode, at the namespace entry cap of 2,000 entries:
 | `memory_get`, `memory_list` | p50 ≤ 10 ms at any size under the cap |
 | MCP `initialize` (Node bundle) | ≤ 150 ms |
 
-These are targets, not a description of today. At 0.2.1 one recall pulled,
-decrypted and re-ranked the whole namespace on every call: about 170 ms at
-2,000 entries of realistic length, and 430 ms at 5,000. The first round of
-changes removes measured waste (the single-entry read for `memory_get`, the
-lock-free read path in local mode) and adds the measurement below; reaching the
-recall target needs the in-process index and the delta pull that follow.
+On 2026-11-25, a local comparison against main at `335e1aa` used the same
+2,000-entry synthetic store, Bun 1.3.11 and 40 warm calls per operation. Times
+include the tool implementation, encrypted client and filesystem handler.
+The first recall ran once per revision in a fresh process after initialization.
+
+| Operation | Main | Fast-read integration |
+|---|---:|---:|
+| Warm recall p50 / p95 | 131 / 143 ms | 5.7 / 7.0 ms |
+| Warm single-entry get p50 / p95 | 105 / 122 ms | 0.49 / 0.62 ms |
+| First recall | 179 ms | 186 ms |
+
+With the same number of notes split evenly between two namespaces on a
+loopback HTTP server, 40 warm recalls fetched 80 manifests and zero note
+bodies. After a second client edited one note, the next recall fetched two
+manifests and one body. Warm p50 / p95 was 5.7 / 6.7 ms with a median health
+request of 0.065 ms. A hosted store needs its own network and object-store
+measurements.
+
+If a write advances the manifest during a bulk read, the server reconciles
+every requested key with the version in the response header. If the delta
+client detects that its manifest and fetched bodies describe different
+snapshots, it takes one full read before publishing the result to memory
+or the offline mirror. The work budgets above apply to stable snapshots.
 
 ## Measuring
 

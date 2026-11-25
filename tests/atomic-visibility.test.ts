@@ -14,7 +14,7 @@
 import { afterEach, describe, expect, test } from 'bun:test'
 import { sha256Hex, sha256Prefixed } from '../src/hash.ts'
 import { setEventSink } from '../src/log.ts'
-import { getData, getHashes, upsert } from '../src/memory.ts'
+import { getData, getEntries, getHashes, upsert } from '../src/memory.ts'
 import { namespaceSlug } from '../src/namespace.ts'
 import type { BlobStore } from '../src/store/blobstore.ts'
 import {
@@ -517,14 +517,18 @@ describe('a lock-free read against a writer replacing an entry', () => {
     expect(r.counts.keyReads).toBe(2)
   })
 
-  test('a retry that moves to a newer manifest serves that manifest whole, never a mix', async () => {
+  async function stageManifestChange(ns: string) {
     // a.md and gone.md are read under v1. Then one write replaces a.md and
     // hot.md, deletes gone.md and adds new.md, and reclaims the old blobs, so
     // hot.md comes back missing and the reader moves to v2. Serving v2 with
     // a.md's v1 body, gone.md still present and new.md absent would pair a
     // version with a state that never existed.
-    const ns = 'user:race-mixed'
-    await seed(ns, { 'a.md': b64('a1'), 'gone.md': b64('g1'), 'hot.md': b64('hot 0') })
+    await seed(ns, {
+      'a.md': b64('a1'),
+      'gone.md': b64('g1'),
+      'hot.md': b64('hot 0'),
+      'keep.md': b64('kept'),
+    })
     const slug = namespaceSlug(ns)
     const inner = getStore()
     const v1 = (await getHashes(ns, slug)).entryChecksums
@@ -536,9 +540,12 @@ describe('a lock-free read against a writer replacing an entry', () => {
     const readEarly: Promise<void>[] = []
     const done = new Map<string, () => void>()
     for (const p of early) readEarly.push(new Promise<void>(r => done.set(p, r)))
+    const stablePath = contentPath(slug, v1['keep.md'] as string)
+    let stableReads = 0
     let moved = false
     setStore({
       get: async p => {
+        if (p === stablePath) stableReads++
         if (done.has(p)) {
           const bytes = await inner.get(p)
           done.get(p)?.()
@@ -567,8 +574,14 @@ describe('a lock-free read against a writer replacing an entry', () => {
       erasure: inner.erasure,
     })
 
+    return { slug, stableReads: () => stableReads }
+  }
+
+  test('a retry that moves to a newer manifest serves that manifest whole, never a mix', async () => {
+    const ns = 'user:race-mixed'
+    const { slug, stableReads } = await stageManifestChange(ns)
     const data = await getData(ns, slug)
-    expect(moved).toBe(true)
+    expect(stableReads()).toBe(1)
     expect(data.version).toBe(2)
     const text = (key: string) => {
       const v = data.content.entries[key]
@@ -578,10 +591,44 @@ describe('a lock-free read against a writer replacing an entry', () => {
     expect(text('hot.md')).toBe('hot 1')
     expect(text('new.md')).toBe('n1')
     expect(text('gone.md')).toBeUndefined()
-    expect(Object.keys(data.content.entries).sort()).toEqual(['a.md', 'hot.md', 'new.md'])
+    expect(Object.keys(data.content.entries).sort()).toEqual([
+      'a.md',
+      'hot.md',
+      'keep.md',
+      'new.md',
+    ])
     // Every row served is v2's, so the checksum matches what v2 says.
     expect(data.content.entryChecksums).toEqual((await getHashes(ns, slug)).entryChecksums)
     expect(data.content.entryUpdatedAt['a.md']).toBe(LATER)
+  })
+
+  test('a batch retry serves every requested slot from its advertised manifest', async () => {
+    const ns = 'user:race-batch'
+    const { slug, stableReads } = await stageManifestChange(ns)
+    const keys = ['hot.md', 'a.md', 'gone.md', 'new.md', 'keep.md', '../invalid']
+    const batch = await getEntries(ns, slug, keys)
+    expect(batch.status).toBe('ok')
+    if (batch.status !== 'ok') return
+    expect(batch.header.version).toBe(2)
+    expect(batch.frames.map(f => f.meta.key)).toEqual(keys)
+    const hashes = (await getHashes(ns, slug)).entryChecksums
+    expect(
+      batch.frames.map(({ meta, bytes }) => [
+        meta.status,
+        meta.hash,
+        meta.updatedAt,
+        meta.size,
+        Buffer.from(bytes).toString(),
+      ]),
+    ).toEqual([
+      ['ok', hashes['hot.md'], LATER, 5, 'hot 1'],
+      ['ok', hashes['a.md'], LATER, 2, 'a2'],
+      ['not_found', null, null, 0, ''],
+      ['ok', hashes['new.md'], LATER, 2, 'n1'],
+      ['ok', hashes['keep.md'], NOW, 4, 'kept'],
+      ['invalid_key', null, null, 0, ''],
+    ])
+    expect(stableReads()).toBe(1)
   })
 
   test('a writer that moves on every look is given up after two more looks, not followed forever', async () => {

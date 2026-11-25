@@ -793,18 +793,26 @@ export class OpenRecallClient {
     let enumerated = !legacy
     let version = view.version
     if (need.length > 0) {
+      let useFullView = false
       if (view.supports.includes('entries-view')) {
-        const frames = await this.fetchFrames(namespace, need, clock)
+        const frames = await this.fetchFrames(namespace, need, clock, view.version)
         if (frames === null) {
-          // The namespace vanished between the two reads. Nothing it listed
-          // can be held, and nothing can be asserted about it either.
-          for (const k of need) delete live[k]
+          // A later manifest can change cached keys too. Read one complete
+          // snapshot before publishing the cache or recording write bases.
+          useFullView = true
         } else {
           // One map for every frame's timestamp, prototype-less because the
           // keys are the server's. Sanitized once below, with the view's.
           const fromFrames = Object.create(null) as Record<string, unknown>
           for (const f of frames) {
             const k = f.meta.key
+            if (
+              f.meta.status === 'not_found' ||
+              (f.meta.hash !== null && f.meta.hash !== live[k])
+            ) {
+              useFullView = true
+              break
+            }
             if (f.meta.status === 'ok' && f.meta.hash) {
               held.set(k, {
                 hash: f.meta.hash,
@@ -812,10 +820,7 @@ export class OpenRecallClient {
                 bytes: f.bytes,
                 fresh: true,
               })
-              live[k] = f.meta.hash
               if (f.meta.updatedAt !== null) fromFrames[k] = f.meta.updatedAt
-            } else if (f.meta.status === 'not_found') {
-              delete live[k]
             }
             // `unreadable` and `invalid_key` keep the manifest's hash: the key
             // exists, this client just has no body for it.
@@ -823,10 +828,13 @@ export class OpenRecallClient {
           stamps.push(fromFrames)
         }
       } else if (view.supports.includes('entry-view') && need.length <= MAX_SINGLE_READS) {
-        let fallBack = false
         for (const k of need) {
           try {
             const one = await this.entryRaw(namespace, k, clock)
+            if (one.status === 'gone' || (one.status === 'ok' && one.hash !== live[k])) {
+              useFullView = true
+              break
+            }
             if (one.status === 'ok') {
               held.set(k, {
                 hash: one.hash,
@@ -834,29 +842,24 @@ export class OpenRecallClient {
                 bytes: one.bytes,
                 fresh: true,
               })
-              live[k] = one.hash
-            } else if (one.status === 'gone') {
-              delete live[k]
             }
           } catch (err) {
             // A server that advertised the view and answered something else:
             // fall back to the read every server understands.
             if (err instanceof OpenRecallProtocolError) {
-              fallBack = true
+              useFullView = true
               break
             }
             throw err
           }
         }
-        if (fallBack) {
-          const full = await this.pullFull(namespace, cache, held, live, clock)
-          version = full.version
-          stamps.push(full.stamps)
-          enumerated = false
-        }
       } else {
+        useFullView = true
+      }
+      if (useFullView) {
         const full = await this.pullFull(namespace, cache, held, live, clock)
         version = full.version
+        stamps.length = 0
         stamps.push(full.stamps)
         enumerated = false
       }
@@ -978,12 +981,13 @@ export class OpenRecallClient {
    * decode, every frame must answer a key that was asked for, and an `ok`
    * frame's bytes must hash to the hash it claims. Each of those is a protocol
    * error, never a decryption failure. Null when the server says the namespace
-   * no longer exists at all.
+   * no longer exists or a batch has moved past the requested snapshot.
    */
   private async fetchFrames(
     namespace: string,
     keys: string[],
     clock: Clock,
+    expectedVersion?: number,
   ): Promise<Frame[] | null> {
     const out: Frame[] = []
     for (let i = 0; i < keys.length; i += MAX_ENTRIES_BATCH) {
@@ -1017,6 +1021,14 @@ export class OpenRecallClient {
         throw new OpenRecallProtocolError('entries', namespace, (err as Error).message)
       }
       clock.parseMs += performance.now() - parseStarted
+      if (decoded.header.namespace !== namespace) {
+        throw new OpenRecallProtocolError(
+          'entries',
+          namespace,
+          'the batch names a different namespace',
+        )
+      }
+      if (expectedVersion !== undefined && decoded.header.version !== expectedVersion) return null
       const asked = new Set(batch)
       for (const f of decoded.frames) {
         if (!asked.has(f.meta.key)) {

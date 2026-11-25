@@ -1822,7 +1822,7 @@ function framesServer() {
       })
       const encoded = encodeFrames(
         {
-          namespace: 'user:stub',
+          namespace: decodeURIComponent(u.pathname.slice('/api/memory/'.length)),
           version,
           lastModified: stamp,
           erasure: 'erases',
