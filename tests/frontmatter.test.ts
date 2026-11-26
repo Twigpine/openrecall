@@ -238,6 +238,26 @@ describe('parseFrontmatter', () => {
     }
   })
 
+  test('colons inside plain flow values do not hide a following note ID', () => {
+    const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
+    for (const value of ['{label: a:"b}', "[a:'b]", '{json: {"k":"a } b"}}', `{label: a":'b}`]) {
+      const note = `---\ncustom: ${value}\nid: ${id}\ntype: reference\n---\nbody`
+      expect(parseFrontmatter(note)!.fields.get('id')).toBe(id)
+      const { content, meta } = stampForSave(note, note, ctx)
+      expect(meta).toMatchObject({ id, type: 'reference' })
+      expect(content.match(/^id:/gm)).toHaveLength(1)
+      expect(content).toContain(`custom: ${value}\n`)
+    }
+  })
+
+  test('an unterminated quoted or flow value cannot hide a stored ID during stamping', () => {
+    for (const value of ['"unclosed', '[one, two', '{label: "unclosed}']) {
+      const note = `---\ncustom: ${value}\nid: original\n---\nbody`
+      expect(() => stampForSave(note, note, ctx)).toThrow(FrontmatterError)
+      expect(() => stampForSave(note, 'updated', ctx)).toThrow(FrontmatterError)
+    }
+  })
+
   test('stamping interprets commented reserved fields once and preserves note identity', () => {
     const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
     const note = `---\nid: ${id} # imported\ntype: reference # kind\nlocked: true # pinned\ndescription: "a # in quotes" # context\ntags: [a, b] # group\n---\nbody`

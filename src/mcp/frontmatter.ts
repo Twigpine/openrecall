@@ -186,6 +186,13 @@ function parseHeader(content: string, forStamp: boolean): Frontmatter | null {
     const raw = m[2]?.trimEnd() ?? ''
     const reserved = (KNOWN_ORDER as readonly string[]).includes(key)
     const span = valueSpan(lines, i, raw)
+    if (!span) {
+      // A later line might be part of this value or a real id/type field.
+      // Reads preserve the block. Stamping cannot safely generate metadata.
+      if (forStamp) throw new FrontmatterError(`unterminated frontmatter value for ${key}`, key)
+      for (; i < lines.length; i++) keep(lines[i])
+      break
+    }
     const comment = reserved && span.comment >= 0 ? raw.slice(span.comment) : ''
     const rawValue = comment ? raw.slice(0, span.comment).trimEnd() : raw
     // A blank or comment may separate a YAML key from its nested value, or
@@ -238,7 +245,11 @@ function parseHeader(content: string, forStamp: boolean): Frontmatter | null {
  * another key. This only recognizes boundaries. Multiline values stay opaque.
  * A missing terminator keeps the rest of the header with its opening line.
  */
-function valueSpan(lines: string[], start: number, raw: string): { end: number; comment: number } {
+function valueSpan(
+  lines: string[],
+  start: number,
+  raw: string,
+): { end: number; comment: number } | null {
   const structured = /^["'[{]/.test(raw)
   if (!structured) {
     const match = /(?:^|[ \t])(#)/.exec(raw)
@@ -246,7 +257,7 @@ function valueSpan(lines: string[], start: number, raw: string): { end: number; 
   }
   const closers: string[] = []
   let quote = ''
-  let tokenStart = true
+  let token: 'start' | 'plain' | 'delimited' = 'start'
   for (let row = start; row < lines.length; row++) {
     const line = row === start ? raw : lines[row]
     for (let pos = 0; pos < line.length; pos++) {
@@ -255,23 +266,31 @@ function valueSpan(lines: string[], start: number, raw: string): { end: number; 
         if (quote === '"' && ch === '\\') pos++
         else if (ch === quote) {
           if (quote === "'" && line[pos + 1] === "'") pos++
-          else quote = ''
+          else {
+            quote = ''
+            token = 'delimited'
+          }
         }
-      } else if (tokenStart && (ch === '"' || ch === "'")) {
+      } else if (token === 'start' && (ch === '"' || ch === "'")) {
         quote = ch
-        tokenStart = false
       } else if (ch === '[' || ch === '{') {
         closers.push(ch === '[' ? ']' : '}')
-        tokenStart = true
+        token = 'start'
       } else if (ch === closers.at(-1)) {
         closers.pop()
-        tokenStart = false
+        token = 'delimited'
       } else if (ch === '#' && (pos === 0 || /[ \t]/.test(line[pos - 1]))) {
         break
-      } else if (ch === ',' || ch === ':') {
-        tokenStart = true
+      } else if (
+        ch === ',' ||
+        (ch === ':' &&
+          (token === 'delimited' || !line[pos + 1] || /[\s,[\]{}]/.test(line[pos + 1])))
+      ) {
+        // A plain key needs separation after its mapping colon. A delimited
+        // key also permits JSON-style adjacent values, e.g. {"key":"value"}.
+        token = 'start'
       } else if (ch !== ' ' && ch !== '\t') {
-        tokenStart = false
+        token = 'plain'
       }
       if (!quote && closers.length === 0) {
         const tail = line.slice(pos + 1)
@@ -280,7 +299,7 @@ function valueSpan(lines: string[], start: number, raw: string): { end: number; 
       }
     }
   }
-  return { end: lines.length, comment: -1 }
+  return null
 }
 
 /** A continuation line under a bare `key:`: indented, or a column-0 `- item`. */
