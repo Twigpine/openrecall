@@ -327,6 +327,9 @@ function parseScalar(raw: string): string | boolean | undefined {
   if ((c === '-' || c === '?' || c === ':') && (raw.length === 1 || /\s/.test(raw[1]))) {
     return undefined
   }
+  // An unquoted mapping separator makes a list item a mapping, even when
+  // its value is empty. Leave the containing entry opaque.
+  if (/:(?:[ \t]|$)/.test(raw)) return undefined
   if (raw.includes(' #') || raw.includes('\t#') || c === '#') return undefined
   return raw
 }
@@ -462,7 +465,7 @@ function formatScalar(s: string): string {
 }
 
 function formatListItem(s: string): string {
-  return needsQuotes(s) || /[,[\]]/.test(s) ? quote(s) : s
+  return needsQuotes(s) || /[,[\]{}]/.test(s) ? quote(s) : s
 }
 
 function quote(s: string): string {

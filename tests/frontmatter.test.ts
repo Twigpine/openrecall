@@ -238,6 +238,37 @@ describe('parseFrontmatter', () => {
     }
   })
 
+  test('implicit mappings in lists survive stamping as opaque entries', () => {
+    for (const entry of [
+      'custom:\n  - label: alpha\n  - label: beta',
+      'custom:\n  - label:',
+      'custom: [label: alpha]',
+      'custom: [label:]',
+      'custom: [label:\talpha]',
+    ]) {
+      const note = `---\n${entry}\nname: visible\n---\nbody`
+      const fm = parseFrontmatter(note)!
+      expect([...fm.fields]).toEqual([['name', 'visible']])
+      const first = stampForSave(null, note, ctx)
+      expect(first.content).toContain(`\n${entry}\n`)
+      expect(stampForSave(first.content, first.content, ctx).content).toBe(first.content)
+    }
+    const scalars = ['https://example.test', 'a:b', 'label: alpha', 'label:']
+    const list = 'custom: [https://example.test, a:b, "label: alpha", "label:"]'
+    expect(parseFrontmatter(`---\n${list}\n---\n`)?.fields.get('custom')).toEqual(scalars)
+  })
+
+  test('braces in flow-list strings survive serialization and another save', () => {
+    for (const item of ['a{b', 'a}b', 'a{b}c']) {
+      const note = `---\ncustom: ["${item}"]\n---\nbody`
+      const first = stampForSave(null, note, ctx)
+      expect(first.content).toContain(`custom: ["${item}"]`)
+      expect(parseFrontmatter(first.content)?.fields.get('custom')).toEqual([item])
+      expect(stampForSave(first.content, first.content, ctx).content).toBe(first.content)
+      expect(stampForSave(first.content, 'new body', ctx).meta.id).toBe(first.meta.id)
+    }
+  })
+
   test('colons inside plain flow values do not hide a following note ID', () => {
     const id = '01ARZ3NDEKTSV4RRFFQ69G5FAV'
     for (const value of ['{label: a:"b}', "[a:'b]", '{json: {"k":"a } b"}}', `{label: a":'b}`]) {
