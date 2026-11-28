@@ -64,6 +64,16 @@ export type Config = {
   readonly port: number
   readonly store: StoreDriver
   readonly dataDir: string
+  /**
+   * How many BlobStore operations a single request may keep in flight.
+   *
+   * A full read of a capped namespace is 2000 entry blobs; issuing all of
+   * them at once means 2000 concurrent S3 requests (sockets, memory, per-
+   * request latency) or 2000 simultaneous file descriptors. Bounded here so
+   * one namespace's size can never become a denial of service against the
+   * machine holding every tenant's ciphertext.
+   */
+  readonly storeConcurrency: number
   readonly s3: {
     readonly bucket: string
     readonly endpoint: string
@@ -125,6 +135,7 @@ export function parseConfig(env: Env = process.env): Config {
 
     store,
     dataDir: read(env, 'DATA_DIR') ?? './data',
+    storeConcurrency: envInt(env, 'STORE_CONCURRENCY', 16, { min: 1, max: 256 }),
     s3,
 
     auth: {

@@ -51,14 +51,6 @@ import {
 const SUPPORTS = ['base-precondition', 'entry-view', 'entries-view']
 
 /**
- * How many blob reads a namespace-wide read keeps in flight. Unbounded fan-out
- * was fine on a local disk and is a problem on an object store, where 2,000
- * simultaneous GETs are 2,000 sockets; 16 keeps a remote read pipelined
- * without opening more than a handful of connections.
- */
-const READ_CONCURRENCY = 16
-
-/**
  * `Promise.all(items.map(fn))` with at most `limit` calls in flight. A small
  * worker loop rather than a dependency: workers pull the next index off a
  * shared counter until the items run out, and results land at their item's
@@ -169,7 +161,7 @@ export async function getData(namespace: string, nsSlug: string): Promise<Memory
 
   const readKeys = async (keys: string[]): Promise<string[]> => {
     const missing: string[] = []
-    await mapLimit(keys, READ_CONCURRENCY, async key => {
+    await mapLimit(keys, config.storeConcurrency, async key => {
       const meta = m.entries[key]
       if (!meta) return
       const bytes = await readEntryBytes(store, nsSlug, key, meta.hash)
@@ -290,7 +282,7 @@ export async function getEntry(namespace: string, nsSlug: string, key: string): 
  * The read an incremental pull makes after comparing the hashes view against
  * what it already holds: it names only the keys whose hash moved, and gets
  * raw bytes back rather than base64 in JSON. The store is asked only for
- * those blobs, at most READ_CONCURRENCY at a time, through the same
+ * those blobs, at most config.storeConcurrency at a time, through the same
  * `readEntryBytes` the other two views use.
  *
  * Every key gets a frame and a status, so the view never has to choose
@@ -340,7 +332,7 @@ export async function getEntries(
       slot.status = 'invalid_key'
     }
   }
-  await mapLimit(lookups, READ_CONCURRENCY, read)
+  await mapLimit(lookups, config.storeConcurrency, read)
 
   // Same drift guard as getData: a write between the manifest read and a blob
   // read can move a key and reclaim its old blob, so look again under the
@@ -352,7 +344,7 @@ export async function getEntries(
     m = latest
     // The header now names the new manifest. Reconcile even previously found
     // and absent keys. A matching hash lets read() reuse the bytes.
-    await mapLimit(lookups, READ_CONCURRENCY, read)
+    await mapLimit(lookups, config.storeConcurrency, read)
   }
 
   const frames: Frame[] = slots.map(slot => ({

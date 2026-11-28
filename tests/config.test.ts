@@ -15,6 +15,7 @@ describe('parseConfig defaults', () => {
     expect(c.port).toBe(8080)
     expect(c.store).toBe('fs')
     expect(c.dataDir).toBe('./data')
+    expect(c.storeConcurrency).toBe(16)
     expect(c.s3.region).toBe('auto')
     expect(c.auth.allowUnauthenticated).toBe(false)
     expect(c.limits.maxEntryBytes).toBe(250_000)
@@ -73,6 +74,14 @@ describe('parseConfig rejects what it cannot interpret', () => {
     expect(parseConfig({ PORT: '0' }).port).toBe(0)
     expect(() => parseConfig({ PORT: '65536' })).toThrow(/PORT/)
     expect(() => parseConfig({ PORT: '-1' })).toThrow(/PORT/)
+  })
+
+  test('store concurrency accepts its bounds and rejects invalid values', () => {
+    expect(parseConfig({ STORE_CONCURRENCY: '1' }).storeConcurrency).toBe(1)
+    expect(parseConfig({ STORE_CONCURRENCY: '256' }).storeConcurrency).toBe(256)
+    for (const bad of ['0', '257', '-1', 'abc', '1.5', '1e999']) {
+      expect(() => parseConfig({ STORE_CONCURRENCY: bad })).toThrow(/STORE_CONCURRENCY/)
+    }
   })
 
   test('0 still disables the rate limit', () => {
