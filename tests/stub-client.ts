@@ -73,6 +73,18 @@ export class StubClient implements MemoryClient {
     return { namespace, version: this.version, entries: { ...this.entries }, updatedAt: {} }
   }
 
+  /**
+   * The same refusals the real client raises for the single-entry view: `empty`
+   * when the pretend server holds nothing at all, `entry_not_found` when it
+   * holds other keys but not this one.
+   */
+  async entry(_namespace: string, entryKey: string): Promise<string> {
+    this.raise()
+    if (Object.keys(this.entries).length === 0) throw httpError(404, 'empty')
+    if (!Object.hasOwn(this.entries, entryKey)) throw httpError(404, 'entry_not_found')
+    return this.entries[entryKey] as string
+  }
+
   async hashes(_namespace: string): Promise<Record<string, string>> {
     this.raise()
     const out: Record<string, string> = {}
@@ -130,7 +142,7 @@ export const clientSatisfiesMemoryClient: MemoryClient = null as unknown as Open
  * and failure-injection cases: tests/setup.ts pins MAX_ENTRIES_PER_NAMESPACE=5
  * and MAX_NAMESPACE_BYTES=5000, so a 250KB save trips the server's quota gates
  * before the tool under test is ever exercised. `pullError` injects a
- * client-layer failure.
+ * client-layer failure into every read (`pull` and `entry` alike).
  */
 
 export function makeStubClient(entries: Record<string, string> = {}) {
@@ -139,6 +151,12 @@ export function makeStubClient(entries: Record<string, string> = {}) {
   return {
     setPullError(e: Error | undefined) {
       pullError = e
+    },
+    async entry(_namespace: string, entryKey: string): Promise<string> {
+      if (pullError) throw pullError
+      if (Object.keys(store).length === 0) throw httpError(404, 'empty')
+      if (!Object.hasOwn(store, entryKey)) throw httpError(404, 'entry_not_found')
+      return store[entryKey] as string
     },
     async pull(namespace: string): Promise<PullResult> {
       if (pullError) throw pullError

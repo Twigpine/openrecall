@@ -66,6 +66,7 @@
     "format": "biome format --write",
     "lint": "biome lint",
     "build:binaries": "bun run scripts/build-binaries.ts",
+    "bench:recall": "bun run scripts/bench-recall.ts",
     "verify": "biome ci && bun run type-check && bun run build && bun test"
   },
   "exports": {

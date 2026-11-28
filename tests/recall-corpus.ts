@@ -438,6 +438,32 @@ export const HELD_OUT: HeldOutPair[] = [
   { query: 'what should a fresh joiner do on day one', expect: 'project/onboarding.md' },
 ]
 
+/**
+ * Off-domain probes: questions about cooking, geography, sport, gardening and
+ * music that nothing in CORPUS answers. The relevance floor is fitted so that
+ * these return nothing while the TUNING pairs still answer, and
+ * `scripts/fit-floor.ts` prints where each one lands. They are deliberately
+ * ordinary questions rather than nonsense: several share a real word with the
+ * corpus ("key" with the crypto note, "runs" with the CI note, "red" with the
+ * deploy note), which is exactly the incidental overlap a floor has to hold
+ * off without a stoplist, since those are words a caller must be able to
+ * search for.
+ */
+export const OFF_DOMAIN: string[] = [
+  'how long should I braise short ribs in red wine',
+  'which key is the moonlight sonata written in',
+  'which river runs through Budapest',
+  'when should I repot an orchid',
+  'who won the 1994 world cup final',
+  'what temperature should bread dough proof at',
+  'how many time zones does Russia span',
+  'how far is the marathon distance in kilometres',
+  'which vegetables grow well in clay soil',
+  'what tuning does a cello use',
+  'how do I keep basil from bolting in summer',
+  'which mountain range separates France and Spain',
+]
+
 // Words too common to carry meaning. Must match the ranker's own list, so the
 // overlap floor measures the same terms the ranker sees. Exported because
 // `tests/recall-regression.test.ts` asserts set equality against the ranker's

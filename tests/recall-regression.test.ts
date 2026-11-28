@@ -41,7 +41,6 @@
  */
 
 import { afterAll, describe, expect, test } from 'bun:test'
-import { spawnSync } from 'node:child_process'
 import {
   existsSync,
   mkdirSync,
@@ -56,7 +55,8 @@ import {
 import { tmpdir } from 'node:os'
 import { dirname, join, relative, resolve } from 'node:path'
 import { ciphertextHash, OpenRecallClient } from '../client/index.ts'
-import { rankMemories, stemTerm } from '../src/mcp/relevance.ts'
+import { encodeFrames } from '../src/frames.ts'
+import { rankMemories, splitFrontmatterText, stemTerm } from '../src/mcp/relevance.ts'
 import { makeTools } from '../src/mcp/tools.ts'
 import {
   BASELINE_RANK_MS,
@@ -234,33 +234,9 @@ describe('tuning-pair match arity', () => {
     ],
   }
 
-  /**
-   * The ranker's own frontmatter extraction, lifted out of its source. Same
-   * reason the stoplist is parsed rather than imported: `frontmatterDescription`
-   * is not exported from src/mcp/relevance.ts and this unit may not change
-   * src/. A second hand-written copy here would drift from the ranker exactly
-   * the way the corpus module's private stemmer did, and would then measure a
-   * description the ranker never saw.
-   */
-  const FM_SOURCE = /function frontmatterDescription\([\s\S]*?\n}/.exec(
-    readFileSync(join(REPO_ROOT, 'src/mcp/relevance.ts'), 'utf8'),
-  )
-  // Each branch starts with a distinct token: escape, character class, or other.
-  const FM_LITERAL_RE = /\/((?:\\.|\[[^\]]*\]|[^/\\[\n])+)\/([gimsuy]*)/g
-  const FM_LITERALS = [...(FM_SOURCE?.[0] ?? '').matchAll(FM_LITERAL_RE)].map(
-    m => new RegExp(m[1], m[2]),
-  )
-
-  const descriptionOf = (content: string): string => {
-    const block = FM_LITERALS[0].exec(content)
-    if (!block) return ''
-    const d = FM_LITERALS[1].exec(block[1])
-    return d ? d[1] : ''
-  }
-
   /** The three fields the ranker scores separately, as the ranker splits them. */
   const fieldsOf = (key: string) => ({
-    description: contentTerms(descriptionOf(CORPUS[key]), stemTerm),
+    description: contentTerms(splitFrontmatterText(CORPUS[key]).description, stemTerm),
     key: contentTerms(key, stemTerm),
     body: contentTerms(CORPUS[key], stemTerm),
   })
@@ -294,38 +270,22 @@ describe('tuning-pair match arity', () => {
     }
   }
 
-  test('the ranker frontmatter extraction was found and does extract a description', () => {
-    // Fail loudly rather than vacuously: an unparseable extraction must not read
-    // as "no entry has a description", which would make every placement `body`.
-    expect(`frontmatter extraction found:${FM_SOURCE !== null}`).toBe(
-      'frontmatter extraction found:true',
+  test('description and body share frontmatter boundaries', () => {
+    expect(splitFrontmatterText(CORPUS['project/deploy.md']).description).toContain('deploy')
+    expect(splitFrontmatterText('--- \r\ndescription: read cache\r\n---\t\r\ntext')).toEqual({
+      description: 'read cache',
+      name: '',
+      body: 'text',
+    })
+    expect(splitFrontmatterText('---\n---\nKestrel checks backups.\n---\nLater.').body).toBe(
+      'Kestrel checks backups.\n---\nLater.',
     )
-    expect(FM_LITERALS.length).toBe(2)
-    expect(descriptionOf(CORPUS['project/deploy.md'])).toContain('deploy')
-    expect(descriptionOf('no frontmatter here')).toBe('')
-  })
-
-  test('frontmatter literal extraction preserves escapes, character classes and flags', () => {
-    const source = String.raw`const a = /a\/b/i; const b = /[/]/g; const c = /\[\]/m`
-    expect([...source.matchAll(FM_LITERAL_RE)].map(m => [m[1], m[2]])).toEqual([
-      [String.raw`a\/b`, 'i'],
-      ['[/]', 'g'],
-      [String.raw`\[\]`, 'm'],
-    ])
-  })
-
-  test('frontmatter literal extraction rejects repeated bracket classes promptly', () => {
-    // Exercise V8 too: Bun caps backtracking, but Node can hang on this input.
-    // A subprocess deadline stops a regressed matcher from hanging the suite.
-    const source = `/${'[]'.repeat(128)}`
-    const probe = spawnSync(
-      'node',
-      ['--eval', `console.log([...${JSON.stringify(source)}.matchAll(${FM_LITERAL_RE})].length)`],
-      { encoding: 'utf8', timeout: 2_000, killSignal: 'SIGKILL' },
-    )
-    expect(probe.error).toBeUndefined()
-    expect(probe.status).toBe(0)
-    expect(probe.stdout.trim()).toBe('0')
+    const incomplete = '---\ndescription: only the body'
+    expect(splitFrontmatterText(incomplete)).toEqual({
+      description: '',
+      name: '',
+      body: incomplete,
+    })
   })
 
   test('each expected entry carries its query terms in the pinned fields', () => {
@@ -1049,7 +1009,7 @@ function corpusFreeIdentifiers(raw: string): string[] {
  * a corpus edit is exactly the diff a reviewer should read as content rather
  * than as code.
  */
-function corpusRisks(raw: string): string[] {
+function corpusRisks(raw: string, allowed: readonly string[] = CORPUS_IDENTIFIERS): string[] {
   const out: string[] = []
   const code = stripToCode(raw)
   // Comments removed, string bodies kept: the sweep below needs to read inside
@@ -1058,8 +1018,7 @@ function corpusRisks(raw: string): string[] {
 
   const declared = declaredNames(code)
   for (const n of [...new Set(freeIdentifiers(code))].sort())
-    if (!declared.has(n) && !CORPUS_IDENTIFIERS.includes(n))
-      out.push(`names unvetted identifier \`${n}\``)
+    if (!declared.has(n) && !allowed.includes(n)) out.push(`names unvetted identifier \`${n}\``)
 
   const properties = [
     ...[...code.matchAll(/\.\s*([A-Za-z_$][\w$]*)/g)].map(m => m[1]),
@@ -1238,6 +1197,53 @@ describe('corpus provenance', () => {
       m => m[1],
     )
     expect(declared).toEqual([])
+  })
+})
+
+/**
+ * Globals the bench fixture generator may name, pinned exactly like
+ * CORPUS_IDENTIFIERS. `Math` is here for `Math.imul` in the seeded generator;
+ * it reaches no capability, and the banned-property sweep still applies to
+ * it. Everything else the module needs it declares itself.
+ */
+const FIXTURE_IDENTIFIERS = ['Math', 'Record', 'Set', 'String']
+
+/**
+ * The fixture's reproducibility payload: every export plus one full
+ * 2,000-entry generation, so two subprocesses must agree on the corpus bytes
+ * and the question list and not only on the constants.
+ */
+const fixtureProbe = (abs: string) => `
+const m = await import(${JSON.stringify(abs)})
+const norm = v =>
+  v instanceof Set ? { set: [...v] } : typeof v === 'function' ? { fn: String(v) } : v
+const payload = Object.keys(m).sort().map(k => [k, norm(m[k])])
+payload.push(['fixture(1, 2000)', m.fixture(1, 2000)])
+process.stdout.write(JSON.stringify(payload))
+`
+
+describe('bench fixture provenance', () => {
+  // Same rules as the corpus module, for the same reason: the recall bench
+  // generates a corpus from a seed, and the only way the numbers it produces
+  // can mean anything is if nothing about the machine it runs on reaches
+  // them. A generator that read a path, an env var or a clock would be a
+  // generator whose baseline nobody else could reproduce.
+  const FIXTURE_MODULE = join(REPO_ROOT, 'tests/bench/recall-fixture.ts')
+
+  test('the fixture module names nothing it does not declare, and loads nothing', () => {
+    const raw = readFileSync(FIXTURE_MODULE, 'utf8')
+    expect(corpusRisks(raw, FIXTURE_IDENTIFIERS)).toEqual([])
+    expect(corpusFreeIdentifiers(raw)).toEqual(FIXTURE_IDENTIFIERS)
+  })
+
+  test('the fixture module generates the same bytes under a different cwd and environment', () => {
+    const { risks, out } = reproducibility(fixtureProbe(FIXTURE_MODULE))
+    // Non-vacuous: the payload carries a whole 2,000-entry corpus.
+    expect(out.length).toBeGreaterThan(500_000)
+    expect(out).toContain('MEMORY.md')
+    expect(out).toContain('"kind":"paraphrase"')
+    expect(out).toContain('GENERATOR_VERSION')
+    expect(risks).toEqual([])
   })
 })
 
@@ -1715,6 +1721,97 @@ function ciphertextServer() {
 }
 
 /**
+ * `ciphertextServer` as a current release presents itself: it advertises the
+ * single-entry and bulk entries views and answers them, the latter as the
+ * binary frames the client decodes. The stub above sends no `supports`, so
+ * every read it answers goes through the full JSON view; this one drives the
+ * incremental path (hashes view, then frames), which is the path a current
+ * client takes against a current server, and it has to be as plaintext-free.
+ */
+function framesServer() {
+  const entries = new Map<string, string>()
+  let version = 0
+  const stamp = '2026-09-04T00:00:00.000Z'
+  const hashesOf = () => Object.fromEntries([...entries].map(([k, v]) => [k, ciphertextHash(v)]))
+  return async ({ href, method, body }: { href: string; method: string; body: string }) => {
+    const u = new URL(href)
+    if (method === 'PUT') {
+      let payload: { entries?: Record<string, string>; deletions?: string[] }
+      try {
+        payload = JSON.parse(body)
+      } catch {
+        return new Response(null, { status: 400 })
+      }
+      for (const [k, v] of Object.entries(payload.entries ?? {})) entries.set(k, v)
+      const deleted = (payload.deletions ?? []).filter(k => entries.delete(k))
+      version++
+      return Response.json({ version, deleted })
+    }
+    if (method === 'DELETE') {
+      entries.delete(u.searchParams.get('key') ?? '')
+      version++
+      return new Response(null, { status: 204 })
+    }
+    if (entries.size === 0)
+      return Response.json(
+        { error: { code: 'empty', message: 'no memory for this namespace yet' } },
+        { status: 404 },
+      )
+    if (method === 'POST' && u.searchParams.get('view') === 'entries') {
+      const { keys } = JSON.parse(body) as { keys: string[] }
+      const frames = keys.map(key => {
+        const ct = entries.get(key)
+        if (ct === undefined) {
+          return {
+            meta: { key, hash: null, size: 0, updatedAt: null, status: 'not_found' as const },
+            bytes: new Uint8Array(0),
+          }
+        }
+        const bytes = new Uint8Array(Buffer.from(ct, 'base64'))
+        return {
+          meta: {
+            key,
+            hash: ciphertextHash(ct),
+            size: bytes.length,
+            updatedAt: stamp,
+            status: 'ok' as const,
+          },
+          bytes,
+        }
+      })
+      const encoded = encodeFrames(
+        {
+          namespace: decodeURIComponent(u.pathname.slice('/api/memory/'.length)),
+          version,
+          lastModified: stamp,
+          erasure: 'erases',
+          count: frames.length,
+        },
+        frames,
+      )
+      return new Response(encoded as unknown as BodyInit, {
+        headers: { 'content-type': 'application/octet-stream', 'x-openrecall-frames': '1' },
+      })
+    }
+    if (u.searchParams.get('view') === 'hashes')
+      return Response.json({
+        version,
+        entryChecksums: hashesOf(),
+        entryUpdatedAt: Object.fromEntries([...entries.keys()].map(k => [k, stamp])),
+        supports: ['base-precondition', 'entry-view', 'entries-view'],
+      })
+    if (u.searchParams.get('view') === 'entry') {
+      const key = u.searchParams.get('key') ?? ''
+      const ct = entries.get(key)
+      if (ct === undefined)
+        return Response.json({ error: { code: 'entry_not_found' } }, { status: 404 })
+      return Response.json({ version, key, entry: ct, entryChecksum: ciphertextHash(ct) })
+    }
+    return Response.json({ version, content: { entries: Object.fromEntries(entries) } })
+  }
+}
+
+/**
  * What one captured conversation got wrong: an off-origin request, the sentinel
  * in a URL, a header or a body, or a body the normalizer could not read.
  *
@@ -1860,6 +1957,60 @@ describe('single-origin tool traffic', () => {
     expect(listed).toContain('notes/other.md')
     // Reads against a populated namespace, so the GET bodies carry real entries.
     expect(cap.bodies.filter(b => b.includes('"entries"')).length).toBeGreaterThan(1)
+    expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
+    assertNoPlaintext(cap)
+  })
+
+  // The same rule down the incremental path: the stub advertises the entry
+  // views, so recall and search go hashes-view-then-frames and get goes
+  // through the single-entry view. The POST carries a key list in its body,
+  // which is a new place for plaintext to land, and the one this checks.
+  test('no plaintext reaches the wire down the incremental path either', async () => {
+    const { cap, fn } = intercept(framesServer())
+    globalThis.fetch = fn
+    let recalled = ''
+    let got = ''
+    let searched = ''
+    let listed = ''
+    try {
+      const client = new OpenRecallClient({ url, passphrase: 'test-passphrase', cache: true })
+      const tools = makeTools(client, NS)
+      await tools.save(
+        'notes/ledger.md',
+        `---\ndescription: the quokka ledger note\n---\nThe quokka ledger records ${sentinel} in full.`,
+      )
+      await tools.save('notes/other.md', `A second note also carrying ${sentinel}.`)
+      recalled = (await tools.recall('quokka ledger records')).text
+      // A second recall is the warm one: cached, so no body read at all.
+      recalled = (await tools.recall('quokka ledger records')).text
+      searched = (await tools.search('quokka')).text
+      const beforeGet = cap.hrefs.length
+      got = (await tools.get('notes/ledger.md')).text
+      expect(
+        cap.hrefs.slice(beforeGet).map(h => Array.from(new URL(h).searchParams.entries())),
+      ).toEqual([
+        [
+          ['view', 'entry'],
+          ['key', 'notes/ledger.md'],
+        ],
+      ])
+      listed = (await tools.list()).text
+    } finally {
+      globalThis.fetch = realFetch
+    }
+
+    expect(got).toContain(sentinel)
+    expect(recalled).toContain('notes/ledger.md')
+    expect(searched).toContain('notes/ledger.md')
+    expect(listed).toContain('notes/other.md')
+    // Non-vacuous: the bulk view was really used, exactly once (the first
+    // recall), and the full view never.
+    const posts = cap.hrefs.filter(
+      (h, i) => h.includes('view=entries') && cap.bodies[i]?.includes('"keys"'),
+    )
+    expect(posts.length).toBe(1)
+    // A bodyless request with no view is the full read; the PUTs have bodies.
+    expect(cap.hrefs.filter((h, i) => !new URL(h).search && !cap.bodies[i])).toEqual([])
     expect([...new Set(cap.hrefs.map(h => new URL(h).origin))]).toEqual([url])
     assertNoPlaintext(cap)
   })

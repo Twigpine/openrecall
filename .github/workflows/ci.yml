@@ -21,8 +21,8 @@ jobs:
           node-version: '24.22.1'
       - run: bun install --frozen-lockfile
       # The same gate the release workflow's verify job runs: Biome, type-check,
-      # the Node bundle (so the MCP stdio tests also exercise what
-      # `npx -y @twigpine/openrecall mcp` runs, dist/openrecall.js under Node),
-      # then the tests. Change it in package.json, not here.
+      # the build (tests/package.test.ts installs the result and runs it under
+      # Node; the stdio tests bundle the CLI themselves), then the tests.
+      # Change it in package.json, not here.
       - name: Lint, type-check, build, test
         run: bun run verify

@@ -8,9 +8,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readdirSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
-import { OpenRecallClient } from '../client/index.ts'
+import { OpenRecallClient, OpenRecallProtocolError } from '../client/index.ts'
 import { rankMemoriesDetailed } from '../src/mcp/relevance.ts'
-import { type MemoryTools, makeTools } from '../src/mcp/tools.ts'
+import { type MemoryTools, makeTools, type ToolResult } from '../src/mcp/tools.ts'
 import { FAKE } from './secret-fixtures.ts'
 import { httpError, makeStubClient, StubClient } from './stub-client.ts'
 
@@ -1183,5 +1183,148 @@ describe('a refused entry inside a successful push', () => {
     expect(r.text).not.toMatch(/\bunchanged\b/)
     // And the server really is empty, so the refusal is not a mislabelled write.
     expect((await real.list()).text).not.toContain('big.md')
+  })
+})
+
+/**
+ * `memory_get` reads through the single-entry view. The point is the cost
+ * shape: one manifest read plus one blob, so a get no longer pays for every
+ * entry in the namespace. The first test pins that by watching the wire; the
+ * rest pin the refusals the view can express that the full read could not.
+ */
+describe('memory_get reads one entry, not the namespace', () => {
+  test('the only request a get makes is the single-entry view', async () => {
+    const namespace = 'user:me/single-entry-wire'
+    expect(
+      (await tools.save('one/of-many.md', 'the entry a get asks for', namespace)).isError,
+    ).toBeUndefined()
+    const seen: string[] = []
+    const recording = new OpenRecallClient({
+      url: `http://localhost:${server.port}`,
+      passphrase: 'mcp-pass',
+      fetch: (input, init) => {
+        seen.push(`${(init?.method ?? 'GET').toUpperCase()} ${new URL(input).search}`)
+        return fetch(input, init)
+      },
+    })
+    const r = await makeTools(recording, namespace).get('one/of-many.md')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('the entry a get asks for')
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toContain('view=entry')
+    expect(seen[0]).toContain('key=one%2Fof-many.md')
+  })
+
+  test('an unreadable body is reported as loss, never as a missing entry', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'gone.md': 'x' }
+    stub.error = httpError(503, 'entry_unreadable')
+    const r = await makeTools(stub, 'user:me').get('gone.md')
+    expect(r.isError).toBe(true)
+    expect(r.text).toContain('gone.md')
+    expect(r.text).toContain('do not save over it')
+    expect(r.text).not.toMatch(/no entry|no memory stored/)
+  })
+
+  test('a key the server refuses to look up reads as not found, not as a failure', async () => {
+    const stub = new StubClient()
+    stub.entries = { 'a.md': 'x' }
+    stub.error = httpError(400, 'invalid_key')
+    const r = await makeTools(stub, 'user:me').get('../x')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('no entry')
+    expect(r.text).toContain('memory_list')
+  })
+
+  test('a server without the entry view is read through the full pull instead', async () => {
+    const older = {
+      ...makeStubClient({ 'a.md': 'body from the full view' }),
+      entry: async () => {
+        throw new OpenRecallProtocolError('entry', 'user:me', 'no entry in the response for "a.md"')
+      },
+    }
+    const r = await makeTools(older, 'user:me').get('a.md')
+    expect(r.isError).toBeUndefined()
+    expect(r.text).toContain('body from the full view')
+  })
+})
+
+/**
+ * Every tool result says where its time went. The numbers themselves are not
+ * asserted (they are whatever this machine does today); their presence, their
+ * shape, and the fact that they never enter the text are.
+ */
+describe('every tool result carries stage timings', () => {
+  test('recall, get, list, save, search and delete report their stages', async () => {
+    // Its own namespace: the shared one is at the test server's 5-entry cap by
+    // now, and a refused save would make the get below read nothing.
+    const NS = 'user:me/timed'
+    expect(
+      (await tools.save('timed/a.md', 'A note about release timing and deploys.', NS)).isError,
+    ).toBeUndefined()
+    const checks: [string, ToolResult][] = [
+      ['recall', await tools.recall('release timing', NS)],
+      ['get', await tools.get('timed/a.md', NS)],
+      ['list', await tools.list(NS)],
+      ['save', await tools.save('timed/b.md', 'another note', NS)],
+      ['search', await tools.search('release', NS)],
+      ['delete', await tools.delete('timed/b.md', NS)],
+    ]
+    for (const [name, r] of checks) {
+      const t = r.timings
+      expect(`${name}: ${t !== undefined}`).toBe(`${name}: true`)
+      if (!t) continue
+      for (const v of Object.values(t)) expect(v).toBeGreaterThanOrEqual(0)
+      // The stages are measured inside the total; rounding is the only slack.
+      expect(t.total + 0.5).toBeGreaterThanOrEqual(t.fetch + t.decrypt + t.rank + t.format)
+      expect(r.text).not.toContain('timings')
+    }
+    const recall = checks[0]?.[1].timings
+    expect(recall?.entries).toBeGreaterThanOrEqual(1)
+    expect(recall?.bytes).toBeGreaterThan(0)
+    expect(checks[1]?.[1].timings?.entries).toBe(1)
+    expect(checks[1]?.[1].timings?.bytes).toBeGreaterThan(0)
+    expect(checks[2]?.[1].timings?.entries).toBeGreaterThanOrEqual(1)
+  })
+
+  test('parallel scopes report elapsed fetch time and count both responses', async () => {
+    const stub = makeStubClient({ 'read.md': 'hello' })
+    const pull = stub.pull.bind(stub)
+    const barrier = Promise.withResolvers<void>()
+    let started = 0
+    stub.pull = async ns => {
+      if (++started === 2) barrier.resolve()
+      await barrier.promise
+      await Bun.sleep(20)
+      return { ...(await pull(ns)), timings: { fetchMs: 15, decryptMs: 2, parseMs: 1, bytes: 40 } }
+    }
+    const r = await makeTools(stub, 'user:me').recall('hello', undefined, 5, [
+      'user:one',
+      'user:two',
+    ])
+    expect(r.timings).toMatchObject({ fetch: 16, decrypt: 2, entries: 2, bytes: 80 })
+  })
+
+  test('a long no-hit query fits in the recall response budget', async () => {
+    const tool = makeTools(makeStubClient({ 'a.md': 'apple' }), 'user:me')
+    for (const query of ['unknown '.repeat(900), 'the '.repeat(1800)]) {
+      expect((await tool.recall(query)).text.length).toBeLessThanOrEqual(4000)
+    }
+  })
+
+  test('a refusal is timed too', async () => {
+    const stub = new StubClient()
+    stub.error = httpError(401, 'unauthorized')
+    const r = await makeTools(stub, 'user:me').recall('anything')
+    expect(r.isError).toBe(true)
+    expect(r.timings?.total).toBeGreaterThanOrEqual(0)
+  })
+
+  test('a client without its own breakdown is charged to fetch', async () => {
+    const r = await makeTools(makeStubClient({ 'a.md': 'alpha beta' }), 'user:me').recall('alpha')
+    const t = r.timings
+    expect(t?.decrypt).toBe(0)
+    expect(t?.bytes).toBe(0)
+    expect(t?.entries).toBe(1)
   })
 })
