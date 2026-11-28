@@ -110,7 +110,33 @@ export interface MirrorStore {
   listBlobs(namespace: string): Promise<string[]>
 }
 
+/**
+ * The hashes view in full: per-key checksums, per-key write timestamps, and
+ * the server's advertised capabilities, with no ciphertext bodies.
+ *
+ * This is what a directory sync needs to plan a round trip. Checksums decide
+ * which entries differ; the timestamps decide which side of a two-sided
+ * difference changed last. `entryUpdatedAt` is empty against a server that
+ * predates the field (check `supports` for `'hashes-updated-at'`), and a
+ * caller cannot resolve conflicts by recency there — it must ask its user.
+ */
+export type NamespaceMetadata = {
+  version: number
+  /** entryKey -> sha256:<hex> of the ciphertext the manifest names. */
+  entryChecksums: Record<string, string>
+  /**
+   * entryKey -> ISO 8601 of the entry's last write, as the server's manifest
+   * records it. Absent for a key the server did not report, which is what a
+   * server predating the field looks like.
+   */
+  entryUpdatedAt: Record<string, string | undefined>
+  /** Capabilities the server advertised on the same read. */
+  supports: string[]
+}
+
 export type PullOptions = {
+  /** Keep an earlier metadata snapshot as the write precondition. */
+  observe?: boolean
   /**
    * When the server cannot be reached (a timeout or a transport failure, never
    * an HTTP refusal: a 401, 403, 429 or 5xx is an answer and is reported as
@@ -655,6 +681,29 @@ export class OpenRecallClient {
   }
 
   /**
+   * The whole hashes view — checksums AND per-entry write timestamps — as one
+   * read, for callers that have to order changes rather than only detect them
+   * (a directory sync deciding which side of a conflict is newer).
+   *
+   * Records what it saw by default, exactly like `hashes`: the checksums are
+   * the manifest's own, so they are an exact base for later writes. A caller
+   * that only wants the map passes `observe: false` and keeps the guarantee
+   * rules described there.
+   */
+  async metadata(namespace: string, opts: { observe?: boolean } = {}): Promise<NamespaceMetadata> {
+    const { version, entryChecksums, entryUpdatedAt, supports } = await this.hashesView(namespace)
+    if (opts.observe !== false) {
+      lruSet(this.observed, namespace, { hashes: { ...entryChecksums }, enumerated: true })
+    }
+    return {
+      version,
+      entryChecksums: { ...entryChecksums },
+      entryUpdatedAt: sanitizeUpdatedAt(entryUpdatedAt, entryChecksums),
+      supports,
+    }
+  }
+
+  /**
    * The raw hashes view, without recording what it saw. `push` uses this for
    * its delta computation, which must not count as the caller having read the
    * namespace; see `observed`.
@@ -738,20 +787,20 @@ export class OpenRecallClient {
   async pull(namespace: string, opts: PullOptions = {}): Promise<PullResult> {
     const clock: Clock = { fetchMs: 0, parseMs: 0, decryptMs: 0, bytes: 0 }
     try {
-      return await this.pullOnline(namespace, clock)
+      return await this.pullOnline(namespace, clock, opts.observe !== false)
     } catch (err) {
       const disconnected =
         err instanceof OpenRecallTimeoutError ||
         (err !== null && typeof err === 'object' && this.transportErrors.has(err))
       if (opts.allowStale && this.mirror && disconnected) {
-        const stale = await this.pullFromMirror(namespace, clock)
+        const stale = await this.pullFromMirror(namespace, clock, opts.observe !== false)
         if (stale) return stale
       }
       throw err
     }
   }
 
-  private async pullOnline(namespace: string, clock: Clock): Promise<PullResult> {
+  private async pullOnline(namespace: string, clock: Clock, observe: boolean): Promise<PullResult> {
     const requestedAt = Date.now()
     const started = performance.now()
     const view = await this.hashesView(namespace)
@@ -764,7 +813,7 @@ export class OpenRecallClient {
       // this can therefore assert absence rather than overwrite blindly.
       await this.mirrorWrite(namespace, 0, new Map(), {}, requestedAt)
       this.remember(namespace, new Map())
-      lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
+      if (observe) lruSet(this.observed, namespace, { hashes: {}, enumerated: true })
       return {
         namespace,
         version: 0,
@@ -922,10 +971,11 @@ export class OpenRecallClient {
     this.remember(namespace, next)
     // The legacy path records what it decrypted, exactly as the full view
     // always has; the incremental path records the manifest. See `observed`.
-    lruSet(this.observed, namespace, {
-      hashes: enumerated ? live : { ...hashes },
-      enumerated,
-    })
+    if (observe)
+      lruSet(this.observed, namespace, {
+        hashes: enumerated ? live : { ...hashes },
+        enumerated,
+      })
     return {
       namespace,
       version,
@@ -1158,6 +1208,7 @@ export class OpenRecallClient {
   private async pullFromMirror(
     namespace: string,
     clock: Clock,
+    observe: boolean,
     previous?: MirrorManifest,
   ): Promise<PullResult | null> {
     const mirror = this.mirror
@@ -1183,7 +1234,7 @@ export class OpenRecallClient {
       if (!bytes) {
         clock.fetchMs += performance.now() - t
         // A concurrent publication can collect a blob from the snapshot this reader selected.
-        return previous ? null : this.pullFromMirror(namespace, clock, m)
+        return previous ? null : this.pullFromMirror(namespace, clock, observe, m)
       }
       held.set(entryKey, { hash: row.hash, size: bytes.byteLength, bytes })
     }
@@ -1200,7 +1251,7 @@ export class OpenRecallClient {
       next.set(cacheKey(entryKey, h.hash), { plaintext: h.plaintext, size: h.size })
     }
     this.remember(namespace, next)
-    lruSet(this.observed, namespace, { hashes: { ...hashes }, enumerated: false })
+    if (observe) lruSet(this.observed, namespace, { hashes: { ...hashes }, enumerated: false })
     const fetched = Date.parse(m.fetchedAt)
     const staleMs = Number.isFinite(fetched) ? Math.max(0, Date.now() - fetched) : 0
     return {
@@ -1330,6 +1381,22 @@ export class OpenRecallClient {
     await this.mirrorTry(() =>
       mirror.withWriteLock ? mirror.withWriteLock(namespace, write) : write(),
     )
+  }
+
+  /**
+   * The ciphertext hash this client would produce for a plaintext entry — the
+   * value the server's hashes view reports for that key when the entry is
+   * unchanged.
+   *
+   * Deterministic encryption (see client/crypto.ts) is what makes this a
+   * comparison rather than a guess: the same passphrase, key and plaintext
+   * always encrypt to the same bytes, so a caller can learn that a stored
+   * entry matches local content WITHOUT either side transmitting it. A
+   * directory sync uses exactly that to skip unchanged files in both
+   * directions. No request is made; nothing leaves the process.
+   */
+  ciphertextHashOf(namespace: string, entryKey: string, plaintext: string): string {
+    return ciphertextHash(encryptEntry(this.key(namespace), entryKey, plaintext))
   }
 
   /**

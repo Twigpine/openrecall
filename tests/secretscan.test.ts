@@ -43,4 +43,23 @@ describe('secret scanner', () => {
     expect(enforce(entries, 'warn').length).toBe(1)
     expect(enforce(entries, 'off')).toHaveLength(0)
   })
+
+  test('block-mode errors never echo the match fragment', () => {
+    const entries = { 'a.md': `line one\ngh token ${FAKE.github}` }
+    const finding = scanEntry('a.md', entries['a.md'])[0]
+    let err: SecretFoundError | undefined
+    try {
+      enforce(entries, 'block')
+    } catch (e) {
+      err = e as SecretFoundError
+    }
+
+    expect(err).toBeInstanceOf(SecretFoundError)
+    // The message names the key, line and rule for the operator, but the
+    // redacted match stays on `findings` and out of anything that gets logged.
+    expect(err?.message).toContain('a.md:2')
+    expect(err?.message).toContain(finding.description)
+    expect(err?.message).not.toContain(finding.match)
+    expect(err?.message).not.toContain('…')
+  })
 })

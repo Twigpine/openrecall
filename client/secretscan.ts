@@ -112,13 +112,20 @@ export function scanEntries(entries: Record<string, string>): Finding[] {
   return all
 }
 
-/** Thrown by enforce() in `block` mode when secrets are found. */
+/**
+ * Thrown by enforce() in `block` mode when secrets are found.
+ *
+ * The message names the entry, line, and rule but deliberately omits
+ * `Finding.match`: CLIs and MCP tools print this message, and even a redacted
+ * fragment is plaintext that must not be logged. Callers that need the
+ * redacted match can read `findings`.
+ */
 export class SecretFoundError extends Error {
   readonly findings: Finding[]
   constructor(findings: Finding[]) {
     super(
       `refusing to upload: ${findings.length} potential secret(s) detected.\n` +
-        findings.map(f => `  ${f.entryKey}:${f.line} — ${f.description} (${f.match})`).join('\n') +
+        findings.map(f => `  ${f.entryKey}:${f.line} — ${f.description}`).join('\n') +
         `\nReview and remove them, or set OPENRECALL_SCAN=warn to override (NOT recommended).`,
     )
     this.findings = findings

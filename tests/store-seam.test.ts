@@ -116,7 +116,8 @@ describe('store factory seam', () => {
     // version of this test lose reach without failing: any module added to or
     // dropped from the production graph should force a look at this number.
     expect(seen.has(join(root, 'src/mcp/frontmatter-block.ts'))).toBe(true)
-    expect(seen.size).toBe(40)
+    expect(seen.has(join(root, 'src/cli/sync.ts'))).toBe(true)
+    expect(seen.size).toBe(41)
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })

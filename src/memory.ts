@@ -48,7 +48,7 @@ import {
  * server that enforces the write precondition from one that ignores an unknown
  * body field, so it would report a guarantee it is not getting.
  */
-const SUPPORTS = ['base-precondition', 'entry-view', 'entries-view']
+const SUPPORTS = ['base-precondition', 'entry-view', 'entries-view', 'hashes-updated-at']
 
 /**
  * How many blob reads a namespace-wide read keeps in flight. Unbounded fan-out

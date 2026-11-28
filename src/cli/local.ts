@@ -62,11 +62,15 @@ async function abandoned(path: string, ageMs: number): Promise<boolean> {
 }
 
 /** Publish the complete owner stamp atomically. Readers can never observe a half-written lock. */
-export async function withLockFile<T>(path: string, fn: () => Promise<T>): Promise<T> {
+export async function withLockFile<T>(
+  path: string,
+  fn: () => Promise<T>,
+  waitMs = LOCK_WAIT_MS,
+): Promise<T> {
   const token = randomBytes(8).toString('hex')
   const stamp = `${process.pid} ${token}\n`
   const candidate = `${path}.owner-${process.pid}-${token}`
-  const deadline = Date.now() + LOCK_WAIT_MS
+  const deadline = Date.now() + waitMs
   const take = async <V>(target: string, ageMs: number, run: () => Promise<V>): Promise<V> => {
     for (;;) {
       try {

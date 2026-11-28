@@ -118,7 +118,12 @@ describe('base precondition', () => {
     const h = await getHashes(ns, namespaceSlug(ns))
     // Exact, not toContain: a capability the server does not implement must not
     // be advertisable just because the real one is also present.
-    expect(h.supports).toEqual(['base-precondition', 'entry-view', 'entries-view'])
+    expect(h.supports).toEqual([
+      'base-precondition',
+      'entry-view',
+      'entries-view',
+      'hashes-updated-at',
+    ])
   })
 })
 

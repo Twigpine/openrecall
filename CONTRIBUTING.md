@@ -39,7 +39,7 @@ client/         the zero-knowledge client (encrypt → ciphertext)
   crypto.ts       AES-256-GCM + scrypt; deterministic nonce for delta sync
   secretscan.ts   pre-encryption secret scanner
   index.ts        OpenRecallClient (push/pull/delta)
-bin/            the CLI (openrecall.ts): init | setup | status | push | pull | mcp | serve
+bin/            the CLI (openrecall.ts): init | setup | status | push | pull | sync | mcp | serve
 scripts/        build.ts — the single-file Node bundle
 skills/         the openrecall-memory agent skill (canonical guidance)
 .claude-plugin/ Claude Code / OpenClaude plugin + marketplace manifests
