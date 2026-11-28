@@ -30,6 +30,8 @@ export type ConfigFile = {
   passphrase?: string
   namespace?: string
   scan?: ScanMode
+  /** `false` turns off the in-memory plaintext cache and the on-disk ciphertext mirror. */
+  cache?: boolean
 }
 
 export type Settings = {
@@ -44,6 +46,12 @@ export type Settings = {
   scan: ScanMode
   /** Where local mode keeps ciphertext (OPENRECALL_DATA_DIR, default <home>/data). */
   dataDir: string
+  /**
+   * Whether the client keeps decrypted entries in memory between reads and,
+   * in remote mode, ciphertext on disk under <home>/cache. On unless
+   * OPENRECALL_CACHE=off or the config file says `"cache": false`.
+   */
+  cache: boolean
 }
 
 type Env = Record<string, string | undefined>
@@ -56,6 +64,7 @@ export const OVERRIDE_VARS = [
   'OPENRECALL_PASSPHRASE_FILE',
   'OPENRECALL_NAMESPACE',
   'OPENRECALL_SCAN',
+  'OPENRECALL_CACHE',
 ] as const
 
 function clean(v: string | undefined): string | undefined {
@@ -181,7 +190,20 @@ export function resolveSettings(env: Env = process.env): Settings {
     namespace: pick('OPENRECALL_NAMESPACE', file.namespace) ?? DEFAULT_NAMESPACE,
     scan: validateScan(pick('OPENRECALL_SCAN', file.scan) ?? 'block'),
     dataDir: resolve(clean(env.OPENRECALL_DATA_DIR) ?? join(home, 'data')),
+    cache: cacheEnabled(clean(env.OPENRECALL_CACHE), file.cache),
   }
+}
+
+/**
+ * Explicit environment switches override the file. An invalid switch must
+ * surface at startup because it decides whether a disk mirror is written.
+ */
+function cacheEnabled(envValue: string | undefined, fileValue: boolean | undefined): boolean {
+  if (envValue === undefined) return fileValue !== false
+  const value = envValue.toLowerCase()
+  if (['off', 'false', '0', 'no'].includes(value)) return false
+  if (['on', 'true', '1', 'yes'].includes(value)) return true
+  throw new Error('OPENRECALL_CACHE must be on or off (also accepts true/false, yes/no, 1/0)')
 }
 
 /**

@@ -203,7 +203,8 @@ current ciphertext hash still matches the hash that sync recorded. A remote
 entry this directory has never seen, or one that changed remotely since the
 last sync, is downloaded rather than deleted, so a mirror cannot destroy a
 colleague's or another agent's concurrent writes. The guard lives in
-`~/.openrecall/sync-state.json` as the last-synced ciphertext hash per key.
+`~/.openrecall/sync/<store-scope>/state.json` as the last-synced ciphertext hash per key.
+Switching remote accounts, servers, or local data directories starts a separate sync history.
 
 A deletion that happened remotely is reported rather than applied or silently
 re-uploaded: the local file is kept and the report names it. Re-run with

@@ -35,8 +35,8 @@ afterEach(() => resetStore())
 describe('filesystem listing', () => {
   test('an absent prefix lists nothing rather than throwing', async () => {
     resetStore()
-    // reclaim lists a namespace's blob directory on every mutating write,
-    // including the first, when that directory does not exist yet.
+    // reclaim lists a namespace's blob directory on the first mutating write
+    // per process, when that directory may not exist yet.
     expect(await getStore().list('ns/definitely-not-here/blobs/')).toEqual([])
   })
 
@@ -115,7 +115,9 @@ describe('store factory seam', () => {
     // is an exact count, not a floor, because a floor is what let an earlier
     // version of this test lose reach without failing: any module added to or
     // dropped from the production graph should force a look at this number.
-    expect(seen.size).toBe(37) // includes the encrypted MCP project directory, MCP server status, and the CLI's directory sync
+    expect(seen.has(join(root, 'src/mcp/frontmatter-block.ts'))).toBe(true)
+    expect(seen.has(join(root, 'src/cli/sync.ts'))).toBe(true)
+    expect(seen.size).toBe(41)
     expect([...seen].some(f => f.endsWith('src/store/index.ts'))).toBe(true)
     expect(offenders).toEqual([])
   })

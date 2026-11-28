@@ -10,11 +10,12 @@
  */
 
 import { describe, expect, test } from 'bun:test'
-import { existsSync, readFileSync } from 'node:fs'
-import { join, resolve } from 'node:path'
+import { readFileSync } from 'node:fs'
+import { dirname, join, resolve } from 'node:path'
+import { CLI_BUNDLE } from '../scripts/build.ts'
+import { NODE, nodeBundle } from './node-bundle.ts'
 
 const ROOT = resolve(import.meta.dir, '..')
-const BUILT = existsSync(join(resolve(import.meta.dir, '..'), 'dist/openrecall.js'))
 const VERSION = (
   JSON.parse(readFileSync(join(ROOT, 'package.json'), 'utf8')) as { version: string }
 ).version
@@ -41,11 +42,24 @@ describe('openrecall --version', () => {
   })
 
   // The Node build is a separate artifact from source, and a version that was
-  // right under Bun and broken in the bundle is the failure this guards.
-  test.skipIf(!BUILT)('the Node bundle reports the same version', () => {
-    const r = Bun.spawnSync(['node', join(ROOT, 'dist/openrecall.js'), '--version'])
+  // right under Bun and broken in the bundle is the failure this guards. The
+  // bundle is built from the current source for this run (tests/node-bundle.ts),
+  // so a stale dist/ can neither fail nor pass it; only a machine with no
+  // `node` skips it.
+  test.skipIf(!NODE)('the Node bundle reports the same version', async () => {
+    const r = Bun.spawnSync([NODE as string, await nodeBundle(), '--version'])
     expect(r.exitCode).toBe(0)
     expect(r.stdout.toString().trim()).toBe(VERSION)
+  })
+
+  test('the entry is a shim over the bundle, and the bundle carries the version', async () => {
+    // The layout scripts/build.ts documents: a one-screen shim that enables
+    // Node's compile cache and imports the bundle beside it. A version that
+    // ended up read from disk at runtime, rather than inlined, would fail the
+    // second line.
+    const entry = await nodeBundle()
+    expect(readFileSync(entry, 'utf8')).toContain(`await import('./${CLI_BUNDLE}')`)
+    expect(readFileSync(join(dirname(entry), CLI_BUNDLE), 'utf8')).toContain(`"${VERSION}"`)
   })
 
   test('an unknown flag still prints usage and fails', () => {

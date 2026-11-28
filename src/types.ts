@@ -9,6 +9,7 @@
  * client shim is a thin adapter rather than a rewrite.
  */
 
+import type { Frame, FramesHeader } from './frames.ts'
 import type { Erasure } from './store/blobstore.ts'
 
 /** Per-namespace manifest, persisted as its own blob. */
@@ -35,6 +36,8 @@ export function emptyManifest(): Manifest {
 
 /** Full GET response. */
 export type MemoryData = {
+  /** Number of manifest rows, including entries whose blobs could not be read. */
+  entryCount: number
   /** Whether this deployment's store actually erases on delete. */
   erasure: Erasure
   namespace: string
@@ -49,9 +52,7 @@ export type MemoryData = {
   }
 }
 
-/**
- * GET ?view=hashes response — metadata only, no ciphertext bodies.
- */
+/** GET ?view=hashes response — metadata only, no ciphertext bodies. */
 export type MemoryHashes = {
   namespace: string
   version: number
@@ -59,18 +60,10 @@ export type MemoryHashes = {
   checksum: string
   entryChecksums: Record<string, string>
   /**
-   * entryKey -> ISO 8601 of that entry's last write, the same values the full
-   * read reports as `content.entryUpdatedAt`.
-   *
-   * A directory sync needs both halves of this view to resolve a conflict
-   * without downloading bodies: the checksums say WHICH entries changed, and
-   * these timestamps say which side changed last. Without them a client can
-   * only detect that both sides differ and must guess (or ask the user), so
-   * the pair ships together.
-   *
-   * Like every timestamp the server reports, this is server-authored metadata
-   * that nothing authenticates: a caller must treat it as a hint for ordering,
-   * never as proof of when a write happened.
+   * entryKey -> ISO 8601 from the manifest, the same rows `entryChecksums`
+   * comes from. Here so an incremental pull, which fetches bodies only for the
+   * keys whose hash moved, can still report a timestamp for the ones it did
+   * not fetch. A client predating the field ignores it.
    */
   entryUpdatedAt: Record<string, string>
   /** Whether this deployment's store actually erases on delete. */
@@ -123,6 +116,35 @@ export type EntryRead =
   | { status: 'no_namespace' }
   | { status: 'no_entry' }
   | { status: 'unreadable' }
+
+/**
+ * What a bulk entries read found: either no namespace at all (the same `empty`
+ * the other reads answer) or one frame per requested key, each carrying its
+ * own status, ready for `encodeFrames`. Per-key outcomes live in the frames
+ * rather than in a second result shape because one lost body must not fail a
+ * read of everything else, and a client must still hear about it.
+ */
+export type EntriesRead =
+  | { status: 'no_namespace' }
+  | { status: 'ok'; header: FramesHeader; frames: Frame[] }
+
+/**
+ * Validate and narrow the body of `POST ?view=entries`: `{ keys: string[] }`.
+ * Shape only. Each key's own validity is judged per key by `getEntries`, so a
+ * caller that mistyped one of two thousand keys gets one `invalid_key` frame
+ * rather than a refused request, and the count cap is the handler's, since it
+ * comes from config.
+ */
+export function parseEntriesRequest(raw: unknown): string[] {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw new Error('body must be a JSON object')
+  }
+  const keys = (raw as Record<string, unknown>).keys
+  if (!Array.isArray(keys) || keys.some(k => typeof k !== 'string')) {
+    throw new Error('`keys` must be an array of entry keys')
+  }
+  return keys as string[]
+}
 
 /** PUT request body. */
 export type UpsertRequest = {

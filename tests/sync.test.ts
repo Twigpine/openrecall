@@ -183,9 +183,14 @@ describe('memory file listing', () => {
   test('distinguishes a failed listing from a successfully empty directory', async () => {
     expect(await listMemoryFiles(join(tempDir(), 'nope'))).toEqual({
       files: [],
+      links: new Set(),
       complete: false,
     })
-    expect(await listMemoryFiles(tempDir())).toEqual({ files: [], complete: true })
+    expect(await listMemoryFiles(tempDir())).toEqual({
+      files: [],
+      links: new Set(),
+      complete: true,
+    })
   })
 
   test('a directory named *.md is not a memory file', async () => {
@@ -454,6 +459,7 @@ describe('formatSyncReport', () => {
     unchanged: [],
     unresolved: [],
     pruned: [],
+    pruneSkipped: [],
     remoteDeleted: [],
     removedLocal: [],
     skipped: [],
@@ -1114,6 +1120,49 @@ describe('runSync --prune, guarded by pair state', () => {
     expect((await (await realClient()).pull(ns)).entries['a.md']).toBe('v1')
   })
 
+  test.skipIf(!canCreateSymlinks)(
+    'prune skips linked files and trees but applies unrelated deletions',
+    async () => {
+      const ns = 'user:sync-linked-prune'
+      const dir = tempDir()
+      const statePath = join(tempDir(), 'state.json')
+      const client = await realClient()
+      for (const key of ['notes/a.md', 'file.md', 'gone.md']) put(dir, key, key)
+      await runSync(dir, client, { namespace: ns, statePath })
+      const elsewhere = tempDir()
+      for (const key of ['notes', 'file.md']) {
+        renameSync(join(dir, key), join(elsewhere, key))
+        symlinkSync(join(elsewhere, key), join(dir, key))
+      }
+      rmSync(join(dir, 'gone.md'))
+      const result = await runSync(dir, client, { namespace: ns, statePath, prune: true })
+      expect(result.pruned).toEqual(['gone.md'])
+      expect((await client.pull(ns)).entries).toEqual({
+        'notes/a.md': 'notes/a.md',
+        'file.md': 'file.md',
+      })
+    },
+  )
+
+  test('a file restored locally after the listing cancels its remote prune', async () => {
+    const ns = 'user:sync-restored-before-prune'
+    const dir = tempDir()
+    const statePath = join(tempDir(), 'state.json')
+    const client = await realClient()
+    put(dir, 'note.md', 'remote copy')
+    await runSync(dir, client, { namespace: ns, statePath })
+    rmSync(join(dir, 'note.md'))
+    const metadata = client.metadata.bind(client)
+    client.metadata = async (...args) => {
+      put(dir, 'note.md', 'fresh local copy')
+      return metadata(...args)
+    }
+    const report = await runSync(dir, client, { namespace: ns, statePath, prune: true })
+    expect(report.pruned).toEqual([])
+    expect(report.pruneSkipped).toEqual(['note.md'])
+    expect((await client.pull(ns)).entries['note.md']).toBe('remote copy')
+  })
+
   test('an existing empty directory still prunes recorded keys', async () => {
     const ns = 'user:sync-prune-empty'
     const dir = tempDir()
@@ -1278,8 +1327,12 @@ describe('runSync remote deletions', () => {
     expect(readFileSync(path, 'utf8')).toBe('edited during the sync')
   })
 
-  test('--prefer remote keeps the file when the key reappears before removal', async () => {
-    const ns = 'user:sync-remote-delete-reappear'
+  test.each([
+    'restore remotely',
+    'edit locally',
+  ])('--prefer remote rechecks before removal: %s', async change => {
+    const ns =
+      change === 'edit locally' ? 'user:sync-late-edit' : 'user:sync-remote-delete-reappear'
     const dir = tempDir()
     const state = join(tempDir(), 'state.json')
     const path = put(dir, 'gone.md', 'local copy')
@@ -1324,18 +1377,36 @@ describe('runSync remote deletions', () => {
     await started
     // The plan saw a deletion; another client restores the key while the
     // removal is about to unlink the local file.
-    await other.push(ns, { 'gone.md': 'restored remotely' })
+    if (change === 'edit locally') put(dir, 'gone.md', 'fresh edit', Date.now() + 60_000)
+    else await other.push(ns, { 'gone.md': 'restored remotely' })
     releaseRecheck?.()
     const r = await run
 
     expect(r.removedLocal).toEqual([])
     expect(r.remoteDeleted).toEqual(['gone.md'])
-    expect(readFileSync(path, 'utf8')).toBe('local copy')
-    expect((await other.pull(ns)).entries['gone.md']).toBe('restored remotely')
+    expect(readFileSync(path, 'utf8')).toBe(change === 'edit locally' ? 'fresh edit' : 'local copy')
+    const remote = (await other.pull(ns)).entries
+    if (change === 'edit locally') expect(Object.hasOwn(remote, 'gone.md')).toBe(false)
+    else expect(remote['gone.md']).toBe('restored remotely')
   })
 })
 
 describe('sync state under concurrent syncs', () => {
+  test('sync history is scoped to the remote account or local data directory', async () => {
+    const { syncStatePath } = await import('../src/cli/sync.ts')
+    const settings = {
+      home: '/home/example',
+      url: 'https://one.example',
+      dataDir: '/data/one',
+      apiKey: 'one',
+    }
+    const remote = syncStatePath(settings)
+    expect(syncStatePath({ ...settings, apiKey: 'two' })).not.toBe(remote)
+    expect(syncStatePath({ ...settings, url: 'https://two.example' })).not.toBe(remote)
+    expect(syncStatePath({ ...settings, url: 'local' })).not.toBe(
+      syncStatePath({ ...settings, url: 'local', dataDir: '/data/two' }),
+    )
+  })
   test('different pairs share one state file without losing baselines', async () => {
     const state = join(tempDir(), 'state.json')
     const cases = Array.from({ length: 8 }, (_, i) => {
@@ -1421,6 +1492,9 @@ describe('sync state under concurrent syncs', () => {
 
     const first = runSync(dir, delayed, { namespace: ns, statePath: state })
     await started
+    // A paused process can miss every heartbeat and still own its sync lock.
+    const path = `${state}.${await syncStateKeyOf(dir, ns)}.sync-lock`
+    touch(path, Date.now() - 120_000)
     const second = runSync(dir, delayed, { namespace: ns, statePath: state })
     // Without a pair lock the second run reaches its metadata read at once and
     // finishes with baselines captured before the first run's upload.

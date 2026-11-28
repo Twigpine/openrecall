@@ -53,7 +53,8 @@ import { dirname, join, resolve, sep } from 'node:path'
 import type { OpenRecallClient } from '../../client/index.ts'
 import { flattenServerText } from '../../client/index.ts'
 import { sha256Hex } from '../hash.ts'
-import { withDirLock } from './local.ts'
+import { withLockFile } from './local.ts'
+import { LOCAL_URL, type Settings } from './settings.ts'
 
 /** Only markdown files mirror, matching what `push` uploads and agents keep. */
 const MEMORY_EXTENSION = '.md'
@@ -76,7 +77,7 @@ const POLL_FALLBACK_SEC = 5
 export type MemoryFile = { key: string; path: string }
 
 /** A directory walk plus whether it saw the whole tree. */
-export type MemoryListing = { files: MemoryFile[]; complete: boolean }
+export type MemoryListing = { files: MemoryFile[]; complete: boolean; links: Set<string> }
 
 /**
  * Every `.md` file under `dir`, at any depth, with `/`-separated entry keys.
@@ -100,6 +101,7 @@ export type MemoryListing = { files: MemoryFile[]; complete: boolean }
  */
 export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
   const files: MemoryFile[] = []
+  const links = new Set<string>()
   let complete = true
   const pending: { path: string; prefix: string }[] = [{ path: dir, prefix: '' }]
 
@@ -117,7 +119,10 @@ export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
     for (const entry of entries) {
       const key = current.prefix === '' ? entry.name : `${current.prefix}/${entry.name}`
       const path = join(current.path, entry.name)
-      if (entry.isSymbolicLink()) continue
+      if (entry.isSymbolicLink()) {
+        links.add(key)
+        continue
+      }
       if (entry.isDirectory()) {
         pending.push({ path, prefix: key })
         continue
@@ -128,6 +133,7 @@ export async function listMemoryFiles(dir: string): Promise<MemoryListing> {
   }
 
   return {
+    links,
     files: files.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0)),
     complete,
   }
@@ -240,6 +246,22 @@ export function safeJoin(root: string, key: string): string | null {
   return dest
 }
 
+/** Recheck a planned local deletion without following a link or creating a directory. */
+async function stillMissing(root: string, key: string): Promise<boolean> {
+  if (!safeJoin(root, key) || !(await stat(root).catch(() => null))?.isDirectory()) return false
+  let path = root
+  for (const segment of key.split('/')) {
+    path = join(path, segment)
+    const info = await lstat(path).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null
+      throw err
+    })
+    if (info === null) return true
+    if (!info.isDirectory()) return false
+  }
+  return false
+}
+
 /** True when `path` is `root` itself or below it. */
 function isInside(root: string, path: string): boolean {
   if (path === root) return true
@@ -342,7 +364,12 @@ async function writeDownloadedFile(
   const rootReal = await realpath(root).catch(() => null)
   if (rootReal === null) throw readError(`cannot resolve ${root}`, 'ENOENT')
 
-  const handle = await open(path, constants.O_WRONLY | constants.O_CREAT | constants.O_NOFOLLOW)
+  const flags =
+    constants.O_WRONLY | constants.O_NOFOLLOW | (planned ? 0 : constants.O_CREAT | constants.O_EXCL)
+  const handle = await open(path, flags, 0o600).catch((err: NodeJS.ErrnoException) => {
+    if (err.code === 'EEXIST') throw readError(`${path} appeared before download`, 'ECHANGED')
+    throw err
+  })
   try {
     const info = await handle.stat({ bigint: true })
     if (!info.isFile()) throw readError(`${path} is not a regular file`, 'ENOTREG')
@@ -558,6 +585,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
 }
 
+/** A baseline belongs to one store and account, even if the home and namespace are reused. */
+export function syncStatePath(s: Pick<Settings, 'home' | 'url' | 'apiKey' | 'dataDir'>): string {
+  const identity =
+    s.url === LOCAL_URL ? [LOCAL_URL, resolve(s.dataDir)] : [new URL(s.url).href, s.apiKey ?? null]
+  return join(s.home, 'sync', sha256Hex(JSON.stringify(identity)), 'state.json')
+}
+
 /** The state key for one (directory, namespace) pair. */
 export function syncStateKey(dir: string, namespace: string): string {
   return sha256Hex(`${namespace}\n${resolve(dir)}`)
@@ -660,7 +694,7 @@ async function updateSyncState(
   update: (pair: SyncBaselines) => SyncBaselines,
 ): Promise<void> {
   await mkdir(dirname(path), { recursive: true, mode: 0o700 })
-  await withDirLock(`${path}.lock`, async () => {
+  await withLockFile(`${path}.lock`, async () => {
     const state = await readSyncState(path)
     state.pairs[stateKey] = update(state.pairs[stateKey] ?? {})
     await writeSyncState(path, state)
@@ -693,6 +727,7 @@ export type SyncReport = {
   unchanged: string[]
   unresolved: string[]
   pruned: string[]
+  pruneSkipped: string[]
   /** Remote deletions surfaced when no preference was given. */
   remoteDeleted: string[]
   /** Local files removed because `--prefer remote` won a remote deletion. */
@@ -702,11 +737,6 @@ export type SyncReport = {
   /** Downloads that were planned but not written. */
   downloadSkipped: { key: string; reason: DownloadSkipReason }[]
 }
-
-/** Longest a sync lock may sit unrefreshed before another process takes it. */
-const SYNC_LOCK_STALE_MS = 60_000
-/** Refresh cadence, comfortably below the stale threshold. */
-const SYNC_LOCK_HEARTBEAT_MS = 15_000
 
 /**
  * Sync `dir` with `opts.namespace` once and report exactly what moved.
@@ -738,10 +768,10 @@ export async function runSync(
   // looking abandoned while another process waits.
   const statePath = opts.statePath
   await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
-  return withDirLock(
+  return withLockFile(
     `${statePath}.${stateKey}.sync-lock`,
     () => syncOnce(root, ns, client, opts, stateKey),
-    { staleMs: SYNC_LOCK_STALE_MS, heartbeatMs: SYNC_LOCK_HEARTBEAT_MS },
+    Number.POSITIVE_INFINITY,
   )
 }
 
@@ -796,12 +826,23 @@ async function syncOnce(
   // push below is refused (409) rather than silently clobbered.
   const meta = await client.metadata(ns)
   const remote: Record<string, RemoteEntry> = {}
+  const skippedLinks: string[] = []
   for (const [key, hash] of Object.entries(meta.entryChecksums)) {
     // The local walker only sees `.md` files, so a namespace may also hold
     // MCP-saved keys like `prefs`. Sync never plans, downloads, or prunes those:
     // treating a key it cannot see locally as a local deletion would delete a
     // remote-only entry on the next --prune run.
     if (!key.endsWith(MEMORY_EXTENSION)) continue
+    // A skipped link or its descendants are outside this mirror. Dropping
+    // them from the plan and the next baseline prevents a later false prune.
+    let prefix = key
+    while (!listing.links.has(prefix) && prefix.includes('/')) {
+      prefix = prefix.slice(0, prefix.lastIndexOf('/'))
+    }
+    if (listing.links.has(prefix)) {
+      skippedLinks.push(key)
+      continue
+    }
     remote[key] = { hash, updatedAt: meta.entryUpdatedAt[key] }
   }
 
@@ -823,10 +864,11 @@ async function syncOnce(
     unchanged: [],
     unresolved: [],
     pruned: [],
+    pruneSkipped: [],
     remoteDeleted: [],
     removedLocal: [],
     skipped: [],
-    downloadSkipped: [],
+    downloadSkipped: skippedLinks.map(key => ({ key, reason: 'unsafe_key' })),
   }
   for (const a of plan.actions) {
     if (a.kind === 'unchanged') report.unchanged.push(a.key)
@@ -948,13 +990,23 @@ async function syncOnce(
   // ── Prunes ──
   for (const a of plan.actions) {
     if (a.kind !== 'prune') continue
-    await client.delete(ns, a.key)
-    report.pruned.push(a.key)
+    if (!(await stillMissing(root, a.key))) {
+      report.pruneSkipped.push(a.key)
+      continue
+    }
+    if ((await client.delete(ns, a.key)).deleted) report.pruned.push(a.key)
   }
 
   // ── Local removals (--prefer remote on a remote deletion) ──
   for (const a of plan.actions) {
     if (a.kind !== 'remove-local') continue
+    // Verify the remote deletion before the final local check: the network
+    // request can outlast an editor save.
+    const fresh = await client.metadata(ns, { observe: false })
+    if (Object.hasOwn(fresh.entryChecksums, a.key)) {
+      report.remoteDeleted.push(a.key)
+      continue
+    }
     const dest = await canonicalTarget(root, a.key, true)
     if (dest === null) {
       // The key is unsafe to touch; leave the file and keep reporting the
@@ -967,23 +1019,15 @@ async function syncOnce(
     // fetching must not be deleted. `lstat` also treats a substituted symlink
     // as a local change instead of following it.
     const planned = Object.hasOwn(local, a.key) ? local[a.key] : undefined
-    const current = await lstat(dest).catch(() => null)
+    const current = await lstat(dest).catch((err: NodeJS.ErrnoException) => {
+      if (err.code === 'ENOENT') return null
+      throw err
+    })
     if (
       planned !== undefined &&
       current !== null &&
       (!current.isFile() || current.mtimeMs !== planned.mtimeMs)
     ) {
-      report.remoteDeleted.push(a.key)
-      continue
-    }
-    // The plan's remote deletion was observed at the start of the sync. Another
-    // client can restore the key while downloads and uploads run; the mtime
-    // guard above only catches edits made after the local snapshot, not a local
-    // edit that was already there. Re-read metadata immediately before
-    // unlinking: content that is back is something the next sync must
-    // reconcile, never a local file this run may delete.
-    const fresh = await client.metadata(ns, { observe: false })
-    if (Object.hasOwn(fresh.entryChecksums, a.key)) {
       report.remoteDeleted.push(a.key)
       continue
     }
@@ -1000,18 +1044,6 @@ async function syncOnce(
   // Record each key's last-synced hash, not just its name. The hash is what
   // lets the NEXT sync tell a one-sided change from clock skew, and what makes
   // it safe to prune only a remote entry that has not changed since.
-  // Track symlink keys from the listing so we can exclude only those from
-  // baseline recording/pruning, rather than skipping all baselines when the
-  // listing is incomplete. This preserves baselines for non-symlink keys
-  // even during incomplete listings, while still safeguarding against prune
-  // decisions for paths that were symlinks and may have been displaced.
-  const symlinkKeysFromListing: Set<string> = new Set()
-  if (listing.complete === false && listing.files) {
-    // Build a set of keys that were symlinks during the directory walk.
-    // The `local` object only contains keys from non-symlink files because
-    // listMemoryFiles skips them, but we capture any symlink awareness here
-    // for the pruning guard below.
-  }
   if (opts.statePath) {
     const uploaded = new Set(report.uploaded.map(u => u.key))
     const unchanged = new Set(report.unchanged)
@@ -1020,17 +1052,9 @@ async function syncOnce(
 
     // The update is applied to the latest state under a lock, so a concurrent
     // sync of another pair keeps the baseline it recorded while this one ran.
-    // Exclude keys that were symlinks in the directory listing from baseline
-    // recording to prevent stale baselines from causing incorrect prune
-    // decisions on remote entries under those paths.
     await updateSyncState(opts.statePath, stateKey, oldPair => {
       const nextPair: SyncBaselines = {}
       for (const key of Object.keys(local)) {
-        // Skip keys that corresponded to symlinks in the directory walk.
-        // These keys were not uploaded/downloaded because listMemoryFiles
-        // skips symlinks, so recording their baselines could lead to stale
-        // state that drives incorrect --prune behavior later.
-        if (symlinkKeysFromListing.has(key)) continue
         if (downloadedHashes.has(key)) nextPair[key] = downloadedHashes.get(key) ?? null
         else if (uploaded.has(key) || unchanged.has(key)) nextPair[key] = local[key]?.hash ?? null
         else if (removedLocal.has(key)) continue
@@ -1038,11 +1062,6 @@ async function syncOnce(
       }
       for (const key of Object.keys(remote)) {
         if (Object.hasOwn(local, key) || pruned.has(key)) continue
-        // When the listing had symlinks, also skip remote entries that
-        // correspond to those symlinked paths to prevent stale baselines
-        // from driving prune decisions.
-        // Note: we check local symlink tracking; remote symlink paths are
-        // handled by the prune guard below.
         if (downloadedHashes.has(key)) nextPair[key] = downloadedHashes.get(key) ?? null
         else if (Object.hasOwn(oldPair, key)) nextPair[key] = oldPair[key] ?? null
       }
@@ -1106,6 +1125,8 @@ export function formatSyncReport(r: SyncReport, dir: string): SyncReportLines {
       `  ! ${flattenServerText(key, 300)} was deleted remotely since the last sync; the local ` +
         'file was kept. Re-run with --prefer remote to remove it, or --prefer local to restore it.',
     )
+  for (const key of r.pruneSkipped)
+    err.push(`  ! ${flattenServerText(key, 300)} kept remotely (local path changed during sync)`)
   for (const x of r.downloadSkipped)
     err.push(
       `  ✗ ${flattenServerText(x.key, 300)} not downloaded ` +

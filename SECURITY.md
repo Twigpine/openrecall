@@ -42,6 +42,19 @@ The passphrase lives in `~/.openrecall/config.json` (created owner-only, 0600)
 or the environment, and is read only by the local CLI / MCP server process.
 Agent configs written by `openrecall setup` never contain it.
 
+In remote mode the client also keeps a cache under `~/.openrecall/cache`. Each
+combination of remote endpoint and API key selects its own directory. Within it are the
+ciphertext blobs it has already fetched, named by their own hash, plus one
+`ns/<namespace-slug>/mirror.json` holding entry keys, ciphertext hashes, sizes and
+timestamps. That is exactly the metadata the server sees and nothing more:
+no plaintext and no search index is ever written there, and decrypted entries
+live only in the memory of the running process. The directory is created
+0700 and its files 0600, the same custody model as `config.json`, so it is
+as exposed as the passphrase already is and no more. It lets a recall against
+an unchanged namespace cost one bodyless request, and lets a recall be
+answered from disk when the server cannot be reached (the result says so).
+The server still sees only ciphertext. `OPENRECALL_CACHE=off` turns it off.
+
 **The server can see:** namespace ids, entry keys (paths), ciphertext blobs,
 ciphertext byte sizes and hashes, and timestamps. **The server cannot see:**
 memory plaintext, your passphrase, or the derived key.
@@ -66,6 +79,14 @@ We're especially interested in reports that break these properties:
 - **Byte-identical entries are detectable.** The deterministic nonce that enables
   delta sync reveals whether two ciphertext entries are identical. Documented
   trade-off in `client/crypto.ts`.
+- **Ciphertext is collected after its last manifest reference is removed.**
+  A write that removes the last reference to a blob also removes that blob (both shipped drivers,
+  `fs` and `s3`, report `erasure: 'erases'`). If that removal fails, or a
+  crashed write left a blob no entry names, a sweep of the namespace's blob
+  prefix is attempted within 32 further writes to that namespace or on its
+  first write after restart. Removal depends on successful storage operations.
+  On the filesystem backend, this sweep covers blobs renamed to their final
+  paths. A crash before rename can leave a temporary file on disk.
 - **Metadata is visible to the host** (namespace ids, entry keys, sizes,
   timestamps) — see scope above. A future tier may hash entry keys.
 - **Single-instance hosted beta.** The hosted deployment runs one instance on

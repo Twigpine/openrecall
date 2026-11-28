@@ -1,8 +1,8 @@
 /**
  * Drives `openrecall mcp` exactly as an agent does: spawn it, speak MCP over
- * stdio, call the tools. Runs against the source (Bun) and, when present, the
- * published Node bundle (dist/openrecall.js — `bun run build` first), so we know
- * `npx -y @twigpine/openrecall mcp` works without Bun.
+ * stdio, call the tools. Runs against the source (Bun) and against a Node
+ * bundle built from that same source for this run (tests/node-bundle.ts), so
+ * we know `npx -y @twigpine/openrecall mcp` works without Bun.
  *
  * Two server processes share one local store to prove what one agent saves,
  * another agent recalls.
@@ -14,6 +14,9 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js'
+import { TIMING_FIELDS } from '../src/log.ts'
+import { TIMINGS_META } from '../src/mcp/server.ts'
+import { NODE, nodeBundle } from './node-bundle.ts'
 
 const homes: string[] = []
 afterAll(() => {
@@ -30,11 +33,15 @@ type Launcher = { name: string; command: string; args: string[] }
 const launchers: Launcher[] = [
   { name: 'source (bun)', command: process.execPath, args: ['bin/openrecall.ts'] },
 ]
-if (existsSync('dist/openrecall.js')) {
-  launchers.push({ name: 'dist (node)', command: 'node', args: ['dist/openrecall.js'] })
-}
+// Never a stale dist/: the bundle is built from the current source, so the Node
+// launcher is exercised on every run that has a `node`.
+if (NODE) launchers.push({ name: 'bundle (node)', command: NODE, args: [await nodeBundle()] })
 
-async function connect(l: Launcher, env: Record<string, string>): Promise<Client> {
+async function connect(
+  l: Launcher,
+  env: Record<string, string>,
+  stderr?: string[],
+): Promise<Client> {
   // Strip the test preload's server env so the child resolves its own settings.
   const base = Object.fromEntries(
     Object.entries(process.env).filter(
@@ -43,15 +50,31 @@ async function connect(l: Launcher, env: Record<string, string>): Promise<Client
     ),
   ) as Record<string, string>
   const client = new Client({ name: 'test-agent', version: '0.0.0' })
-  await client.connect(
-    new StdioClientTransport({
-      command: l.command,
-      args: [...l.args, 'mcp'],
-      env: { ...base, ...env },
-      stderr: 'pipe',
-    }),
-  )
+  const transport = new StdioClientTransport({
+    command: l.command,
+    args: [...l.args, 'mcp'],
+    env: { ...base, ...env },
+    stderr: 'pipe',
+  })
+  await client.connect(transport)
+  // The child exists only after connect; anything it wrote before this point
+  // (the ready line) is not collected, which is fine for a caller that wants
+  // what the tool calls below write.
+  if (stderr) transport.stderr?.on('data', (chunk: Buffer) => stderr.push(chunk.toString()))
   return client
+}
+
+/** Wait for the child's stderr to carry a line satisfying `pred`, up to 2 s. */
+async function stderrLine(
+  lines: string[],
+  pred: (line: string) => boolean,
+): Promise<string | undefined> {
+  for (let i = 0; i < 40; i++) {
+    const hit = lines.join('').split('\n').slice(0, -1).find(pred)
+    if (hit) return hit
+    await new Promise(r => setTimeout(r, 50))
+  }
+  return undefined
 }
 
 const text = (r: unknown) =>
@@ -125,6 +148,58 @@ for (const l of launchers) {
         }
       } finally {
         await Promise.all([agentA.close(), agentB.close()])
+      }
+    }, 30_000)
+
+    test('stage timings ride in _meta; OPENRECALL_TIMINGS=1 adds a trailer and a stderr line', async () => {
+      const home = freshHome()
+      const quiet = await connect(l, { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p' })
+      try {
+        await quiet.callTool({
+          name: 'memory_save',
+          arguments: { key: 'build.md', content: 'The build runs on bun.' },
+        })
+        const r = await quiet.callTool({
+          name: 'memory_recall',
+          arguments: { query: 'what runs the build' },
+        })
+        const meta = (r as { _meta?: Record<string, unknown> })._meta
+        expect(meta?.[TIMINGS_META]).toMatchObject({ entries: 1 })
+        // Off by default: the model's context carries nothing extra.
+        expect(text(r)).not.toContain('[timings')
+      } finally {
+        await quiet.close()
+      }
+
+      const errLines: string[] = []
+      const loud = await connect(
+        l,
+        { OPENRECALL_HOME: home, OPENRECALL_PASSPHRASE: 'p', OPENRECALL_TIMINGS: '1' },
+        errLines,
+      )
+      try {
+        const r = await loud.callTool({
+          name: 'memory_recall',
+          arguments: { query: 'what runs the build' },
+        })
+        expect(text(r)).toMatch(
+          /\n\n\[timings fetch=[\d.]+ms decrypt=[\d.]+ms rank=[\d.]+ms format=[\d.]+ms total=[\d.]+ms entries=1 bytes=\d+\]$/,
+        )
+        const line = await stderrLine(errLines, s => s.includes('"tool":"memory_recall"'))
+        expect(line).toBeDefined()
+        const parsed = JSON.parse(line as string) as Record<string, unknown>
+        expect(Object.keys(parsed).sort()).toEqual([...TIMING_FIELDS].sort())
+        // The line is produced where everything is plaintext, and goes into
+        // the launcher's log: nothing but counts and durations may be in it.
+        // (The ready line names the configured namespace; that is startup
+        // output, not a tool-call log line, so only the timing line is held
+        // to the allowlist.)
+        const all = errLines.join('')
+        expect(all).not.toContain('what runs the build')
+        expect(all).not.toContain('build.md')
+        expect(line).not.toContain('user:me')
+      } finally {
+        await loud.close()
       }
     }, 30_000)
 
